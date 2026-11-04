@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { OWNER_ACTOR } from '../src/capability/index.js';
+import { createCapabilityService } from '../src/capability/service.js';
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-agent-collab-'));
 const services = createCetaMeshServices({ stateDir: path.join(root, 'state'), dataRoot: path.join(root, 'data') });
@@ -423,4 +424,117 @@ try {
 } finally {
   await services.capabilityService.close();
   fs.rmSync(root, { recursive: true, force: true });
+}
+
+// Production services with only Agent creation/acknowledgement controlled. No models.
+for (const { differentParents, barrierPhase } of [false, true].flatMap(differentParents =>
+  ['create', 'send'].map(barrierPhase => ({ differentParents, barrierPhase })))) {
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'cetamesh-pending-readers-'));
+  const stateDir = path.join(base, 'state');
+  const local = createCetaMeshServices({ stateDir, dataRoot: path.join(base, 'data') });
+  const entered = Promise.withResolvers(), release = Promise.withResolvers();
+  let first;
+  try {
+    const project = path.join(base, 'workspace'); fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, 'input.txt'), 'unchanged source');
+    const { workspace } = await local.workspaceService.execute({ method: 'workspace.create', params: { root: project, name: 'Pending readers' } });
+    const rt = local.taskService.runtime;
+    const parents = [0, 1, 2].map(i => rt.create({ goal: `Parent ${i}`, workspaceId: workspace.id }));
+    const contract = { mode: 'read-only', outputKind: 'analysis', readScope: ['input.txt'], expectedEvidence: ['source evidence'] };
+    const children = [0, 1, 2].map(i => {
+      const parent = parents[i === 1 && !differentParents ? 0 : i];
+      return rt.createChild({ parentTaskId: parent.id, expectedParentRev: parent.rev, requestId: `child-${i}`,
+        goal: `Independent reader ${i}`, workspaceId: workspace.id, contract });
+    });
+    const writer = rt.create({ goal: 'Separate writer', workspaceId: workspace.id });
+    const create = local.agentBroker.createSession.bind(local.agentBroker);
+    let firstSessionId;
+    let createCalls = 0, sendCalls = 0;
+    local.agentBroker.createSession = async (provider, params) => {
+      createCalls++;
+      if (params.taskId === children[0].id && barrierPhase === 'create') { entered.resolve(); await release.promise; }
+      const created = await create(provider, params);
+      if (params.taskId === children[0].id) firstSessionId = created.sessionId;
+      return created;
+    };
+    local.agentBroker.send = async row => {
+      sendCalls++;
+      if (row.sessionId === firstSessionId && barrierPhase === 'send') { entered.resolve(); await release.promise; }
+      return { accepted: true, requestId: row.runId };
+    };
+    const run = (task, requestId, capability = local.capabilityService) => capability.broker.execute({
+      requestId, actor: OWNER_ACTOR, taskId: task.id, workspaceId: workspace.id,
+      capability: 'agent.run', input: { agentProvider: 'cetamesh', content: task.goal }
+    });
+    first = run(children[0], 'pending-first');
+    first.catch(() => {});
+    await entered.promise;
+    const duplicate = run(children[0], 'pending-first');
+    duplicate.catch(() => {});
+    if (differentParents && barrierPhase === 'create') {
+      const changed = rt.update({ id: parents[0].id, expectedRev: parents[0].rev, goal: 'Changed Owner goal' });
+      await assert.rejects(run(children[1], 'stale-contract-second'), { code: 'TASK_WORKSPACE_BUSY' },
+        'an in-flight reservation whose parent contract changed is not proof of an authorized reader');
+      rt.update({ id: parents[0].id, expectedRev: changed.rev, goal: parents[0].goal });
+    }
+    assert.equal((await run(children[1], 'pending-second')).result.accepted, true,
+      'a second read-only child may start while the first Session is being created');
+    assert.equal(createCalls, 2, 'an exact repeated dispatch shares the first request rather than creating a Session');
+    await assert.rejects(run(children[2], 'pending-third'), { code: 'TASK_WORKSPACE_BUSY' },
+      'pending and attached readers count once each, across parents');
+    await assert.rejects(run(writer, 'pending-writer'), { code: 'TASK_WORKSPACE_BUSY' });
+    release.resolve();
+    assert.deepEqual(await duplicate, await first);
+    assert.equal(sendCalls, 2);
+    await assert.rejects(run(children[2], 'active-third'), { code: 'TASK_WORKSPACE_BUSY' });
+    assert.equal(fs.readFileSync(path.join(project, 'input.txt'), 'utf8'), 'unchanged source');
+    console.log('PASS concurrent read-only provisioning, duplicate request, two-reader bound and writer fence', { differentParents, barrierPhase });
+  } finally {
+    release.resolve(); await first?.catch(() => {});
+    await local.capabilityService.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
+}
+
+{
+  const base = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'cetamesh-orphan-reader-'));
+  const stateDir = path.join(base, 'state');
+  const local = createCetaMeshServices({ stateDir, dataRoot: path.join(base, 'data') });
+  let rebuilt;
+  try {
+    const project = path.join(base, 'workspace'); fs.mkdirSync(project);
+    fs.writeFileSync(path.join(project, 'input.txt'), 'original');
+    const { workspace } = await local.workspaceService.execute({ method: 'workspace.create', params: { root: project, name: 'Orphan reader' } });
+    const rt = local.taskService.runtime;
+    const parent = rt.create({ goal: 'Read source', workspaceId: workspace.id });
+    const children = [0, 1].map(i => rt.createChild({ parentTaskId: parent.id, expectedParentRev: parent.rev,
+      requestId: `orphan-child-${i}`, goal: `Read ${i}`, workspaceId: workspace.id,
+      contract: { mode: 'read-only', outputKind: 'analysis', readScope: ['input.txt'], expectedEvidence: ['source'] } }));
+    const run = (capability, task, requestId) => capability.broker.execute({ requestId, actor: OWNER_ACTOR,
+      taskId: task.id, workspaceId: workspace.id, capability: 'agent.run', input: { agentProvider: 'cetamesh', content: task.goal } });
+    const attach = rt.attachAgent, block = rt.block, close = local.agentBroker.closeSession;
+    const fault = code => Object.assign(new Error(code), { code });
+    rt.attachAgent = () => { throw fault('FIXTURE_ATTACH_FAILED'); };
+    rt.block = () => { throw fault('FIXTURE_BLOCK_FAILED'); };
+    local.agentBroker.closeSession = async () => { throw fault('INVOKE_CANCEL_UNCONFIRMED'); };
+    let sends = 0; local.agentBroker.send = async () => { sends++; return { accepted: true }; };
+    try { await assert.rejects(run(local.capabilityService, children[0], 'orphan-dispatch'), { code: 'FIXTURE_ATTACH_FAILED' }); }
+    finally { rt.attachAgent = attach; rt.block = block; local.agentBroker.closeSession = close; }
+    assert.equal(rt.get({ id: children[0].id }).task.currentAgent, null, 'failed attachment cannot be mistaken for no reservation');
+    const journal = JSON.parse(fs.readFileSync(path.join(stateDir, 'capability', 'requests.json'), 'utf8'));
+    assert.ok(journal['orphan-dispatch'].workspaceFence, 'durable fence remains despite failed Task persistence');
+    await assert.rejects(run(local.capabilityService, children[1], 'orphan-sibling'), { code: 'TASK_WORKSPACE_BUSY' });
+    await assert.rejects(run(local.capabilityService, children[0], 'orphan-same-task'), { code: 'TASK_RECOVERY_REVIEW_REQUIRED' });
+    await assert.rejects(run(local.capabilityService, children[0], 'orphan-dispatch'),
+      error => ['REQUEST_RECOVERY_REQUIRED', 'OUTCOME_UNKNOWN'].includes(error.code), 'an uncertain request cannot replay');
+    await local.capabilityService.close();
+    rebuilt = createCapabilityService({ stateDir, taskRuntime: rt, workspaceService: local.workspaceService, agentBroker: local.agentBroker });
+    await assert.rejects(run(rebuilt, children[1], 'restart-sibling'), { code: 'TASK_WORKSPACE_BUSY' });
+    await assert.rejects(run(rebuilt, children[0], 'restart-original'), { code: 'TASK_RECOVERY_REVIEW_REQUIRED' });
+    assert.equal(sends, 0);
+    console.log('PASS failed read-only attachment keeps orphan fence and replay denial across service reconstruction');
+  } finally {
+    await rebuilt?.close(); await local.capabilityService.close();
+    fs.rmSync(base, { recursive: true, force: true });
+  }
 }

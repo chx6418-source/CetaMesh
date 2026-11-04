@@ -419,6 +419,20 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       throw error;
     }
   };
+  function activeReadOnlyProvisioning(fence) {
+    // A durable fence alone is unknown ownership, including after restart. Only
+    // the live request/reservation and current child contract prove a reader.
+    if (fence.provider !== 'cetamesh' || journal[fence.requestId]?.status !== 'in-flight'
+      || !requests.has(fence.requestId) || !provisioning.has(fence.taskId)
+      || !workspaceReadProvisioning.get(fence.workspaceId)?.has(fence.taskId)) return false;
+    const task = taskFor(fence.taskId);
+    if (!task?.parentTaskId || task.childContract?.mode !== 'read-only'
+      || task.workspaceId !== fence.workspaceId || !['queued', 'running'].includes(task.status)
+      || task.recoveryIntent || /needs-reconciliation/i.test(task.progress?.note ?? '')
+      || (task.currentAgent && task.currentAgent.provider !== 'cetamesh')) return false;
+    try { taskRuntime.assertChildParentCurrent({ id: task.id, workspaceId: fence.workspaceId }); return true; }
+    catch { return false; }
+  }
   const resolveWorkspace = id => workspaceService?.describeWorkspace(id);
   const policy = createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor,
     resolveGrants: taskId => grants[taskId],
@@ -1049,7 +1063,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       const otherWriter = [...workspaceProvisioning].find(([id, held]) =>
         held.taskId !== reservedTaskId && workspacesOverlap(id, reservedWorkspaceId))?.[1];
       const fencedWriter = workspaceFences().find(row => row.taskId !== reservedTaskId
-        && workspacesOverlap(row.workspaceId, reservedWorkspaceId));
+        && workspacesOverlap(row.workspaceId, reservedWorkspaceId)
+        && !(readOnlyChild && activeReadOnlyProvisioning(row)));
       const activeReaders = taskRuntime.activeWorkspaceReaders({ workspaceId: task.workspaceId, exceptTaskId: task.id });
       const otherReaders = new Set(activeReaders.map(row => row.id));
       for (const [id, readers] of workspaceReadProvisioning) {
@@ -1095,7 +1110,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         const queuedOwner = taskRuntime.activeWorkspaceOwner({ workspaceId: task.workspaceId,
           exceptTaskId: task.id, forReadOnlyTaskId: readOnlyChild ? task.id : null });
         const queuedFence = workspaceFences().find(row => row.taskId !== task.id
-          && workspacesOverlap(row.workspaceId, task.workspaceId));
+          && workspacesOverlap(row.workspaceId, task.workspaceId)
+          && !(readOnlyChild && activeReadOnlyProvisioning(row)));
         if (queuedOwner || queuedFence) {
           const blockingTaskId = queuedOwner?.id ?? queuedFence.taskId;
           const error = Object.assign(capabilityError('TASK_WORKSPACE_BUSY',
