@@ -45,7 +45,7 @@ const REGISTRY = {
   'test-owner-recovery-races.mjs': {category:'runtime',timeoutMs:60000,note:'Owner review binds exact effects across asynchronous stop checks and approval recovery'},
   'test-owner-session-recovery.mjs': {category:'runtime',timeoutMs:120000,note:'Same Task recovery, exact stopped-session proof, Owner content review and Workspace ownership'},
   'test-codex-session-lifecycle.mjs': {category:'security',timeoutMs:120000,note:'Durable exact Codex lifecycle receipts, restart inspection and unknown execution refusal'},
-  'test-codex-owned-supervisor.mjs': {category:'security',timeoutMs:120000,note:'Owned Windows Job descendants, exact cancellation receipt and fail-closed native launch'},
+  'test-codex-owned-supervisor.mjs': {category:'security',requires:['native-product','shell-debug'],timeoutMs:120000,note:'Opt-in native owned Windows Job descendants, exact cancellation receipt and fail-closed launch'},
   'test-workspace-recovery-proof.mjs': {category:'security',timeoutMs:120000,note:'Bounded real non-Git Workspace content proof, staging boundaries and race refusal'},
   'test-native-task-lifecycle.mjs': {category:'desktop',requires:['native-product','shell-debug'],timeoutMs:240000,note:'Zero-model native WebView2 Task creation, child cancellation, Git rejection and restart'},
   'test-snowluma-retirement.mjs': {category:'security',timeoutMs:120000,note:'Retired branded integration identifiers cannot launch, remap or regain authority'},

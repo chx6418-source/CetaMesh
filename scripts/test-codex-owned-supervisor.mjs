@@ -5,6 +5,9 @@ import path from 'node:path';
 import { CliAgentProcess } from '../src/agent/cli-agent-process.js';
 import { prepareCodexOwnedLaunch } from '../src/agent/codex-process-supervisor.js';
 
+if(process.env.WHALEBRIDGE_TEST_NATIVE_PRODUCT!=='1'){
+  console.log('NOT_RUN_ENVIRONMENT: owned supervisor requires explicit native product opt-in');process.exit(77);
+}
 if(process.platform!=='win32'){console.log('NOT_RUN_ENVIRONMENT: Windows owned Job supervisor');process.exit(77);}
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-owned-supervisor-'));
 try {

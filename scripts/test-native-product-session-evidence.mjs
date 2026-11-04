@@ -1,7 +1,18 @@
 // Deterministic regression for the native acceptance driver's observability.
-// No Desktop/model/CLI is started. Transport behavior is preserved in a VM fixture.
+// No Desktop/model/Agent CLI is started. Transport behavior is preserved in a VM fixture.
 import assert from 'node:assert/strict';import vm from 'node:vm';import fs from 'node:fs';import {createRequire} from 'node:module';
+import {spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import * as helper from './helpers/native-product-session.mjs';
+const runnerSource=fs.readFileSync(new URL('./run-all-tests.mjs',import.meta.url),'utf8');
+assert.match(runnerSource, /'test-codex-owned-supervisor\.mjs':\s*\{[^\n]*requires:\s*\[[^\]]*'native-product'/,
+  'native owned-process supervisor must require explicit product opt-in');
+const optedOut=spawnSync(process.execPath,[fileURLToPath(new URL('./test-codex-owned-supervisor.mjs',import.meta.url))],
+  {env:{...process.env,WHALEBRIDGE_TEST_NATIVE_PRODUCT:'0'},encoding:'utf8',windowsHide:true,timeout:10000});
+assert.ifError(optedOut.error);
+assert.equal(optedOut.status,77,'direct suite invocation also refuses native execution without opt-in');
+assert.match(optedOut.stdout,/NOT_RUN_ENVIRONMENT: owned supervisor requires explicit native product opt-in/);
+console.log('PASS native supervisor registration and direct invocation retain explicit opt-in');
 const {projectNativeRpcEvidence,nativeRpcObserverSource}=helper;
 assert.equal(typeof projectNativeRpcEvidence,'function','native driver must expose safe Core refusal/revision facts');
 assert.equal(typeof nativeRpcObserverSource,'function','native driver must observe actual application replies');
