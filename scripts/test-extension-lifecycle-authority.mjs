@@ -6,6 +6,7 @@ import {createExtensionRuntime,createExtensionStore} from '../src/extension/inde
 import {createVmExtensionHost} from '../src/extension/host.js';
 import {createCapabilityBroker} from '../src/capability/broker.js';
 import {createCapabilityPolicy} from '../src/capability/policy.js';
+import {createApplicationLifecycle} from '../src/app/lifecycle.js';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-lifecycle-authority-'));
 const runtimes=[];
@@ -26,6 +27,44 @@ function setup({vm=false}={}){
 function install(runtime,dir){const review=runtime.review({sourceDir:dir});const result=runtime.install({sourceDir:dir,approval:{approved:true,token:review.review.token}});runtime.enable({id:result.entry.id});return result.entry;}
 function request(id,operationId='parent-op'){return {actor:{kind:'owner',id:'desktop'},capability:'extension.'+id+'.run',taskId:'task',workspaceId:'ws',attemptId:'attempt-1',operationId,input:{value:'hello'}};}
 try{
+ await test('unconfirmed host close retains ownership and prevents duplicate enable',async()=>{
+  let starts=0,closes=0,allowClose=false,released=false;
+  const runtime=createExtensionRuntime({store:createExtensionStore({stateDir:fs.mkdtempSync(path.join(root,'close-store-'))}),monitorIntervalMs:0,
+   hostFactory:()=>{starts++;return {logs:[],available:()=>true,async shutdown(){closes++;if(!allowClose)throw new Error('fixture exit unknown');}};}});
+  try{
+   install(runtime,source('fixture.close-failure',[],'module.exports.handlers={run:input=>input};'));
+   await assert.rejects(runtime.disable({id:'fixture.close-failure'}));
+   assert.throws(()=>runtime.enable({id:'fixture.close-failure'}),{code:'EXTENSION_STOP_UNCONFIRMED'});
+   assert.equal(starts,1);
+   const lifecycle=createApplicationLifecycle();lifecycle.register(()=>{released=true;},{name:'owner',requireCleanShutdown:true});lifecycle.register(()=>runtime.close(),{name:'Extensions'});
+   assert.equal((await lifecycle.stop()).ok,false);assert.equal(released,false);
+   allowClose=true;await runtime.close();assert.equal(closes,3,'failed close remains retryable on the exact host');
+  }finally{allowClose=true;await runtime.close();}
+ });
+ await test('parallel stops join the same host and confirmed close permits normal re-enable',async()=>{
+  let starts=0,closes=0,releaseClose;
+  const runtime=createExtensionRuntime({store:createExtensionStore({stateDir:fs.mkdtempSync(path.join(root,'join-store-'))}),monitorIntervalMs:0,
+   hostFactory:()=>{starts++;return {logs:[],available:()=>true,shutdown(){closes++;return new Promise(resolve=>{releaseClose=resolve;});}};}});
+  try{
+   install(runtime,source('fixture.close-join',[],'module.exports.handlers={run:input=>input};'));
+   const first=runtime.disable({id:'fixture.close-join'});let secondSettled=false;
+   const second=runtime.disable({id:'fixture.close-join'}).then(()=>{secondSettled=true;});
+   await new Promise(resolve=>setImmediate(resolve));const early=secondSettled;releaseClose();await Promise.all([first,second]);
+   assert.equal(early,false);assert.equal(closes,1);runtime.enable({id:'fixture.close-join'});assert.equal(starts,2);
+  }finally{const stopping=runtime.close();await new Promise(resolve=>setImmediate(resolve));releaseClose?.();await stopping;}
+ });
+ await test('bounded stop retains a slow host until actual late cleanup',async()=>{
+  let releaseClose;
+  const runtime=createExtensionRuntime({store:createExtensionStore({stateDir:fs.mkdtempSync(path.join(root,'slow-store-'))}),monitorIntervalMs:0,stopTimeoutMs:25,
+   hostFactory:()=>({logs:[],available:()=>true,shutdown:()=>new Promise(resolve=>{releaseClose=resolve;})})});
+  try{
+   install(runtime,source('fixture.close-slow',[],'module.exports.handlers={run:input=>input};'));
+   await assert.rejects(runtime.disable({id:'fixture.close-slow'}),{code:'EXTENSION_STOP_UNCONFIRMED'});
+   assert.equal(runtime.get({id:'fixture.close-slow'}).loaded,true);assert.equal(runtime.get({id:'fixture.close-slow'}).runtimeState,'stopping');
+   assert.throws(()=>runtime.enable({id:'fixture.close-slow'}));
+   const stopping=runtime.close();releaseClose();await stopping;assert.equal(runtime.get({id:'fixture.close-slow'}).loaded,false);
+  }finally{releaseClose?.();await runtime.close();}
+ });
  await test('real process reverse invocation preserves original Task Actor Attempt and logical operation',async()=>{
   const {runtime,broker,seen}=setup();install(runtime,source('fixture.authority',['memory.read'],'module.exports.handlers={run:(input,ctx)=>ctx.memory.read(input)};'));
   const result=await broker.execute(request('fixture.authority'));

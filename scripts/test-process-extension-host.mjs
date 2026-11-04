@@ -76,7 +76,49 @@ async function waitUntil(predicate, timeoutMs = 5000) {
   }
 }
 
+// A shutdown request is not an exit receipt, including after the Host has closed ingress.
+{
+  const { host, pair } = makeHost();
+  let calls = 0, allowClose = false;
+  const close = pair.host.close;
+  pair.host.close = async () => {
+    calls++;
+    if (!allowClose) throw Object.assign(new Error('fixture exit unknown'), { code: 'FIXTURE_EXIT_UNKNOWN' });
+    return close();
+  };
+  try {
+    await assert.rejects(host.shutdown(), { code: 'FIXTURE_EXIT_UNKNOWN' });
+    assert.equal(host.available(), false);
+    assert.equal(host.health().state, 'stopping');
+    assert.equal(host.health().exitConfirmed, false);
+    await assert.rejects(host.invoke('greet', {}), { code: 'PROVIDER_UNAVAILABLE' });
+    allowClose = true;
+    await host.shutdown();
+    assert.equal(host.health().exitConfirmed, true);
+    assert.equal(calls, 2, 'retry must close the retained transport, not return a swallowed failure');
+  } finally { allowClose = true; await host.shutdown(); }
+  ok('unconfirmed Worker shutdown rejects, fences invocations and retries the same transport');
+}
+
 // Caller abort must stop before dispatch or reach a real Worker's reverse Broker call.
+{
+  const fixture = makeInstalledPackage();
+  const child = Object.assign(new EventEmitter(), { pid: null, exitCode: null, signalCode: null,
+    stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough() });
+  const transport = createProcessTransport({ packageRoot: fixture.packageRoot, storeRoot: fixture.storeRoot,
+    extensionId: fixture.manifest.id, version: fixture.manifest.version,
+    launch: { executable: process.execPath, args: [] }, spawnProcess: () => child });
+  try {
+    await assert.rejects(transport.close({ graceMs: 0 }), { code: 'PROVIDER_UNAVAILABLE' });
+    child.exitCode = 0; child.emit('exit', 0, null); child.emit('close', 0, null);
+    await transport.close({ graceMs: 0 });
+    ok('transport close failure can be retried after the retained child confirms its exit');
+  } finally {
+    child.exitCode = 0; child.emit('close', 0, null);
+    for (const stream of [child.stdin, child.stdout, child.stderr]) stream.destroy();
+    await transport.close({ graceMs: 0 }); fixture.cleanup();
+  }
+}
 {
   const { host, pair } = makeHost({ childBehavior: () => null });
   const controller = new AbortController();
@@ -557,6 +599,21 @@ async function waitUntil(predicate, timeoutMs = 5000) {
   assert.equal(killed, true, 'malformed frame terminates the Worker process tree');
   await assert.rejects(() => host.invoke('greet', {}), (error) => error.code === 'PROVIDER_UNAVAILABLE');
   ok('malformed frame fails closed and terminates its Worker');
+}
+for (const outcome of ['false', 'reject']) {
+  const { host, pair } = makeHost();
+  let killed = false;
+  pair.host.killTree = () => {
+    killed = true;
+    return outcome === 'false' ? false : Promise.reject(Object.assign(new Error('fixture termination rejected'), { code: 'FIXTURE_KILL_UNKNOWN' }));
+  };
+  pair.child.send('not-json{');
+  assert.equal(killed, true, 'malformed-frame termination must be requested synchronously');
+  await assert.rejects(host.shutdown(), { code: outcome === 'false' ? 'PROVIDER_UNAVAILABLE' : 'FIXTURE_KILL_UNKNOWN' });
+  assert.equal(host.health().exitConfirmed, false);
+  await host.shutdown();
+  assert.equal(host.health().exitConfirmed, true, 'later exact transport close can confirm cleanup');
+  ok('immediate Worker termination ' + outcome + ' retains an unconfirmed cleanup outcome');
 }
 
 // ── 5. 超时 ──────────────────────────────────────────────────────────────────

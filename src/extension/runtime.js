@@ -38,7 +38,8 @@ export function createExtensionRuntime({
   maxHeartbeatMisses = 3,
   maxAutomaticRestarts = 3,
   restartWindowMs = 300_000,
-  stableWindowMs = 300_000
+  stableWindowMs = 300_000,
+  stopTimeoutMs = 4500
 } = {}) {
   if (!store) throw new Error('createExtensionRuntime 需要 store');
   const installer = createExtensionInstaller({ store, now });
@@ -46,6 +47,7 @@ export function createExtensionRuntime({
   const runtimeRecords = new Map();
   const pendingReviews = new Map();
   let closed = false;
+  const stopBudget = Math.max(1, Math.min(Number(stopTimeoutMs) || 4500, 4500));
   const regularHostFactory = hostFactory || processHostFactory;
   const trustedVmFactory = hostFactory || vmHostFactory;
   const broker = capabilityBroker || createCapabilityBroker({ policy: createCapabilityPolicy() });
@@ -62,12 +64,13 @@ export function createExtensionRuntime({
     if (!runtimeRecords.has(key)) runtimeRecords.set(key, {
       state: 'stopped', startedAt: null, healthySince: null, heartbeatMisses: 0,
       restartTimes: [], monitorTimer: null, recovering: false, switching: false,
-      suppressRecovery: false, lastError: null, lifecycle: new AbortController()
+      suppressRecovery: false, lastError: null, lifecycle: new AbortController(), stopPromise: null
     });
     return runtimeRecords.get(key);
   }
 
   function runtimeState(entry) {
+    if (runtimeRecord(entry.id).stopping) return 'stopping';
     if (entry.status === 'disabled_due_to_crash') return 'crashed';
     if (entry.status !== 'enabled') return 'stopped';
     return runtimeRecord(entry.id).state;
@@ -295,15 +298,31 @@ export function createExtensionRuntime({
 
   async function stopHost(id) {
     const key = String(id);
-    runtimeRecord(key).stopping = true;
-    runtimeRecord(key).lifecycle.abort(Object.assign(extensionError('INVOKE_CANCEL_UNCONFIRMED','Plugin stopped; verify prior effects'),{effectStatus:'unknown'}));
+    const record = runtimeRecord(key);
+    record.stopping = true;
+    record.lifecycle.abort(Object.assign(extensionError('INVOKE_CANCEL_UNCONFIRMED','Plugin stopped; verify prior effects'),{effectStatus:'unknown'}));
     hideEntry(key);
     clearMonitor(key);
-    const host = hosts.get(key);
-    hosts.delete(key);
-    runtimeRecord(key).state = 'stopped';
-    try { if (typeof host?.shutdown === 'function') await host.shutdown(); }
-    finally { runtimeRecord(key).stopping = false; }
+    record.state = 'stopping';
+    if (!record.stopPromise) {
+      const host = hosts.get(key);
+      const stopping = Promise.resolve().then(async () => {
+        if (typeof host?.shutdown === 'function') await host.shutdown();
+        if (hosts.get(key) === host) hosts.delete(key);
+        record.state = 'stopped'; record.stopping = false;
+      });
+      record.stopPromise = stopping;
+      stopping.then(() => { if (record.stopPromise === stopping) record.stopPromise = null; }, error => {
+        if (record.stopPromise === stopping) record.stopPromise = null;
+        record.lastError = 'Extension exit unconfirmed: ' + String(error?.code ?? 'PROVIDER_UNAVAILABLE');
+      });
+    }
+    let timer;
+    try {
+      await Promise.race([record.stopPromise, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(extensionError('EXTENSION_STOP_UNCONFIRMED', 'Previous Extension exit is unconfirmed; retry stopping the retained host')), stopBudget);
+      })]);
+    } finally { clearTimeout(timer); }
   }
 
   function reviewResult(reviewed, sourceDir, kind = 'package') {
@@ -404,6 +423,10 @@ export function createExtensionRuntime({
   }
 
   function startHost(entry) {
+    if (closed) throw extensionError('PROVIDER_UNAVAILABLE', 'Extension runtime is closed');
+    if (runtimeRecord(entry.id).stopping || hosts.has(entry.id)) {
+      throw extensionError('EXTENSION_STOP_UNCONFIRMED', 'Confirm the previous Extension host has stopped before replacement');
+    }
     if(runtimeRecord(entry.id).lifecycle.signal.aborted)runtimeRecord(entry.id).lifecycle=new AbortController();
     const host = buildHost(entry);
     if (!host.available()) {
@@ -424,6 +447,7 @@ export function createExtensionRuntime({
 
   async function recoverAfterFailure(id) {
     const record = runtimeRecord(id);
+    if (closed || record.stopping) return { id, state: record.state };
     if (record.recovering) return { id, state: record.state };
     const previous = store.get(id);
     if (!previous || previous.status !== 'enabled') {
@@ -458,6 +482,7 @@ export function createExtensionRuntime({
   async function checkHealth({ id } = {}) {
     const entry = entryOrThrow(id);
     const record = runtimeRecord(entry.id);
+    if (closed || record.stopping) return { id: entry.id, state: record.state };
     if (entry.status === 'disabled_due_to_crash') {
       record.state = 'crashed';
       return { id: entry.id, state: record.state };
@@ -514,6 +539,7 @@ export function createExtensionRuntime({
     if (entry.status !== 'enabled') {
       throw extensionError('EXTENSION_DISABLED', '扩展未启用：' + entry.id);
     }
+    if (runtimeRecord(entry.id).stopping) throw extensionError('EXTENSION_STOP_UNCONFIRMED', 'Extension cleanup is not confirmed');
     let host = hosts.get(entry.id);
     if (host && !host.available()) {
       runtimeRecord(entry.id).state = 'crashed';
@@ -638,6 +664,7 @@ export function createExtensionRuntime({
 
     enable({ id } = {}) {
       if (closed) throw extensionError('PROVIDER_UNAVAILABLE','Extension runtime is closed');
+      if (runtimeRecord(id).stopping && !runtimeRecord(id).stopPromise) throw extensionError('EXTENSION_STOP_UNCONFIRMED','Retry stopping the retained Extension before enabling');
       if (runtimeRecord(id).stopping || runtimeRecord(id).switching) throw extensionError('EXTENSION_UPDATE_IN_PROGRESS','Wait for the plugin lifecycle operation to finish');
       const entry = entryOrThrow(id);
       if (entry.status === 'disabled_due_to_crash') {
@@ -647,7 +674,7 @@ export function createExtensionRuntime({
       if (entry.status === 'enabled' && existing?.available()) {
         return { extension: entry, changed: false };
       }
-      if (existing) stopHost(entry.id).catch((error) => { runtimeRecord(entry.id).lastError = String(error?.message ?? error); });
+      if (existing) throw extensionError('EXTENSION_STOP_UNCONFIRMED', 'Use Restart to confirm the previous Worker stopped before enabling');
       const host = startHost(entry);
       if (!host.available()) {
         hosts.delete(entry.id);
@@ -712,7 +739,9 @@ export function createExtensionRuntime({
     close() {
       closed = true;
       for (const entry of store.list()) hideEntry(entry.id);
-      return Promise.all([...hosts.keys()].map((id) => stopHost(id))).then(() => undefined);
+      return Promise.allSettled([...hosts.keys()].map((id) => stopHost(id))).then(results => {
+        if (results.some(result => result.status === 'rejected')) throw extensionError('EXTENSION_STOP_UNCONFIRMED', 'Some Extension exits remain unconfirmed; retry closing retained hosts');
+      });
     }
   };
 }

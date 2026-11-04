@@ -118,7 +118,8 @@ export function createProcessExtensionHost({
   let closed = false;
   let crashed = false;
   let crashNotified = false;
-  let cleanupPromise = Promise.resolve();
+  let cleanupPromise = null;
+  let cleanupConfirmed = false;
   maxMessageBytes = Math.max(1, Math.min(Number(maxMessageBytes) || 2 * 1024 * 1024, 2 * 1024 * 1024));
 
   const record = (level, message) => {
@@ -147,18 +148,42 @@ export function createProcessExtensionHost({
     reversePending.clear();
   }
 
-  function failHost(code, message) {
+  function closeTransport({ immediate = false } = {}) {
+    if (!cleanupPromise) {
+      const closing = (async () => {
+        // Protocol violations must request termination in the current callback,
+        // before another frame or caller can run. The result still needs proof.
+        let terminationError = null;
+        if (immediate && typeof transport.killTree === 'function') {
+          try {
+            const stopped = await transport.killTree();
+            if (stopped === false) terminationError = extensionError('PROVIDER_UNAVAILABLE', 'Immediate Worker process-tree termination is unconfirmed');
+          } catch (error) { terminationError = error; }
+        }
+        const receipt = await transport.close?.();
+        // A Worker can exit by itself before taskkill responds. Only an explicit
+        // transport close receipt may supersede that failed termination request.
+        if (terminationError && receipt?.closed !== true) throw terminationError;
+        cleanupConfirmed = true;
+      })();
+      cleanupPromise = closing;
+      // Observe background crash cleanup without converting its rejection into
+      // an exit receipt. A subsequent shutdown can retry the retained transport.
+      closing.catch(error => {
+        if (cleanupPromise === closing) cleanupPromise = null;
+        record('error', 'Worker cleanup failed: ' + String(error?.message ?? error));
+      });
+    }
+    return cleanupPromise;
+  }
+
+  function failHost(code, message, { immediate = true } = {}) {
     if (closed) return;
     closed = true;
     crashed = true;
     settlePending(extensionError(code, message));
     record('error', message);
-    try {
-      const cleanup = typeof transport.killTree === 'function' ? transport.killTree() : transport.close?.();
-      cleanupPromise = Promise.resolve(cleanup).catch(error => record('error', 'Worker cleanup failed: ' + String(error?.message ?? error)));
-    } catch (error) {
-      record('error', 'Worker cleanup failed: ' + String(error?.message ?? error));
-    }
+    void closeTransport({ immediate });
     if (!crashNotified && typeof onCrash === 'function') {
       crashNotified = true;
       try { onCrash({ code, message }); }
@@ -292,7 +317,9 @@ export function createProcessExtensionHost({
     }
   });
   transport.onExit?.(({ code, signal } = {}) => {
-    if (!closed) failHost('PROVIDER_UNAVAILABLE', 'Extension Worker exited (' + String(code) + ', ' + String(signal) + ')');
+    // The transport already observed exit; join its remaining stdio/tree cleanup.
+    // Protocol faults still request termination synchronously before returning.
+    if (!closed) failHost('PROVIDER_UNAVAILABLE', 'Extension Worker exited (' + String(code) + ', ' + String(signal) + ')', { immediate: false });
   });
   transport.onError?.((error) => failHost(error?.code || 'PROTOCOL_VIOLATION', String(error?.message ?? error)));
   transport.onDiagnostic?.((message) => record('info', message));
@@ -306,8 +333,8 @@ export function createProcessExtensionHost({
     available() { return !closed && (typeof transport.alive !== 'function' || transport.alive()); },
     health() {
       const available = this.available();
-      const state = closed ? (crashed ? 'crashed' : 'stopped') : available ? (transport.pid ? 'running' : 'starting') : 'crashed';
-      return { available, closed, crashed, state, inflight: pending.size,
+      const state = closed ? (crashed ? 'crashed' : cleanupConfirmed ? 'stopped' : 'stopping') : available ? (transport.pid ? 'running' : 'starting') : 'crashed';
+      return { available, closed, crashed, state, exitConfirmed: cleanupConfirmed, inflight: pending.size,
         provider: transport.pid || typeof transport.killTree === 'function' ? 'process-child' : 'process-transport' };
     },
     ping({ timeoutMs: pingTimeoutMs = 2000 } = {}) {
@@ -406,19 +433,12 @@ export function createProcessExtensionHost({
       return { cancelled: true };
     },
     shutdown() {
-      if (closed) return cleanupPromise;
-      closed = true;
-      settlePending(extensionError('PROVIDER_UNAVAILABLE', 'Process Extension Host is shut down'));
-      record('info', 'Process Extension Host shut down');
-      try {
-        cleanupPromise = Promise.resolve(transport.close?.()).catch((error) => {
-          record('error', 'Worker shutdown failed: ' + String(error?.message ?? error));
-        });
-        return cleanupPromise;
-      } catch (error) {
-        record('error', 'Worker shutdown failed: ' + String(error?.message ?? error));
-        return Promise.resolve();
+      if (!closed) {
+        closed = true;
+        settlePending(extensionError('PROVIDER_UNAVAILABLE', 'Process Extension Host is shut down'));
+        record('info', 'Process Extension Host shutdown requested');
       }
+      return closeTransport();
     },
     /** 测试/诊断：直接查看在途集合。 */
     _inflight: () => [...pending.keys()]

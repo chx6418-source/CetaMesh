@@ -8,6 +8,10 @@ import { createDesktopUiService } from '../src/desktop/ui-service.js';
 import { createIntegrationRegistry, createIntegrationStore, createMcpRuntime, createStdioMcpConnection, MCP_SERVER_CATALOG } from '../src/integrations/index.js';
 import { writeJsonAtomic, writeTextAtomic } from '../src/storage/json-file.js';
 import { fileURLToPath } from 'node:url';
+import { createApplicationLifecycle } from '../src/app/lifecycle.js';
+import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
 function createIntegrationService(options) {
   const service = createBaseIntegrationService(options);
@@ -187,16 +191,21 @@ async function phase5Regressions() {
     const start = runtime.start('onebot');
     // Attach a rejection observer before releasing the raced operation.
     const result = start.then(value => ({ value }), error => ({ error }));
-    await runtime.stop('onebot');
+    let stopSettled = false;
+    const stop = runtime.stop('onebot').then(() => { stopSettled = true; });
+    await new Promise(resolve => setImmediate(resolve));
+    const stoppedBeforeFactory = stopSettled;
     releaseStart(connection);
     const outcome = await result;
+    await stop;
     try {
+      assert.equal(stoppedBeforeFactory, false, 'stop must own the unsettled factory until its late resource is closed');
       assert.equal(outcome.error?.code, 'MCP_START_CANCELLED');
       assert.equal(runtime.status('onebot').status, 'stopped');
       assert.equal(closes, 1);
     } finally { await runtime.closeAll(); }
   });
-  await check('late shutdown and callbacks cannot overwrite a newer running connection', async () => {
+  await check('replacement cannot start before prior shutdown confirms exit', async () => {
     const { factory, connections } = makeTransportFactory();
     const runtime = createMcpRuntime({ transportFactory: factory });
     let releaseClose;
@@ -204,14 +213,89 @@ async function phase5Regressions() {
       await runtime.start('onebot');
       connections[0].close = () => new Promise(resolve => { releaseClose = resolve; });
       const stop = runtime.stop('onebot');
-      await runtime.start('onebot');
+      await new Promise(resolve => setImmediate(resolve));
+      const replacement = await runtime.start('onebot').then(value => ({ value }), error => ({ error }));
       releaseClose();
       await stop;
+      assert.equal(replacement.error?.code, 'MCP_STOP_UNCONFIRMED');
+      await runtime.start('onebot');
       connections[0].closeHandler?.(new Error('stale child exit'));
       assert.equal(runtime.status('onebot').status, 'running');
       assert.equal(runtime.status('onebot').crashes, 0);
       assert.equal(JSON.parse((await runtime.call('onebot', 'qq_status')).content[0].text).name, 'qq_status');
     } finally { releaseClose?.(); await runtime.closeAll(); }
+  });
+  await check('failed MCP close retains ownership, blocks replacement and retries the exact resource', async () => {
+    const { factory, connections } = makeTransportFactory();
+    const runtime = createMcpRuntime({ transportFactory: factory });
+    let released = false, closeCalls = 0, allowClose = false;
+    try {
+      await runtime.start('onebot');
+      connections[0].close = async () => { closeCalls++; if (!allowClose) throw new Error('fixture exit unknown'); connections[0].closeHandler?.(); };
+      const lifecycle = createApplicationLifecycle();
+      lifecycle.register(() => { released = true; }, { name: 'owner', requireCleanShutdown: true });
+      lifecycle.register(() => runtime.closeAll(), { name: 'MCP' });
+      const report = await lifecycle.stop();
+      assert.equal(report.ok, false);
+      assert.equal(released, false, 'unknown child must retain StateDir ownership');
+      assert.equal(runtime.status('onebot').pid, 4242);
+      await assert.rejects(runtime.start('onebot'));
+      assert.equal(connections.length, 1);
+      allowClose = true;
+      await runtime.closeAll();
+      assert.equal(closeCalls, 2, 'retry closes the same retained resource');
+      assert.equal(runtime.status('onebot').status, 'stopped');
+      await assert.rejects(runtime.start('onebot'), { code: 'MCP_RUNTIME_CLOSED' });
+    } finally { allowClose = true; await runtime.closeAll(); }
+  });
+  await check('bounded stop preserves slow startup and joins late resource cleanup', async () => {
+    let releaseStart, releaseClose, closed = false;
+    const pending = new Promise(resolve => { releaseStart = resolve; });
+    const runtime = createMcpRuntime({ transportFactory: () => pending, closeTimeoutMs: 25 });
+    const starting = runtime.start('onebot').catch(error => error.code);
+    try {
+      await assert.rejects(runtime.stop('onebot'), { code: 'MCP_STOP_UNCONFIRMED' });
+      await assert.rejects(runtime.start('onebot'), { code: 'MCP_STOP_UNCONFIRMED' });
+      releaseStart({ pid: 4343, listTools: async () => [], close: () => new Promise(resolve => {
+        releaseClose = () => { closed = true; resolve(); };
+      }) });
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(closed, false);
+      assert.equal(runtime.status('onebot').pid, 4343);
+      const stopping = runtime.stop('onebot');
+      releaseClose(); await stopping; await starting;
+      assert.equal(closed, true);
+      assert.equal(runtime.status('onebot').pid, null);
+    } finally { releaseStart?.({ close: async () => {} }); releaseClose?.(); await runtime.closeAll(); }
+  });
+  await check('stdio SDK close acknowledgement is not a child exit receipt', async () => {
+    const saved = { start: StdioClientTransport.prototype.start, send: StdioClientTransport.prototype.send, close: StdioClientTransport.prototype.close };
+    const child = Object.assign(new EventEmitter(), { pid: 7474, exitCode: null, signalCode: null,
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill() { return false; } });
+    let confirm = false, connection;
+    StdioClientTransport.prototype.start = async function () { this._process = child; };
+    StdioClientTransport.prototype.send = async function (message) {
+      if (message.id === undefined) return;
+      const result = message.method === 'initialize'
+        ? { protocolVersion: '2025-03-26', capabilities: { tools: {} }, serverInfo: { name: 'owned-close-fixture', version: '1' } }
+        : { tools: [] };
+      queueMicrotask(() => this.onmessage?.({ jsonrpc: '2.0', id: message.id, result }));
+    };
+    StdioClientTransport.prototype.close = async function () {
+      if (!confirm) return;
+      child.exitCode = 0; for (const stream of [child.stdin, child.stdout, child.stderr]) stream.destroy();
+      this._process = undefined; child.emit('close', 0, null); this.onclose?.();
+    };
+    try {
+      connection = await createStdioMcpConnection(MCP_SERVER_CATALOG.find(row => row.id === 'onebot'));
+      await assert.rejects(connection.close(), { code: 'MCP_STOP_UNCONFIRMED' });
+      assert.equal(child.exitCode, null);
+      confirm = true; await connection.close(); assert.equal(child.exitCode, 0);
+    } finally {
+      confirm = true; await connection?.close();
+      Object.assign(StdioClientTransport.prototype, saved);
+      for (const stream of [child.stdin, child.stdout, child.stderr]) stream.destroy();
+    }
   });
   if (failures.length) throw new AggregateError(failures, 'Phase 5 MCP regressions failed');
 }
@@ -467,6 +551,7 @@ try {
     const stopped = await localService.execute({ method: 'mcp.stop', params: { id: 'onebot', approved: true } });
     assert.equal(stopped.status, 'stopped');
     assert.equal(stopped.pid, null);
+    assert.throws(() => process.kill(recovered.pid, 0), { code: 'ESRCH' }, 'stop must await the owned fixture exit, not just request termination');
     assert.equal(JSON.stringify(publicConfig).includes(secret), false);
     ok('真实 MCP stdio：配置只注入子进程，UI 脱敏；审批、发现、调用、禁用、崩溃、恢复与停止');
   } finally {

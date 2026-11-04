@@ -133,8 +133,18 @@ try{
  assert.ok(calls.filter(row=>row.path==='/mcp').every(row=>row.authorization==='Bearer controlled-fake-token'));
  const discoveryLogs=[];
  const broken=createMcpRuntime({servers:[descriptor],resolveCredential,networkOptions,log:line=>discoveryLogs.push(line)});
- await assert.rejects(broken.start('fixture',{...config,url:base+'/mcp-cycle'}),{code:'MCP_START_FAILED'});await broken.closeAll();
- await assert.rejects(broken.start('fixture',{...config,url:base+'/mcp-error'}),{code:'MCP_START_FAILED'});await broken.closeAll();
+ try {await assert.rejects(broken.start('fixture',{...config,url:base+'/mcp-cycle'}),{code:'MCP_START_FAILED'});}
+ finally {await broken.closeAll();}
+ const beforeClosedStart=calls.length;
+ await assert.rejects(broken.start('fixture',{...config,url:base+'/mcp-error'}),{code:'MCP_RUNTIME_CLOSED'});
+ assert.equal(calls.length,beforeClosedStart,'final Runtime close rejects new startup before any network request');
+ // closeAll ends this owner; a separate transport-error fixture needs its own Runtime.
+ const errorRuntime=createMcpRuntime({servers:[descriptor],resolveCredential,networkOptions,log:line=>discoveryLogs.push(line)});
+ try {
+  await assert.rejects(errorRuntime.start('fixture',{...config,url:base+'/mcp-error'}),{code:'MCP_START_FAILED'});
+  assert.ok(calls.slice(beforeClosedStart).some(row=>row.path==='/mcp-error'&&row.method==='POST'
+   &&JSON.parse(row.body).method==='tools/list'),'fresh Runtime reaches the original discovery-error transport boundary');
+ } finally {await errorRuntime.closeAll();}
  assert.ok(!discoveryLogs.join('').includes('controlled-fake-token'),'discovery failure text cannot leak the credential into runtime diagnostics');
  assert.ok(cyclePages<=10,'repeated cursors and empty pages cannot create an unbounded discovery loop');
  console.log('PASS actual TLS remote MCP initialize/discovery/schema/auth/call/cancel/reconnect/cleanup; third-party services BLOCKED_ENV');

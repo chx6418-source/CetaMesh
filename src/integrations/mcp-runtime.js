@@ -10,6 +10,7 @@ import { integrationError } from './types.js';
 import { createRemoteMcpConnection } from './mcp-remote.js';
 import { validateSchema } from '../model/input-schema.js';
 import { assertNotRetiredSnowLuma } from './retired.js';
+import { waitForChildClose } from '../extension/process-tree.js';
 
 const PACKAGED_MCP_MODES = Object.freeze({
   onebot: 'onebot',
@@ -108,6 +109,8 @@ export async function createStdioMcpConnection(server, config = {}, {
   let exitCode = null;
   let signal = null;
   let stderrTail = '';
+  let ownedChild = null;
+  let closePromise = null;
   const logPhase = (nextPhase, extra = {}) => diagnostic(log, {
     serverId: server.id, phase: nextPhase,
     resolvedExecutable: launch.resolvedExecutable,
@@ -132,13 +135,14 @@ export async function createStdioMcpConnection(server, config = {}, {
   };
   transport.onerror = error => {
     logPhase(phase, { error: redactText(error?.message ?? error) });
-    closeHandler?.(error);
+    // A protocol/pipe error is not an owned-process exit receipt.
   };
   const originalStart = transport.start.bind(transport);
   transport.start = async () => {
     logPhase('spawn');
-    await originalStart();
+    const starting = originalStart();
     const child = transport._process;
+    ownedChild = child ?? ownedChild;
     child?.once('exit', (code, childSignal) => {
       exitCode = code;
       signal = childSignal;
@@ -147,22 +151,12 @@ export async function createStdioMcpConnection(server, config = {}, {
       exitCode = code;
       signal = childSignal;
     });
+    await starting;
   };
 
   const client = new Client({ name: 'cetamesh-mcp-runtime', version: '1.0.0' });
-  try {
-    phase = 'initialize';
-    await client.connect(transport);
-    logPhase('initialized', { pid: transport.pid ?? null });
-  } catch (error) {
-    phase = 'initialize';
-    logPhase('startup-failed', { error: redactText(error?.message ?? error) });
-    try { await transport.close(); } catch (cleanupError) { void cleanupError; /* Startup cleanup is best effort; diagnostics hold the cause. */ }
-    throw integrationError('MCP_START_FAILED', 'MCP Server initialize 失败，请查看本机脱敏诊断日志。');
-  }
-
-  return {
-    pid: transport.pid ?? null,
+  const connection = {
+    get pid() { return ownedChild?.pid ?? transport.pid ?? null; },
     onClose(handler) {
       closeHandler = handler;
       if (closed) handler?.(null);
@@ -178,15 +172,45 @@ export async function createStdioMcpConnection(server, config = {}, {
       logPhase(phase, { toolName: String(name) });
       return client.callTool({ name, arguments: args ?? {} });
     },
-    async close() {
-      phase = 'shutdown';
-      logPhase(phase);
-      closeHandler = null;
-      try { await client.close(); } catch (error) {
-        logPhase('shutdown-failed', { error: redactText(error?.message ?? error) });
+    close() {
+      if (!closePromise) {
+        const closing = (async () => {
+          phase = 'shutdown';
+          logPhase(phase);
+          let failure = null;
+          try { await client.close(); } catch (error) { failure = error; }
+          // The SDK can resolve after sending SIGKILL without awaiting close,
+          // and clears its child pointer. Retain only our original child handle.
+          if (!closed && ownedChild && transport._process !== ownedChild
+            && ownedChild.exitCode === null && ownedChild.signalCode === null) {
+            try { ownedChild.kill('SIGKILL'); } catch (error) { failure ??= error; }
+          }
+          if (ownedChild && !closed && !await waitForChildClose(ownedChild, 500)) {
+            throw integrationError('MCP_STOP_UNCONFIRMED', 'MCP 子进程退出尚未确认，请重试停止原连接。');
+          }
+          if (!ownedChild && failure) throw failure;
+        })();
+        closePromise = closing;
+        closing.catch(error => {
+          if (closePromise === closing) closePromise = null;
+          logPhase('shutdown-failed', { error: redactText(error?.message ?? error) });
+        });
       }
+      return closePromise;
     }
   };
+  try {
+    phase = 'initialize';
+    await client.connect(transport);
+    logPhase('initialized', { pid: transport.pid ?? null });
+    return connection;
+  } catch (error) {
+    logPhase('startup-failed', { error: redactText(error?.message ?? error) });
+    const failure = integrationError('MCP_START_FAILED', 'MCP Server initialize 失败，请查看本机脱敏诊断日志。');
+    try { await connection.close(); }
+    catch { failure.cleanupConnection = connection; }
+    throw failure;
+  }
 }
 
 function normalizeTool(tool) {
@@ -203,17 +227,30 @@ export function createMcpRuntime({
   transportFactory = null,
   resolveCredential = null, networkOptions = {},
   now = () => Date.now(),
+  closeTimeoutMs = 4500,
   log = () => {}
 } = {}) {
   const serverById = new Map(servers.map(server => [server.id, server]));
   const records = new Map();
+  let closed = false;
+  const closeBudget = Math.max(1, Math.min(Number(closeTimeoutMs) || 4500, 4500));
+  async function boundedStop(promise) {
+    let timer;
+    try {
+      return await Promise.race([promise, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(integrationError('MCP_STOP_UNCONFIRMED', 'MCP 退出尚未确认；原连接仍保留，请重试停止。')), closeBudget);
+      })]);
+    } catch {
+      throw integrationError('MCP_STOP_UNCONFIRMED', 'MCP 退出尚未确认；原连接仍保留，请重试停止。');
+    } finally { clearTimeout(timer); }
+  }
 
   function recordFor(id) {
     assertNotRetiredSnowLuma(id);
     if (!records.has(id)) records.set(id, {
       status: 'stopped', lastError: null, pid: null, startedAt: null,
       restarts: 0, crashes: 0, tools: [], connection: null, stopping: false,
-      generation: 0, startPromise: null
+      generation: 0, startPromise: null, stopPromise: null
     });
     return records.get(id);
   }
@@ -246,6 +283,8 @@ export function createMcpRuntime({
   function start(id, config = {}) {
     const server = requireServer(id);
     const record = recordFor(id);
+    if (closed) return Promise.reject(integrationError('MCP_RUNTIME_CLOSED', 'MCP Runtime 已关闭。'));
+    if (record.stopping) return Promise.reject(integrationError('MCP_STOP_UNCONFIRMED', '请先确认原 MCP 连接已停止。'));
     if (record.status === 'running') return Promise.resolve(snapshot(id));
     if (record.status === 'starting') return record.startPromise;
     const generation = ++record.generation;
@@ -259,12 +298,14 @@ export function createMcpRuntime({
       let connection = null;
       try {
         connection = await (transportFactory ?? (server.transport === 'streamable-http' ? createRemoteMcpConnection : createStdioMcpConnection))(server, config, { log, resolveCredential, networkOptions });
-        if (generation !== record.generation) throw integrationError('MCP_START_CANCELLED', 'MCP Server 启动已取消。');
+        // A cancelled factory may still return a live child. stop() owns this
+        // exact connection until its close has settled.
         record.connection = connection;
         record.pid = connection.pid ?? null;
         connection.onClose?.(error => {
-          if (record.generation === generation && record.connection === connection) handleClose(id, error);
+          if (record.connection === connection) handleClose(id, error);
         });
+        if (generation !== record.generation) throw integrationError('MCP_START_CANCELLED', 'MCP Server 启动已取消。');
         if (record.status === 'crashed') throw integrationError('MCP_CHILD_CLOSED', 'MCP child exited during startup.');
         const discovered = typeof connection.listTools === 'function' ? await connection.listTools() : [];
         if (generation !== record.generation) throw integrationError('MCP_START_CANCELLED', 'MCP Server 启动已取消。');
@@ -275,18 +316,25 @@ export function createMcpRuntime({
         return snapshot(id);
       } catch (error) {
         if (generation !== record.generation) {
-          try { await connection?.close?.(); } catch (cleanupError) { void cleanupError; /* A cancelled startup still owns and closes its late child. */ }
+          if (error.cleanupConnection) {
+            record.connection = error.cleanupConnection;
+            record.pid = error.cleanupConnection.pid ?? null;
+          }
           throw integrationError('MCP_START_CANCELLED', 'MCP Server 启动已取消。');
         }
         const alreadyCrashed = record.status === 'crashed';
-        record.connection = null;
-        record.pid = null;
+        if (error.cleanupConnection) record.connection = error.cleanupConnection;
+        record.pid = record.connection?.pid ?? null;
         record.status = 'crashed';
         if (!alreadyCrashed) record.crashes += 1;
         record.lastError = 'MCP Server 启动失败，请查看本机脱敏诊断日志。';
         try { log('[mcp-diagnostic] ' + JSON.stringify(redactObject({ serverId: id, phase: 'startup-failed', error: error?.message ?? String(error) }))); }
         catch (logError) { void logError; /* Startup failure remains observable through a stable status and error code. */ }
-        try { await connection?.close?.(); } catch (cleanupError) { void cleanupError; /* Child cleanup is best effort after a protocol failure. */ }
+        if (record.connection) {
+          // Do not await our own start promise. stop joins it after this failure
+          // returns, retaining ownership if cleanup fails or exceeds its budget.
+          void stop(id).catch(() => {});
+        }
         throw integrationError('MCP_START_FAILED', record.lastError);
       } finally {
         if (generation === record.generation) record.startPromise = null;
@@ -296,23 +344,29 @@ export function createMcpRuntime({
   async function stop(id) {
     requireServer(id);
     const record = recordFor(id);
-    const generation = ++record.generation;
-    record.startPromise = null;
-    record.tools = [];
-    if (!record.connection) {
-      if (record.status !== 'crashed') record.status = 'stopped';
-      if (record.status !== 'crashed') record.lastError = null;
-      record.pid = null;
-      return snapshot(id);
+    if (!record.stopPromise) {
+      ++record.generation;
+      record.tools = [];
+      record.stopping = true; record.status = 'stopping';
+      const startup = record.startPromise;
+      const stopping = Promise.resolve().then(async () => {
+        if (startup) await startup.catch(() => {});
+        if (record.startPromise === startup) record.startPromise = null;
+        const connection = record.connection;
+        if (connection) await connection.close();
+        if (record.connection === connection) record.connection = null;
+        record.status = 'stopped'; record.pid = null;
+        record.stopping = false; record.lastError = null;
+        return snapshot(id);
+      });
+      record.stopPromise = stopping;
+      stopping.then(() => { if (record.stopPromise === stopping) record.stopPromise = null; }, error => {
+        if (record.stopPromise === stopping) record.stopPromise = null;
+        record.lastError = 'MCP Server 退出尚未确认；原连接已保留，请重试停止。';
+        diagnostic(log, { serverId: id, phase: 'shutdown-failed', error: error?.message ?? String(error) });
+      });
     }
-    record.stopping = true; record.status = 'stopping';
-    const connection = record.connection;
-    record.connection = null;
-    try { await connection.close(); }
-    catch (error) { record.lastError = 'MCP Server 关闭失败，请查看本机脱敏诊断日志。'; try { log('[mcp-diagnostic] ' + JSON.stringify(redactObject({ serverId: id, phase: 'shutdown-failed', error: error?.message ?? String(error) }))); } catch (logError) { void logError; /* Preserve cleanup state when logging fails. */ } }
-    if (generation !== record.generation) return snapshot(id);
-    record.status = 'stopped'; record.pid = null; record.stopping = false;
-    return snapshot(id);
+    return boundedStop(record.stopPromise);
   }
   async function restart(id, config = {}) {
     requireServer(id); await stop(id);
@@ -344,7 +398,14 @@ export function createMcpRuntime({
   function status(id) { requireServer(id); return snapshot(id); }
   function list() { return servers.map(server => snapshot(server.id)); }
   async function closeAll() {
-    for (const server of servers) if (records.get(server.id)?.connection || records.get(server.id)?.status === 'starting') await stop(server.id);
+    closed = true;
+    const results = await Promise.allSettled(servers.filter(server => {
+      const record = records.get(server.id);
+      return record?.connection || record?.startPromise || record?.stopping;
+    }).map(server => stop(server.id)));
+    if (results.some(result => result.status === 'rejected')) {
+      throw integrationError('MCP_STOP_UNCONFIRMED', '部分 MCP 连接退出尚未确认；原资源保留，请重试停止。');
+    }
   }
   return { list, status, start, stop, restart, discover, call, snapshot, closeAll, recordFor };
 }

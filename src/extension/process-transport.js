@@ -194,6 +194,10 @@ export function createProcessTransport({
       closing = true;
       child.stdin.destroy();
       killPromise = terminateProcessTree(child, { systemRoot: env.SystemRoot });
+      const current = killPromise;
+      current.then(stopped => { if (!stopped && killPromise === current) killPromise = null; }, () => {
+        if (killPromise === current) killPromise = null;
+      });
     }
     return killPromise;
   }
@@ -217,7 +221,10 @@ export function createProcessTransport({
             throw extensionError('PROVIDER_UNAVAILABLE', 'Extension Worker stdio did not close after process-tree shutdown');
           }
         }
+        return { closed: true };
       })();
+      const current = closePromise;
+      current.catch(() => { if (closePromise === current) closePromise = null; });
     }
     return closePromise;
   }
