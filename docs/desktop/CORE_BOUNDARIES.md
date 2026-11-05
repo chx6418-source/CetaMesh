@@ -73,6 +73,26 @@ distinct record kinds. `approvals.list()` exposes actionable one-shot decisions;
 `listGrants()` exposes bounded authority separately. A pending grant activates
 only when its source approval is consumed and never becomes a second decision.
 
+### Agent creation failure evidence
+
+An ACP runtime validation rejection before launch is different from a failure
+inside the launcher. The trusted adapter uses `runAgentCreationPreflight` (or
+the synchronous `agentCreationPreflightFailure` for admission checks) only for
+effect-free checks. The configured ACP factory follows the same contract.
+Session-limit checking and reservation must stay in one synchronous continuation.
+Validation after staging precedes lifecycle/process intent; a failed staging
+cleanup replaces the preflight failure with an unconfirmed-cleanup failure.
+
+Agent Broker verifies the exact invocation object and exposes
+`isSessionCreationPreflightFailure(error, { provider, taskId, workspaceId, requestId })`
+to Capability Service. Copied error fields, matching codes, and an exception
+reused by a later launch are not proof. This evidence can release only the
+current request's provisioning fence. It does not establish Task-wide process
+quiescence, clear other requests, authorize a tool effect, or trigger replay.
+The original failed request remains non-replayable; an explicit new command can
+use the same Task after its no-effect failure is durably settled. A failed fence
+write remains conservative across reconstruction.
+
 ## Workspace proof contract
 
 `WorkspaceService.collectContentProof(id, { expectedRoot, relevantFiles })` is
@@ -82,10 +102,48 @@ exclusions and managed-worktree provenance from Workspace's own state. It does
 not accept caller-supplied exclusion lists or a replacement trusted root. It
 never falls back to the active Workspace and never recovers an import journal.
 
-`collectRecoveryProof(id)` is the distinct Owner recovery path. It retains the
-existing write/recovery fence before using the same private proof assembly.
+`collectRecoveryProof(id, { beforeRecovery })` is the distinct trusted Owner
+recovery path. It retains the write/recovery fence before using the same private
+proof assembly. The Desktop recovery coordinator waits for current execution
+and operation blockers to clear before allowing this potentially mutating path.
+Immediately before an import can change files, its synchronous callback
+rechecks Task revision and operation evidence and calls Capability Service's
+`assertWorkspaceRecoveryAvailable({ taskId, workspaceId })`. That command reads
+the existing Task writer/readers, Capability provisioning reservations,
+durable startup fences and Broker effects in overlapping Workspaces. This
+includes Owner operations without Task attribution. Another Task's ownership, including a process whose
+Session is not yet attached, prevents recovery writes. No extra reservation
+store or authorization path is introduced. Pure content observation needs no
+new recovery approval.
 Continuity supplies the resolved Workspace ID to its content-proof callback;
 an unavailable or mismatched observation remains unverified.
+
+For blocked imports, Workspace retains the original batch names and manifest
+digests in memory. Pending batches require every original preimage to match its
+hash, and recovery accepts only unchanged original/staged target bytes. The
+transaction verifies final restored content before removing that batch's
+journal. An opaque receipt of this verification survives partial cleanup in
+the same Core; it is bound to the original root, batch and manifest, and reuse
+requires all current files still to match the verified original hashes. It
+cannot authorize a file write or replace preimages missing before verification.
+Journal removal separately settles that batch's fence. Partial multi-batch progress
+removes only the settled batch from the retained set, allowing the remaining
+batch to be reviewed again in the same Core. An empty directory, missing or
+replaced manifest, unrelated successful batch, or Owner text cannot release the
+retained fence. Alternate overlapping registrations cannot recover its root.
+
+A durable `completed` manifest permits cleanup only; its backups can already
+be partly removed, and it never authorizes rollback of user files. The existing
+v1 manifest/storage format remains unchanged. Original batch identity across
+arbitrary out-of-process journal loss or replacement on Core restart is not
+guaranteed by this in-memory binding; restart recovery requires intact retained
+journals. Incomplete/corrupt pending evidence remains blocked.
+
+The registered `test-agent-startup-recovery` and
+`test-workspace-import-recovery` suites pair refusal cases with explicit retry
+and same-Core Owner recovery. They exercise production adapters/services and
+real temporary files with controlled protocol/model leaves. They do not replace
+native Desktop or external-runtime acceptance.
 
 Owner recovery binds the Task revision, exact operation references, current
 Session-stop evidence and content hash to the reviewed intent. Fresh evidence
