@@ -1202,7 +1202,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           };
           claimWorkspaceFence(r, provider);
           creationEntered = true;
-          created = await agentBroker.createSession(provider, { cwd: ws.root, taskId: task.id, workspaceId: ws.id,
+          created = await agentBroker.createSession(provider, { cwd: ws.root, taskId: task.id, workspaceId: ws.id, requestId: r.requestId,
             ...modelConfig });
           if (!created?.sessionId) throw capabilityError('PROVIDER_ERROR', 'Agent returned no session');
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
@@ -1253,7 +1253,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           let current = taskFor(task.id);
           let stopped = !creationEntered || (provider === 'cetamesh' && !created?.sessionId);
           if (creationEntered && !created?.sessionId && provider !== 'cetamesh') {
-            try { stopped = (await agentBroker.require?.(provider)?.verifyTaskQuiescence?.({
+            stopped = agentBroker.isSessionCreationPreflightFailure?.(error, {
+              provider, taskId: task.id, workspaceId: ws.id, requestId: r.requestId
+            }) === true;
+            try { if (!stopped) stopped = (await agentBroker.require?.(provider)?.verifyTaskQuiescence?.({
               taskId: task.id, workspaceId: ws.id, allowEmpty: true }))?.stopped === true; }
             catch { stopped = false; }
           }

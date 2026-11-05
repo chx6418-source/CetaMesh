@@ -13,7 +13,7 @@
 //      依赖方向仍然是 Continuity → Broker。
 import crypto from 'node:crypto';
 import { describeAgentExecutionSecurity, isNativePermissionSecurity } from './execution-security.js';
-import { AGENT_PROVIDER_OPTIONAL_METHODS, agentProviderError } from './agent-provider.js';
+import { AGENT_PROVIDER_OPTIONAL_METHODS, agentProviderError, isAgentCreationPreflightFailure } from './agent-provider.js';
 
 const TASK_WORKSPACE_BOUNDARIES = new Set(['capability-broker', 'staged-capability-broker', 'native-staged']);
 
@@ -23,6 +23,7 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
   }
   const executionConsents = new Map();
   const executionBindings = new Map();
+  const creationFailures = new WeakMap();
   let taskExecutionObserver = null;
   const consentKey = (provider, workspaceId) => JSON.stringify([provider, workspaceId]);
   function securityScope(providerId, workspaceId) {
@@ -160,7 +161,7 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
         }
       }
       const executionSecurity = assertExecutionConsent(providerId, params);
-      const created = await provider.createSession({
+      const invocation = {
         ...(['staged-capability-broker', 'native-staged'].includes(boundary) ? {} : { cwd: params?.cwd }),
         taskId: params?.taskId,
         workspaceId: params?.workspaceId,
@@ -168,13 +169,28 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
         reasoningEffort: params?.reasoningEffort,
         modelProvider: params?.modelProvider,
         purpose: params?.purpose
-      });
+      };
+      let created;
+      try { created = await provider.createSession(invocation); }
+      catch (error) {
+        if (isAgentCreationPreflightFailure(error, invocation)) creationFailures.set(error, {
+          provider: providerId, taskId: params.taskId, workspaceId: params.workspaceId, requestId: params.requestId
+        });
+        throw error;
+      }
       if (created?.sessionId) {
         executionBindings.set(consentKey(providerId, created.sessionId), { workspaceId: params.workspaceId, taskId: params.taskId,
           securityRequired: executionSecurity.required, securityFingerprint: executionSecurity.fingerprint });
         while (executionBindings.size > 4096) executionBindings.delete(executionBindings.keys().next().value);
       }
       return created;
+    },
+
+    // Read-only evidence for the caller's exact failed creation, never a reusable
+    // Task-wide stopped receipt or a claim that previous executions are quiescent.
+    isSessionCreationPreflightFailure(error, scope) {
+      const proof = error && typeof error === 'object' ? creationFailures.get(error) : null;
+      return !!proof && ['provider', 'taskId', 'workspaceId', 'requestId'].every(key => proof[key] === scope?.[key]);
     },
 
     async send({ provider: providerId, sessionId, content, mode, phase = 'user', runId = crypto.randomUUID(), nativeReadinessToken, authorizationGuard } = {}) {

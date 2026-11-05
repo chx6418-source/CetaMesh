@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { isNativePermissionSecurity } from './execution-security.js';
-import { agentProviderError as fault, defineAgentProvider, normalizePromptContent } from './agent-provider.js';
+import { agentProviderError as fault, defineAgentProvider, normalizePromptContent, runAgentCreationPreflight } from './agent-provider.js';
 import { createJsonRpcTransport } from './protocol/json-rpc-transport.js';
 import { createAgentEventBuffer } from './protocol/agent-event-buffer.js';
 import { createAgentPermissionBridge } from './protocol/agent-permission-bridge.js';
@@ -197,11 +197,14 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
     methods:{
       async health() { const available = eligible(); return {provider:policy.id,available,taskEligible:available,
         reason:available ? null : 'external_protocol_unverified',protocolVersion:1}; },
-      async createSession({taskId,workspaceId} = {}) {
-        if (shuttingDown) throw fault('PROVIDER_SHUTTING_DOWN','ACP provider is shutting down');
-        if (!eligible()) throw fault('PROVIDER_UNAVAILABLE','Verified ACP runtime and native security required');
-        await validateRuntime();
-        if (sessions.size + creating >= 16) throw fault('AGENT_SESSION_LIMIT','ACP session limit reached');
+      async createSession(invocation = {}) {
+        const {taskId,workspaceId} = invocation;
+        await runAgentCreationPreflight(invocation, async () => {
+          if (shuttingDown) throw fault('PROVIDER_SHUTTING_DOWN','ACP provider is shutting down');
+          if (!eligible()) throw fault('PROVIDER_UNAVAILABLE','Verified ACP runtime and native security required');
+          await validateRuntime();
+          if (sessions.size + creating >= 16) throw fault('AGENT_SESSION_LIMIT','ACP session limit reached');
+        });
         creating++;
         let completed;
         const record = {done:new Promise(resolve => { completed = resolve; })};
@@ -224,6 +227,9 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
           s = {id:crypto.randomUUID(),taskId,workspaceId,stage,buffer:createAgentEventBuffer(),sequence:0,state:'new',run:null,closed:false};
           if(stage.versionContext)stage.versionContext.executorId=policy.id+':'+s.id;
           record.session = s;
+          // No lifecycle intent or process exists yet. If this preflight fails,
+          // the catch below must still confirm staging cleanup before returning it.
+          await runAgentCreationPreflight(invocation, validateRuntime);
           s.lifecycle=getSessionLifecycle();
           s.lifecycle?.create({sessionId:s.id,taskId,workspaceId,transport:'app-server',snapshotId:stage.versionContext?.snapshotId??path.basename(stage.root),
             attemptId:stage.versionContext?.attemptId??null});
@@ -231,7 +237,6 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
             if (s.handle && s.handle !== handle) throw fault('ACP_LAUNCH_HANDLE_MISMATCH','Launcher changed the supervised handle');
             s.handle = handle;
           };
-          await validateRuntime();
           const launched = await launch({provider:policy.id,sessionId:s.id,taskId,workspaceId,cwd:stage.root,
             descriptor:structuredClone(policy),onHandle});
           if (s.handle && s.handle !== launched) throw fault('ACP_LAUNCH_HANDLE_MISMATCH','Returned handle differs from captured handle');

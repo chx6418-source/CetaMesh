@@ -76,6 +76,22 @@ test('F0 ACP session creation, dispatch and completion retain Workspace and chec
   } finally { await f.close(); }
 });
 
+test('F1 exact ACP pre-start rejection releases only this creation and permits explicit same-Task retry', async () => {
+  const f = await fixture('pre-start');
+  try {
+    const before = f.read(); f.state.validationError = fault('AGENT_RUNTIME_CHANGED');
+    await assert.rejects(f.run('pre-start-rejected'), { code: 'AGENT_RUNTIME_CHANGED' });
+    assert.equal(f.state.launches, 0); assert.equal(f.state.prompts, 0);
+    assert.deepEqual(f.fences(), [], 'a proven pre-effect creation must not retain a Workspace fence');
+    assert.deepEqual(f.read(), before, 'no execution means no invented Attempt, checkpoint or Task transition');
+    f.state.validationError = null;
+    const result = await f.run('owner-explicit-retry');
+    assert.equal(result.result.accepted, true); assert.equal(result.result.taskId, f.task.id);
+    assert.equal(f.state.launches, 1); assert.equal(f.state.prompts, 1);
+    assert.deepEqual(f.read().checkpoint, before.checkpoint);
+  } finally { await f.close(); }
+});
+
 try {
   for (const [name, run] of cases) { const start = performance.now(); await run(); console.log('PASS', name, Math.round(performance.now() - start) + 'ms'); }
 } finally {
