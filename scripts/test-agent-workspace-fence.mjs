@@ -64,6 +64,7 @@ async function fixture(name, { failFenceWrite = false, failAfterSend = false } =
   tasks.runtime.attachAgent = attach; tasks.runtime.block = block; tasks.runtime.setModelConfig = setModel;
   return { a, b, workspace, state, stateDir, run, initialError, read: id => tasks.runtime.get({ id }).task,
     recovery: () => capabilities.recoveryForTask(a.id), completionBlocker: () => capabilities.completionBlocker(a.id),
+    assertRecoveryAvailable: taskId => capabilities.assertWorkspaceRecoveryAvailable({ taskId, workspaceId: workspace.id }),
     async restart() { await capabilities.close(); tasks = createTaskService({ stateDir }); capabilities = build(); },
     ui() { return createDesktopUiService({ services: { taskService: tasks, workspaceService: workspaces,
       capabilityService: capabilities, agentBroker: agents } }); },
@@ -80,6 +81,8 @@ test('unconfirmed creation holds Workspace when attachment and rollback Task wri
     assert.equal(f.initialError.code, 'FIXTURE_TASK_WRITE_FAILED', 'rollback preserves the original failure');
     assert.equal(f.recovery()?.state, 'needs-reconciliation');
     assert.equal(f.completionBlocker(), 'TASK_EXECUTION_UNCONFIRMED');
+    assert.throws(() => f.assertRecoveryAvailable(f.b.id), error => error.code === 'TASK_WORKSPACE_BUSY' && error.blockingTaskId === f.a.id,
+      'pre-attachment durable fence also prevents another Task from rolling back imports');
   } finally { await f.close(); }
 });
 

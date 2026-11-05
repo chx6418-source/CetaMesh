@@ -463,11 +463,16 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
   }
 
   // Owner recovery intentionally retains its existing write/recovery fence.
-  async function collectRecoveryProof(id) {
+  async function collectRecoveryProof(id, { beforeRecovery } = {}) {
     const entry = requireWorkspace({ id });
     // Only the original registered root can recover its retained batches.
     // Alternate ancestor/descendant registrations remain fenced projections.
-    if (!pendingRecoveryState(entry)) recoverEntry(entry, { ownerReview: true });
+    if (!pendingRecoveryState(entry)) {
+      // A pure observation needs no execution reservation. The Owner coordinator
+      // rechecks existing ownership synchronously only when imports may mutate.
+      if (recovery.has(entry.root) || workspaceImportEvidence(entry.root).length) beforeRecovery?.();
+      recoverEntry(entry, { ownerReview: true });
+    }
     return contentProof(assertWritable(entry));
   }
 

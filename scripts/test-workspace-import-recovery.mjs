@@ -5,9 +5,11 @@ import os from 'node:os';
 import path from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createCetaMeshServices } from '../src/app/service-container.js';
+import { createTaskService } from '../src/task/service.js';
+import { createTaskRecovery } from '../src/desktop/task-recovery.js';
 import { createWorkspaceService } from '../src/workspace/service.js';
 import { createWorkspaceRegistry, workspaceRegistryFile } from '../src/workspace/registry.js';
-import { workspaceJournalDir } from '../src/workspace/transaction.js';
+import { workspaceJournalDir, recoverWorkspaceImports } from '../src/workspace/transaction.js';
 
 // Real non-Git files, transaction manifests and storage. No model or native UI.
 const parent = fs.realpathSync.native(os.tmpdir());
@@ -102,6 +104,80 @@ test('F1 Owner verifies original import and resumes the same Task in the same Co
     assert.equal(services.capabilityService.broker.approvals.list().length, 0);
     assert.deepEqual(fs.readdirSync(f.journal), []);
     console.log('METRIC same-Core Owner recovery: inspect(refused), inspect(verified), reconcile(resume); approvals=0; modelCalls=' + modelCalls);
+  } finally {
+    for (const key of ['autonomousHandoff', 'chatService', 'agentService', 'managedAgent', 'capabilityService', 'extensionService']) await services[key].close();
+  }
+});
+
+for (const kind of ['missing-manifest', 'missing-preimage', 'changed-preimage', 'changed-manifest', 'unrelated-batch', 'removed-journal']) {
+  test('F2 ' + kind + ' cannot replace original recovery evidence', async () => {
+    const f = fixture(kind), service = f.build();
+    fs.writeFileSync(path.join(f.project, 'input.txt'), 'original');
+    if (kind === 'missing-manifest') fs.renameSync(path.join(f.batch, 'manifest.json'), path.join(f.batch, 'manifest.retained'));
+    if (kind === 'missing-preimage') fs.renameSync(path.join(f.batch, '0.preimage'), path.join(f.batch, '0.retained'));
+    if (kind === 'changed-preimage') fs.writeFileSync(path.join(f.batch, '0.preimage'), 'different');
+    if (kind === 'changed-manifest') fs.writeFileSync(path.join(f.batch, 'manifest.json'), JSON.stringify({ ...f.manifest, status: 'completed' }));
+    if (kind === 'unrelated-batch') fs.renameSync(f.batch, path.join(f.journal, 'batch-unrelated'));
+    if (kind === 'removed-journal') {
+      // A direct helper result is not the same-Core Owner settlement receipt.
+      assert.deepEqual(recoverWorkspaceImports(f.project), ['batch-original']);
+    }
+    await assert.rejects(service.collectRecoveryProof(f.workspace.id), { code: 'WORKSPACE_RECOVERY_REQUIRED' });
+    assert.equal(service.describeWorkspace(f.workspace.id), null);
+    assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'original');
+  });
+}
+
+test('F2 read-only facts and overlapping Workspace identities cannot trigger rollback', async () => {
+  const f = fixture('overlap'), service = f.build();
+  fs.writeFileSync(path.join(f.project, 'input.txt'), 'staged');
+  const nested = path.join(f.project, 'nested'); fs.mkdirSync(nested);
+  for (const [name, root] of [['ancestor', f.root], ['descendant', nested]]) {
+    const alias = (await service.execute({ method: 'workspace.create', params: { name, root } })).workspace;
+    await assert.rejects(service.collectRecoveryProof(alias.id), { code: 'WORKSPACE_RECOVERY_REQUIRED' });
+    assert.equal(service.describeWorkspace(alias.id), null);
+  }
+  await assert.rejects(service.collectContentProof(f.workspace.id), { code: 'WORKSPACE_RECOVERY_REQUIRED' });
+  assert.equal(service.describeWorkspace(f.workspace.id), null);
+  assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'staged');
+  assert.ok(fs.existsSync(path.join(f.batch, 'manifest.json')));
+});
+
+test('F2 unknown execution cannot turn Owner inspection into a Workspace write', async () => {
+  const f = fixture('active-executor'), workspaceService = f.build(), taskService = createTaskService({ stateDir: f.stateDir });
+  const task = taskService.runtime.create({ goal: 'Keep external execution ownership', workspaceId: f.workspace.id });
+  let row = taskService.runtime.attachAgent({ id: task.id, expectedRev: task.rev, provider: 'external', sessionId: 'unconfirmed' }).task;
+  row = taskService.runtime.start({ id: row.id, expectedRev: row.rev }).task;
+  row = taskService.runtime.block({ id: row.id, expectedRev: row.rev, reason: 'needs-reconciliation: unknown process' }).task;
+  fs.writeFileSync(path.join(f.project, 'input.txt'), 'staged');
+  const recovery = createTaskRecovery({ services: { taskService, workspaceService, capabilityService: {},
+    agentBroker: { require: () => ({}), capabilities: () => ({ workspaceBoundary: 'native-staged' }) } } });
+  const inspected = await recovery.inspect(row);
+  assert.equal(inspected.canRelease, false); assert.ok(inspected.blockers.some(blocker => blocker.code === 'SESSION_EXECUTION_UNCONFIRMED'));
+  assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'staged');
+  assert.ok(fs.existsSync(path.join(f.batch, 'manifest.json')));
+  assert.deepEqual(taskService.runtime.get({ id: row.id }).task, row);
+});
+
+test('F2 another Task writer prevents import recovery through an older Task', async () => {
+  const f = fixture('other-writer');
+  const services = createCetaMeshServices({ stateDir: f.stateDir, dataRoot: path.join(f.root, 'data'), resourceRoot: f.root, sourceRoot: f.root });
+  try {
+    const rt = services.taskService.runtime;
+    const old = rt.create({ goal: 'Older interrupted task', workspaceId: f.workspace.id });
+    let oldRow = rt.start({ id: old.id, expectedRev: old.rev }).task;
+    oldRow = rt.block({ id: old.id, expectedRev: oldRow.rev, reason: 'needs-reconciliation: import interrupted' }).task;
+    const writer = rt.create({ goal: 'Existing writer still owns execution', workspaceId: f.workspace.id });
+    const assigned = rt.attachAgent({ id: writer.id, expectedRev: writer.rev, provider: 'external', sessionId: 'still-owned' }).task;
+    rt.start({ id: writer.id, expectedRev: assigned.rev });
+    fs.writeFileSync(path.join(f.project, 'input.txt'), 'staged');
+    const inspected = await services.desktopUiService.execute({ method: 'ui.task.recovery.inspect', params: { id: old.id } });
+    assert.equal(inspected.canRelease, false, 'recovery must respect the other Task ownership');
+    assert.ok(inspected.blockers.some(row => row.code === 'TASK_WORKSPACE_BUSY'));
+    assert.ok(inspected.blockers.some(row => row.blockingTaskId === writer.id && row.message.includes(writer.id)));
+    assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'staged');
+    assert.ok(fs.existsSync(path.join(f.batch, 'manifest.json')));
+    assert.deepEqual(rt.get({ id: old.id }).task, oldRow);
   } finally {
     for (const key of ['autonomousHandoff', 'chatService', 'agentService', 'managedAgent', 'capabilityService', 'extensionService']) await services[key].close();
   }

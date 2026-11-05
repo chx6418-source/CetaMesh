@@ -134,9 +134,23 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
       // must stay read-only until every execution/operation blocker is settled.
       workspace = blockers.length
         ? await services.workspaceService.collectContentProof?.(task.workspaceId) ?? null
-        : await services.workspaceService.collectRecoveryProof(task.workspaceId);
+        : await services.workspaceService.collectRecoveryProof(task.workspaceId, { beforeRecovery: () => {
+          const current = runtime.get({ id: task.id }).task, currentReview = journals(current);
+          currentReview.taskId = current.id;
+          if (current.rev !== task.rev || digest(currentReview) !== digest(review)) {
+            fail('TASK_RECOVERY_REVIEW_STALE', '执行归属已变化，请重新核查后再恢复导入');
+          }
+          if (typeof services.capabilityService.assertWorkspaceRecoveryAvailable !== 'function') {
+            fail('TASK_RECOVERY_REVIEW_REQUIRED', '导入恢复需要当前 Core 核验工作区执行归属');
+          }
+          services.capabilityService.assertWorkspaceRecoveryAvailable({ taskId: task.id, workspaceId: task.workspaceId });
+        } });
     }
-    catch (error) { blockers.push({ code: codeOf(error?.code), message: '工作区内容无法完整核验，请检查项目可访问性、边界及保留的操作记录后重新核查。' }); }
+    catch (error) { blockers.push({ code: codeOf(error?.code),
+      ...(error?.code === 'TASK_WORKSPACE_BUSY' && error.blockingTaskId ? { blockingTaskId: error.blockingTaskId } : {}),
+      message: error?.code === 'TASK_WORKSPACE_BUSY' && error.blockingTaskId
+        ? `工作区仍由任务 ${error.blockingTaskId} 占用。请先核查该任务的执行归属，再恢复导入。`
+        : '工作区内容无法完整核验，请检查项目可访问性、边界及保留的操作记录后重新核查。' }); }
     const latest = runtime.get({ id: task.id }).task;
     const stable = journals(latest); stable.taskId = latest.id;
     if (latest.rev !== task.rev || digest(stable) !== digest(review)) {

@@ -1549,6 +1549,22 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           ['pending','approved','executing'].includes(row.status)).map(row => [row.id,row.status])
       };
     },
+    assertWorkspaceRecoveryAvailable({ taskId, workspaceId }) {
+      if (provisioning.has(taskId) || taskHandoffGuard(taskId) || broker.hasActiveDispatchForTask({ taskId, workspaceId })) {
+        throw capabilityError('OPERATION_STILL_RUNNING', 'Task execution must settle before import recovery');
+      }
+      const owner = taskRuntime.activeWorkspaceOwner({ workspaceId, exceptTaskId: taskId })
+        ?? taskRuntime.activeWorkspaceReaders({ workspaceId, exceptTaskId: taskId })[0];
+      const writer = [...workspaceProvisioning].find(([id, held]) => held.taskId !== taskId && workspacesOverlap(id, workspaceId))?.[1];
+      const fence = workspaceFences().find(row => row.taskId !== taskId && workspacesOverlap(row.workspaceId, workspaceId));
+      let reader;
+      for (const [id, readers] of workspaceReadProvisioning) if (workspacesOverlap(id, workspaceId)) {
+        reader = [...readers.keys()].find(id => id !== taskId);
+        if (reader) break;
+      }
+      const blockingTaskId = owner?.id ?? writer?.taskId ?? fence?.taskId ?? reader;
+      if (blockingTaskId) throw Object.assign(capabilityError('TASK_WORKSPACE_BUSY', 'Another Task still owns Workspace execution; verify it before import recovery'), { blockingTaskId });
+    },
     acknowledgeTaskRecovery(taskId) {
       const operationTask = taskFor(taskId);
       if (provisioning.has(taskId) || Object.entries(journal).some(([id,row]) => row?.taskId===taskId && requests.has(id)))
