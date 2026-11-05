@@ -260,6 +260,20 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    .map(([key,row])=>({requestId:row.requestId??key,capability:row.capability,status:row.status,at:row.at})),
   hasActiveDispatchForTask:({taskId,workspaceId})=>[...activeDispatches].some(key=>
    dispatches[key]?.taskId===taskId&&dispatches[key]?.workspaceId===workspaceId),
+  workspaceRecoveryBlocker({workspaceId,reviewedTaskId,overlaps=(left,right)=>left===right}) {
+   for(const [key,row] of Object.entries(dispatches)) {
+    if(!row?.workspaceId)continue;
+    const active=activeDispatches.has(key);
+    // Include Owner effects without Task attribution. Only the inspected Task's
+    // settled uncertainty belongs to its existing exact Owner review protocol.
+    const reviewed=typeof reviewedTaskId==='string'&&row.taskId===reviewedTaskId;
+    if(active||(!reviewed&&['started','outcome-unknown'].includes(row.status))) {
+     if(!overlaps(row.workspaceId,workspaceId))continue;
+     return {requestId:row.requestId??key,taskId:row.taskId??null,capability:row.capability,status:row.status,active};
+    }
+   }
+   return null;
+  },
   operationsForTask:({taskId,workspaceId})=>Object.values(dispatches).filter(row=>row.operationId&&row.taskId===taskId&&row.workspaceId===workspaceId)
    .map(({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker,continuationInput})=>({operationId,logicalStepId,capability,status,at,executorId,attemptId,requestId,blocker,...(safeContinuationInput(capability,continuationInput)?{continuationInput:safeContinuationInput(capability,continuationInput)}:{})})),
   operationRecordForStep:({taskId,workspaceId,logicalStepId})=>{

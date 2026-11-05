@@ -7,6 +7,9 @@ import { resolveInside } from './boundary.js';
 
 const digest = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const failure = (code, message) => Object.assign(new Error(message), { code });
+// Opaque, same-Core receipts minted only after final rollback verification.
+// They survive a cleanup error, not a Core restart, and never prove execution exit.
+const verifiedRollbacks = new WeakMap();
 
 export function workspaceJournalDir(rootReal) {
   return path.join(os.tmpdir(), 'CetaMesh', 'workspace-import-journal', digest(Buffer.from(rootReal)).slice(0, 32));
@@ -54,7 +57,7 @@ function restoreOne(rootReal, dir, row) {
   }
 }
 
-function readImportBatch(rootReal, journalDir, name) {
+function readImportBatch(rootReal, journalDir, name, receipt) {
     const dir = path.join(journalDir, name);
     const stat = fs.lstatSync(dir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw failure('IMPORT_JOURNAL_INVALID', 'Workspace import batch directory is invalid');
@@ -76,6 +79,9 @@ function readImportBatch(rootReal, journalDir, name) {
         || row.backup !== (row.originalHash === null ? null : `${index}.preimage`))) {
       throw failure('IMPORT_JOURNAL_INVALID', 'Workspace import journal is invalid');
     }
+    const sha256 = digest(JSON.stringify(manifest));
+    const verified = receipt && typeof receipt === 'object' ? verifiedRollbacks.get(receipt) : null;
+    const rollbackVerified = verified?.root === rootReal && verified.name === name && verified.sha256 === sha256;
     const seen = new Set();
     for (const row of manifest.rows) {
       const key = resolveInside(rootReal, row.path, { forWrite: true }).absolute;
@@ -84,7 +90,10 @@ function readImportBatch(rootReal, journalDir, name) {
       seen.add(identity);
       // A durably completed import only needs cleanup, never rollback. Its
       // preimages may already have been removed by interrupted cleanup.
-      if (manifest.status !== 'completed' && row.backup !== null) {
+      if (rollbackVerified) {
+        const { bytes } = targetFor(rootReal, row.path);
+        if ((bytes === null ? null : digest(bytes)) !== row.originalHash) throw failure('WORKSPACE_RECOVERY_REQUIRED', 'Verified rollback content changed before cleanup');
+      } else if (manifest.status !== 'completed' && row.backup !== null) {
         const file = path.join(dir, row.backup), stat = fs.lstatSync(file);
         if (!stat.isFile() || stat.isSymbolicLink() || digest(fs.readFileSync(file)) !== row.originalHash) {
           throw failure('IMPORT_JOURNAL_INVALID', 'Original import preimage cannot be verified');
@@ -94,7 +103,7 @@ function readImportBatch(rootReal, journalDir, name) {
     // Manifest binds root, ordered paths, original/staged hashes and backup names.
     // Pending imports also require every original preimage; completed imports
     // authorize cleanup only and never supply a rollback content proof.
-    return { dir, manifest, evidence: { name, sha256: digest(JSON.stringify(manifest)) } };
+    return { dir, manifest, evidence: { name, sha256, ...(rollbackVerified ? { receipt } : {}) } };
 }
 
 function importBatchNames(journalDir) {
@@ -105,19 +114,21 @@ function importBatchNames(journalDir) {
 }
 
 // Read-only, content-bound evidence for the existing Owner recovery coordinator.
-export function workspaceImportEvidence(rootReal, { journalDir = workspaceJournalDir(rootReal) } = {}) {
-  return importBatchNames(journalDir).map(name => readImportBatch(rootReal, journalDir, name).evidence);
+export function workspaceImportEvidence(rootReal, { journalDir = workspaceJournalDir(rootReal), verifiedBatches = [] } = {}) {
+  return importBatchNames(journalDir).map(name => readImportBatch(rootReal, journalDir, name,
+    verifiedBatches.find(row => row.name === name)?.receipt).evidence);
 }
 
-export function recoverWorkspaceImports(rootReal, { journalDir = workspaceJournalDir(rootReal), expectedBatches, onRecovered } = {}) {
-  const evidence = workspaceImportEvidence(rootReal, { journalDir });
+export function recoverWorkspaceImports(rootReal, { journalDir = workspaceJournalDir(rootReal), expectedBatches, onVerified, onRecovered } = {}) {
+  const evidence = workspaceImportEvidence(rootReal, { journalDir, verifiedBatches: expectedBatches });
+  const identities = rows => rows.map(({ name, sha256 }) => ({ name, sha256 }));
   if (expectedBatches !== undefined && (!expectedBatches.length
-    || JSON.stringify(evidence) !== JSON.stringify(expectedBatches))) {
+    || JSON.stringify(identities(evidence)) !== JSON.stringify(identities(expectedBatches)))) {
     throw failure('WORKSPACE_RECOVERY_REQUIRED', 'Original import batch evidence is missing or changed');
   }
   const recovered = [];
   for (const expected of evidence) {
-    const { dir, manifest, evidence: current } = readImportBatch(rootReal, journalDir, expected.name);
+    const { dir, manifest, evidence: current } = readImportBatch(rootReal, journalDir, expected.name, expected.receipt);
     if (current.sha256 !== expected.sha256) throw failure('WORKSPACE_RECOVERY_REQUIRED', 'Import evidence changed before recovery');
     if (manifest.status !== 'completed') {
       for (const row of [...manifest.rows].reverse()) restoreOne(rootReal, dir, row);
@@ -126,8 +137,13 @@ export function recoverWorkspaceImports(rootReal, { journalDir = workspaceJourna
         if ((bytes === null ? null : digest(bytes)) !== row.originalHash) throw failure('WORKSPACE_RECOVERY_REQUIRED', 'Recovered target changed before settlement');
       }
     }
-    if (readImportBatch(rootReal, journalDir, expected.name).evidence.sha256 !== expected.sha256) {
+    if (readImportBatch(rootReal, journalDir, expected.name, expected.receipt).evidence.sha256 !== expected.sha256) {
       throw failure('WORKSPACE_RECOVERY_REQUIRED', 'Import evidence changed during recovery');
+    }
+    if (manifest.status !== 'completed') {
+      const receipt = {};
+      verifiedRollbacks.set(receipt, { root: rootReal, name: expected.name, sha256: expected.sha256 });
+      onVerified?.({ ...expected, receipt });
     }
     removeJournal(dir, journalDir);
     recovered.push(expected.name);
@@ -137,8 +153,8 @@ export function recoverWorkspaceImports(rootReal, { journalDir = workspaceJourna
   return recovered;
 }
 
-export function applyWorkspaceTransaction(rootReal, changes, { journalDir = workspaceJournalDir(rootReal), writeFile, beforeCommit } = {}) {
-  recoverWorkspaceImports(rootReal, { journalDir, writeFile });
+export function applyWorkspaceTransaction(rootReal, changes, { journalDir = workspaceJournalDir(rootReal), writeFile, beforeCommit, onRecoveryVerified, onRecoverySettled } = {}) {
+  recoverWorkspaceImports(rootReal, { journalDir, onVerified: onRecoveryVerified, onRecovered: onRecoverySettled });
   if (!Array.isArray(changes) || changes.length < 1 || changes.length > 500) throw failure('INVALID_CHANGES', 'Workspace import needs 1-500 changes');
   const seen = new Set();
   const rows = changes.map((change, index) => {
@@ -195,7 +211,7 @@ export function applyWorkspaceTransaction(rootReal, changes, { journalDir = work
       removeJournal(dir, journalDir);
       throw error;
     }
-    try { recoverWorkspaceImports(rootReal, { journalDir, writeFile }); }
+    try { recoverWorkspaceImports(rootReal, { journalDir, onVerified: onRecoveryVerified, onRecovered: onRecoverySettled }); }
     catch (recoveryError) { throw failure('WORKSPACE_RECOVERY_REQUIRED', `${error.message}; recovery: ${recoveryError.message}`); }
     throw error;
   }

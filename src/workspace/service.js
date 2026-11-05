@@ -43,11 +43,12 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
   }
   const registry = createWorkspaceRegistry({ file: workspaceRegistryFile(stateDir), now });
   const recovery = new Map();
-  function retainRecovery(workspace, error) {
+  function retainRecovery(workspace, error, verifiedBatches = []) {
       let retained = recovery.get(workspace.root);
       if (!retained) {
         let batches = null;
-        try { batches = workspaceImportEvidence(workspace.root); } catch { /* Incomplete evidence cannot authorize recovery. */ }
+        try { batches = workspaceImportEvidence(workspace.root, { verifiedBatches }); }
+        catch { batches = null; /* Incomplete evidence cannot authorize recovery. */ }
         retained = { batches };
       }
       // A retained import belongs to one project. Preserve its raw evidence and
@@ -58,16 +59,21 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
   function recoverEntry(workspace, { ownerReview = false } = {}) {
     const retained = recovery.get(workspace.root);
     if (retained && (!ownerReview || !retained.batches?.length)) return;
+    const verifiedBatches = [];
     try {
-      recoverWorkspaceImports(workspace.root, retained ? {
-        expectedBatches: retained.batches,
+      recoverWorkspaceImports(workspace.root, {
+        ...(retained ? { expectedBatches: retained.batches } : {}),
+        onVerified: proof => {
+          verifiedBatches.push(proof);
+          if (retained) retained.batches = retained.batches.map(row => row.name === proof.name && row.sha256 === proof.sha256 ? proof : row);
+        },
         // Record only affirmative settlement of each original batch. Partial
         // progress remains retryable; absence alone never counts as settlement.
-        onRecovered: proof => { retained.batches = retained.batches.filter(row => row.name !== proof.name || row.sha256 !== proof.sha256); }
-      } : {});
+        onRecovered: proof => { if (retained) retained.batches = retained.batches.filter(row => row.name !== proof.name || row.sha256 !== proof.sha256); }
+      });
       if (retained && retained.batches.length === 0) recovery.delete(workspace.root);
     } catch (error) {
-      retainRecovery(workspace, error);
+      retainRecovery(workspace, error, verifiedBatches);
     }
   }
   for (const workspace of registry.list()) recoverEntry(workspace);
@@ -394,11 +400,15 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
 
   function applyChanges({ id, changes, actor = 'capability-broker' } = {}) {
     const entry = assertWritable(requireWorkspace({ id }));
+    let verifiedBatches = [];
     let result;
-    try { result = applyWorkspaceChanges(entry.root, changes); }
+    try { result = applyWorkspaceChanges(entry.root, changes, {
+      onRecoveryVerified: proof => verifiedBatches.push(proof),
+      onRecoverySettled: proof => { verifiedBatches = verifiedBatches.filter(row => row.name !== proof.name || row.sha256 !== proof.sha256); }
+    }); }
     catch (error) {
-      if (['WORKSPACE_RECOVERY_REQUIRED', 'IMPORT_JOURNAL_INVALID', 'IMPORT_JOURNAL_INCOMPLETE'].includes(error?.code)) {
-        retainRecovery(entry, error);
+      if (verifiedBatches.length || ['WORKSPACE_RECOVERY_REQUIRED', 'IMPORT_JOURNAL_INVALID', 'IMPORT_JOURNAL_INCOMPLETE'].includes(error?.code)) {
+        retainRecovery(entry, error, verifiedBatches);
       }
       throw error;
     }

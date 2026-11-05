@@ -1553,6 +1553,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       if (provisioning.has(taskId) || taskHandoffGuard(taskId) || broker.hasActiveDispatchForTask({ taskId, workspaceId })) {
         throw capabilityError('OPERATION_STILL_RUNNING', 'Task execution must settle before import recovery');
       }
+      const operation = broker.workspaceRecoveryBlocker({ workspaceId, reviewedTaskId: taskId, overlaps: workspacesOverlap });
+      if (operation) throw Object.assign(capabilityError(operation.active ? 'OPERATION_STILL_RUNNING' : 'WORKSPACE_OPERATION_UNCONFIRMED',
+        'A Workspace operation must settle or be reviewed under its original ownership before import recovery'), {
+        blockingTaskId: operation.taskId, requestId: operation.requestId
+      });
       const owner = taskRuntime.activeWorkspaceOwner({ workspaceId, exceptTaskId: taskId })
         ?? taskRuntime.activeWorkspaceReaders({ workspaceId, exceptTaskId: taskId })[0];
       const writer = [...workspaceProvisioning].find(([id, held]) => held.taskId !== taskId && workspacesOverlap(id, workspaceId))?.[1];

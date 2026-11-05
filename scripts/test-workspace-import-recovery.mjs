@@ -7,6 +7,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { createTaskService } from '../src/task/service.js';
 import { createTaskRecovery } from '../src/desktop/task-recovery.js';
+import { OWNER_ACTOR } from '../src/capability/types.js';
 import { createWorkspaceService } from '../src/workspace/service.js';
 import { createWorkspaceRegistry, workspaceRegistryFile } from '../src/workspace/registry.js';
 import { workspaceJournalDir, recoverWorkspaceImports } from '../src/workspace/transaction.js';
@@ -193,6 +194,119 @@ test('F3 a completed import with interrupted preimage cleanup stays completed', 
   assert.equal(service.describeWorkspace(f.workspace.id)?.root, f.project);
   assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'staged');
   assert.deepEqual(fs.readdirSync(f.journal), []);
+});
+
+test('F2 unassigned Owner effect blocks recovery until its actual file operation settles', async () => {
+  const f = fixture('owner-effect', 'staged');
+  const services = createCetaMeshServices({ stateDir: f.stateDir, dataRoot: path.join(f.root, 'data'), resourceRoot: f.root, sourceRoot: f.root });
+  let finish, entered = false, operation;
+  const gate = new Promise(resolve => { finish = resolve; });
+  try {
+    const rt = services.taskService.runtime, task = rt.create({ goal: 'Interrupted import', workspaceId: f.workspace.id });
+    const started = rt.start({ id: task.id, expectedRev: task.rev }).task;
+    rt.block({ id: task.id, expectedRev: started.rev, reason: 'needs-reconciliation: import' });
+    const broker = services.capabilityService.broker;
+    broker.register({ id: 'fixture.workspace-effect', permission: 'filesystem.write', effect: 'non-idempotent',
+      execute: async () => { entered = true; await gate; fs.writeFileSync(path.join(f.project, 'owner-result.txt'), 'actual Owner result'); return { written: true }; } });
+    operation = broker.execute({ requestId: 'owner-file-effect', workspaceId: f.workspace.id, actor: OWNER_ACTOR,
+      approved: true, capability: 'fixture.workspace-effect', input: {} });
+    const deadline = Date.now() + 1000;
+    while (!entered) { assert.ok(Date.now() < deadline); await delay(1); }
+    fs.mkdirSync(f.batch); fs.writeFileSync(path.join(f.batch, 'manifest.json'), JSON.stringify(f.manifest));
+    fs.writeFileSync(path.join(f.batch, '0.preimage'), 'original'); fs.writeFileSync(path.join(f.project, 'input.txt'), 'third-party');
+    assert.throws(() => services.workspaceService.applyChanges({ id: f.workspace.id, changes: [{ action: 'write', path: 'unused.txt', content: 'unused' }] }), { code: 'WORKSPACE_RECOVERY_REQUIRED' });
+    fs.writeFileSync(path.join(f.project, 'input.txt'), 'staged');
+    const inspect = () => services.desktopUiService.execute({ method: 'ui.task.recovery.inspect', params: { id: task.id } });
+    const denied = await inspect();
+    assert.equal(denied.canResume, false); assert.ok(denied.blockers.some(row => row.code === 'OPERATION_STILL_RUNNING'));
+    assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'staged');
+    finish(); await operation;
+    assert.equal((await inspect()).canResume, true);
+    assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'original');
+    assert.equal(fs.readFileSync(path.join(f.project, 'owner-result.txt'), 'utf8'), 'actual Owner result');
+  } finally {
+    finish(); await operation;
+    for (const key of ['autonomousHandoff', 'chatService', 'agentService', 'managedAgent', 'capabilityService', 'extensionService']) await services[key].close();
+  }
+});
+
+test('F3 verified rollback can retry partial journal cleanup without accepting unverified missing backups', async () => {
+  const f = fixture('rollback-cleanup'), service = f.build(), remove = fs.rmSync;
+  fs.writeFileSync(path.join(f.project, 'input.txt'), 'staged');
+  try {
+    fs.rmSync = (target, options) => {
+      if (path.resolve(String(target)) === f.batch) {
+        fs.unlinkSync(path.join(f.batch, '0.preimage'));
+        throw Object.assign(new Error('Controlled cleanup interruption'), { code: 'EBUSY' });
+      }
+      return remove(target, options);
+    };
+    await assert.rejects(service.collectRecoveryProof(f.workspace.id), { code: 'WORKSPACE_RECOVERY_REQUIRED' });
+  } finally { fs.rmSync = remove; }
+  assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'original');
+  assert.ok(fs.existsSync(path.join(f.batch, 'manifest.json')));
+  fs.writeFileSync(path.join(f.project, 'input.txt'), 'later-user-edit');
+  await assert.rejects(service.collectRecoveryProof(f.workspace.id), { code: 'WORKSPACE_RECOVERY_REQUIRED' });
+  assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'later-user-edit');
+  fs.writeFileSync(path.join(f.project, 'input.txt'), 'original');
+  assert.equal((await service.collectRecoveryProof(f.workspace.id)).fileCount, 1);
+  assert.deepEqual(fs.readdirSync(f.journal), []);
+});
+
+test('F3 startup retains verified rollback evidence if its first cleanup is interrupted', async () => {
+  const f = fixture('startup-cleanup', 'staged'), remove = fs.rmSync; let service;
+  try {
+    fs.rmSync = (target, options) => {
+      if (path.resolve(String(target)) === f.batch) {
+        fs.unlinkSync(path.join(f.batch, '0.preimage'));
+        throw Object.assign(new Error('Controlled startup cleanup interruption'), { code: 'EBUSY' });
+      }
+      return remove(target, options);
+    };
+    service = f.build();
+  } finally { fs.rmSync = remove; }
+  assert.equal(service.describeWorkspace(f.workspace.id), null);
+  assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'original');
+  assert.equal((await service.collectRecoveryProof(f.workspace.id)).fileCount, 1);
+  assert.deepEqual(fs.readdirSync(f.journal), []);
+});
+
+test('F3 ordinary failed import with complete rollback leaves no stale recovery fence', async () => {
+  const f = fixture('ordinary-rollback', 'staged'), service = f.build(), rename = fs.renameSync;
+  try {
+    fs.renameSync = (from, to) => {
+      if (path.resolve(String(to)) === path.join(f.project, 'input.txt')) throw Object.assign(new Error('Controlled write failure'), { code: 'EIO' });
+      return rename(from, to);
+    };
+    assert.throws(() => service.applyChanges({ id: f.workspace.id, changes: [{ action: 'write', path: 'input.txt', content: 'new' }] }), { code: 'WRITE_FAILED' });
+  } finally { fs.renameSync = rename; }
+  assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'original');
+  assert.deepEqual(fs.readdirSync(f.journal), []);
+  assert.equal(service.describeWorkspace(f.workspace.id)?.root, f.project);
+  service.applyChanges({ id: f.workspace.id, changes: [{ action: 'write', path: 'input.txt', content: 'explicit retry' }] });
+  assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'explicit retry');
+});
+
+test('F2 completed history from a removed Workspace does not block unrelated recovery', async () => {
+  const f = fixture('retired-workspace');
+  const services = createCetaMeshServices({ stateDir: f.stateDir, dataRoot: path.join(f.root, 'data'), resourceRoot: f.root, sourceRoot: f.root });
+  try {
+    const retiredRoot = path.join(f.root, 'retired'); fs.mkdirSync(retiredRoot);
+    const retired = (await services.workspaceService.execute({ method: 'workspace.create', params: { name: 'Retired', root: retiredRoot } })).workspace;
+    await services.capabilityService.broker.execute({ capability: 'filesystem.write', actor: OWNER_ACTOR, approved: true,
+      workspaceId: retired.id, requestId: 'retired-completed-write', input: { path: 'retained.txt', content: 'Keep this history' } });
+    await services.workspaceService.execute({ method: 'workspace.remove', params: { id: retired.id } });
+    const rt = services.taskService.runtime, task = rt.create({ goal: 'Recover separate Workspace', workspaceId: f.workspace.id });
+    const started = rt.start({ id: task.id, expectedRev: task.rev }).task;
+    rt.block({ id: task.id, expectedRev: started.rev, reason: 'needs-reconciliation: import' });
+    fs.writeFileSync(path.join(f.project, 'input.txt'), 'original');
+    const inspected = await services.desktopUiService.execute({ method: 'ui.task.recovery.inspect', params: { id: task.id } });
+    assert.equal(inspected.canResume, true, JSON.stringify(inspected.blockers));
+    assert.equal(fs.readFileSync(path.join(retiredRoot, 'retained.txt'), 'utf8'), 'Keep this history');
+    assert.equal(services.capabilityService.broker.dispatchStatus('retired-completed-write').status, 'completed');
+  } finally {
+    for (const key of ['autonomousHandoff', 'chatService', 'agentService', 'managedAgent', 'capabilityService', 'extensionService']) await services[key].close();
+  }
 });
 
 test('F3 partial multi-batch recovery records exact progress and can finish without Core restart', async () => {
