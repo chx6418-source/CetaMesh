@@ -173,6 +173,9 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
       let created;
       try { created = await provider.createSession(invocation); }
       catch (error) {
+        // A Provider may reuse an Error object. Reclassify every invocation;
+        // identical request fields are not evidence that a later launch was safe.
+        if (error && typeof error === 'object') creationFailures.delete(error);
         if (isAgentCreationPreflightFailure(error, invocation)) creationFailures.set(error, {
           provider: providerId, taskId: params.taskId, workspaceId: params.workspaceId, requestId: params.requestId
         });

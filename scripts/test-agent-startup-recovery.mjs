@@ -26,12 +26,13 @@ async function fixture(name) {
   let tasks = createTaskService({ stateDir });
   const task = tasks.runtime.create({ goal: 'Read isolated input', workspaceId: workspace.id });
   tasks.runtime.setCheckpoint({ id: task.id, expectedRev: task.rev, summary: 'Retain original checkpoint', nextAction: 'Read input' });
-  const state = { launches: 0, prompts: 0, validations: 0, validationError: null, launchError: null };
+  const state = { launches: 0, prompts: 0, validations: 0, validationError: null, failValidationAt: null, launchError: null };
   const descriptor = { id: 'fixture-acp', label: 'Controlled ACP', protocolVersion: 1, verifiedRuntime: true,
     security: { mode: 'native', verified: true, nativeSandboxSupported: true, nativeApprovalSupported: true } };
   const acp = createAcpAgentProvider({ descriptor, stagingRoot: path.join(root, 'stages'),
     resolveTaskWorkspace: async ({ taskId }) => ({ task: tasks.runtime.get({ id: taskId }).task, workspace }),
-    validateRuntime: async () => { state.validations++; if (state.validationError) throw state.validationError; },
+    validateRuntime: async () => { state.validations++; if (state.validationError
+      && (!state.failValidationAt || state.validations === state.failValidationAt)) throw state.validationError; },
     launch: async () => {
       state.launches++; if (state.launchError) throw state.launchError;
       const readable = new PassThrough(), writable = new PassThrough();
@@ -89,6 +90,49 @@ test('F1 exact ACP pre-start rejection releases only this creation and permits e
     assert.equal(result.result.accepted, true); assert.equal(result.result.taskId, f.task.id);
     assert.equal(f.state.launches, 1); assert.equal(f.state.prompts, 1);
     assert.deepEqual(f.read().checkpoint, before.checkpoint);
+  } finally { await f.close(); }
+});
+
+test('F2 second pre-launch validation also requires successful staging cleanup', async () => {
+  const f = await fixture('second-validation');
+  try {
+    const before = f.read(); f.state.validationError = fault('AGENT_RUNTIME_CHANGED'); f.state.failValidationAt = 2;
+    await assert.rejects(f.run('second-validation'), { code: 'AGENT_RUNTIME_CHANGED' });
+    assert.equal(f.state.launches, 0); assert.deepEqual(f.fences(), []); assert.deepEqual(f.read(), before);
+    assert.deepEqual(fs.readdirSync(path.join(path.dirname(f.project), 'stages')), []);
+  } finally { await f.close(); }
+});
+
+test('F2 proof is bound to invocation and cannot be copied, changed in scope or reused after launch', async () => {
+  const f = await fixture('proof-scope');
+  try {
+    const params = { taskId: f.task.id, workspaceId: f.workspace.id, requestId: 'exact-creation' };
+    const scope = { ...params, provider: f.provider.id };
+    const original = fault('AGENT_RUNTIME_CHANGED'); f.state.validationError = original;
+    let proof;
+    await assert.rejects(f.agents.createSession(f.provider.id, params), error => { proof = error; return error.code === original.code; });
+    assert.notEqual(proof, original); assert.equal(f.agents.isSessionCreationPreflightFailure(proof, scope), true);
+    for (const key of ['taskId', 'workspaceId', 'provider', 'requestId']) {
+      assert.equal(f.agents.isSessionCreationPreflightFailure(proof, { ...scope, [key]: 'other' }), false, key);
+    }
+    assert.equal(f.agents.isSessionCreationPreflightFailure({ ...proof, stopped: true, effectStatus: 'none' }, scope), false);
+    assert.equal(f.agents.isSessionCreationPreflightFailure(original, scope), false);
+    f.state.validationError = null; f.state.launchError = proof;
+    await assert.rejects(f.agents.createSession(f.provider.id, params), { code: original.code });
+    assert.equal(f.state.launches, 1);
+    assert.equal(f.agents.isSessionCreationPreflightFailure(proof, scope), false, 'a later launch cannot reuse old proof even with identical scope fields');
+  } finally { await f.close(); }
+});
+
+test('F2 the same error code after launch retains ownership and rejects redispatch', async () => {
+  const f = await fixture('after-launch');
+  try {
+    f.state.launchError = Object.assign(fault('AGENT_RUNTIME_CHANGED'), { stopped: true, effectStatus: 'none' });
+    await assert.rejects(f.run('launched-unknown'), { code: 'AGENT_RUNTIME_CHANGED' });
+    assert.equal(f.state.launches, 1); assert.equal(f.fences().length, 1); assert.equal(f.read().status, 'blocked');
+    f.state.launchError = null;
+    await assert.rejects(f.run('unsafe-retry'), { code: 'TASK_RECOVERY_REVIEW_REQUIRED' });
+    assert.equal(f.state.launches, 1); assert.equal(f.state.prompts, 0);
   } finally { await f.close(); }
 });
 

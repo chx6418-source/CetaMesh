@@ -85,7 +85,7 @@ export async function runAgentCreationPreflight(invocation, validate) {
   }
 }
 export function isAgentCreationPreflightFailure(error, invocation) {
-  return !!error && typeof error === 'object' && creationPreflights.get(error) === invocation;
+  return !!error && typeof error === 'object' && creationPreflights.has(error) && creationPreflights.get(error) === invocation;
 }
 
 /** prompt 内容归一化：字符串 → 单个 text 块；数组 → 原样（宽松校验块结构）。 */
