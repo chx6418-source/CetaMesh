@@ -183,6 +183,60 @@ test('F2 another Task writer prevents import recovery through an older Task', as
   }
 });
 
+test('F3 a completed import with interrupted preimage cleanup stays completed', async () => {
+  const f = fixture('completed-cleanup', 'staged');
+  fs.writeFileSync(path.join(f.batch, 'manifest.json'), JSON.stringify({ ...f.manifest, status: 'completed' }));
+  // The durable completion marker precedes best-effort cleanup. Backups may
+  // already be gone; completed imports never use them to overwrite user files.
+  fs.renameSync(path.join(f.batch, '0.preimage'), path.join(f.root, 'retained-preimage'));
+  const service = f.build();
+  assert.equal(service.describeWorkspace(f.workspace.id)?.root, f.project);
+  assert.equal(fs.readFileSync(path.join(f.project, 'input.txt'), 'utf8'), 'staged');
+  assert.deepEqual(fs.readdirSync(f.journal), []);
+});
+
+test('F3 partial multi-batch recovery records exact progress and can finish without Core restart', async () => {
+  const f = fixture('multiple');
+  const other = path.join(f.journal, 'batch-second'); fs.mkdirSync(other);
+  const manifest = { ...f.manifest, rows: [{ ...f.manifest.rows[0], path: 'second.txt' }] };
+  fs.writeFileSync(path.join(other, 'manifest.json'), JSON.stringify(manifest)); fs.writeFileSync(path.join(other, '0.preimage'), 'original');
+  fs.writeFileSync(path.join(f.project, 'second.txt'), 'second-third-party');
+  const service = f.build(); fs.writeFileSync(path.join(f.project, 'input.txt'), 'original');
+  await assert.rejects(service.collectRecoveryProof(f.workspace.id), { code: 'WORKSPACE_RECOVERY_REQUIRED' });
+  assert.equal(fs.existsSync(f.batch), false, 'the first batch has an affirmative settlement receipt');
+  assert.equal(fs.existsSync(other), true); assert.equal(service.describeWorkspace(f.workspace.id), null);
+  fs.writeFileSync(path.join(f.project, 'second.txt'), 'staged');
+  const proof = await service.collectRecoveryProof(f.workspace.id);
+  assert.equal(proof.fileCount, 2); assert.equal(fs.readFileSync(path.join(f.project, 'second.txt'), 'utf8'), 'original');
+  assert.deepEqual(fs.readdirSync(f.journal), []);
+  const restarted = f.build();
+  assert.equal(restarted.describeWorkspace(f.workspace.id).root, f.project);
+  assert.deepEqual(await restarted.collectRecoveryProof(f.workspace.id), proof);
+});
+
+test('F3 a change during rollback retains the batch until final content verification succeeds', async () => {
+  const f = fixture('rollback-race');
+  f.manifest.rows.push({ ...f.manifest.rows[0], path: 'second.txt', backup: '1.preimage' });
+  fs.writeFileSync(path.join(f.batch, 'manifest.json'), JSON.stringify(f.manifest)); fs.writeFileSync(path.join(f.batch, '1.preimage'), 'original');
+  fs.writeFileSync(path.join(f.project, 'second.txt'), 'third-party');
+  const service = f.build(), rename = fs.renameSync;
+  const originalManifest = fs.readFileSync(path.join(f.batch, 'manifest.json'));
+  for (const name of ['input.txt', 'second.txt']) fs.writeFileSync(path.join(f.project, name), 'staged');
+  try {
+    fs.renameSync = (from, to) => {
+      const result = rename(from, to);
+      if (path.resolve(String(to)) === path.join(f.project, 'input.txt')) fs.writeFileSync(path.join(f.project, 'second.txt'), 'concurrent-edit');
+      return result;
+    };
+    await assert.rejects(service.collectRecoveryProof(f.workspace.id), { code: 'WORKSPACE_RECOVERY_REQUIRED' });
+  } finally { fs.renameSync = rename; }
+  assert.deepEqual(fs.readFileSync(path.join(f.batch, 'manifest.json')), originalManifest);
+  assert.equal(fs.readFileSync(path.join(f.project, 'second.txt'), 'utf8'), 'concurrent-edit');
+  fs.writeFileSync(path.join(f.project, 'second.txt'), 'original');
+  assert.equal((await service.collectRecoveryProof(f.workspace.id)).fileCount, 2);
+  assert.equal(service.describeWorkspace(f.workspace.id).root, f.project);
+});
+
 try {
   for (const [name, run] of cases) { const start = performance.now(); await run(); console.log('PASS', name, Math.round(performance.now() - start) + 'ms'); }
 } finally {

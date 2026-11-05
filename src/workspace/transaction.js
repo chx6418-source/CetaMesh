@@ -82,7 +82,9 @@ function readImportBatch(rootReal, journalDir, name) {
       const identity = process.platform === 'win32' ? key.toLowerCase() : key;
       if (seen.has(identity)) throw failure('IMPORT_JOURNAL_INVALID', 'Duplicate import target');
       seen.add(identity);
-      if (row.backup !== null) {
+      // A durably completed import only needs cleanup, never rollback. Its
+      // preimages may already have been removed by interrupted cleanup.
+      if (manifest.status !== 'completed' && row.backup !== null) {
         const file = path.join(dir, row.backup), stat = fs.lstatSync(file);
         if (!stat.isFile() || stat.isSymbolicLink() || digest(fs.readFileSync(file)) !== row.originalHash) {
           throw failure('IMPORT_JOURNAL_INVALID', 'Original import preimage cannot be verified');
@@ -90,7 +92,8 @@ function readImportBatch(rootReal, journalDir, name) {
       }
     }
     // Manifest binds root, ordered paths, original/staged hashes and backup names.
-    // All non-null original hashes were just checked against actual preimages.
+    // Pending imports also require every original preimage; completed imports
+    // authorize cleanup only and never supply a rollback content proof.
     return { dir, manifest, evidence: { name, sha256: digest(JSON.stringify(manifest)) } };
 }
 
