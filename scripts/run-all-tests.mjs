@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-agent-startup-recovery.mjs': {category:'security',timeoutMs:120000,note:'ACP pre-start proof, exact dispatch ownership and explicit recovery through real Core services; controlled protocol peer'},
   'test-core-functional-loop.mjs': {category:'integration',timeoutMs:120000,note:'Function-first real Core/Managed/Broker tool loop with deterministic model leaf; no external model or native evidence'},
   'test-task-state-model.mjs': {category:'runtime',timeoutMs:60000,note:'Independent 8-state business model, runtime transitions, revision refusal, persistence and restart facts'},
   'test-native-product-session-evidence.mjs': {category:'security',timeoutMs:120000,note:'Deterministic native test-driver RPC facts, revision/refusal capture and privacy; no real models'},
