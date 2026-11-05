@@ -10,6 +10,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-phase3-real-codex-'
 let services;
 let taskId;
 let unavailableReason = null;
+let primaryFailure = null;
 async function firstCompletedCursor(assignment) {
   const abort=new AbortController();const deadline=setTimeout(()=>abort.abort(),10000);
   try {
@@ -172,6 +173,10 @@ try {
 
 
   }
+} catch (error) {
+  primaryFailure = error;
+  process.stderr.write(`Real Codex primary failure: ${error?.code ?? error?.name}: ${error?.message}\n`);
+  throw error;
 } finally {
   if (services && taskId) {
     try {
@@ -181,8 +186,13 @@ try {
       }
     } catch (error) { process.stderr.write(`Real Codex fixture cleanup warning: ${error?.code ?? error?.message}\n`); }
   }
-  if (services) await services.capabilityService.close();
-  fs.rmSync(root, { recursive: true, force: true });
+  try {
+    if (services) await services.capabilityService.close();
+    if (!primaryFailure) fs.rmSync(root, { recursive: true, force: true });
+  } catch (error) {
+    if (!primaryFailure) throw error;
+    process.stderr.write(`Real Codex secondary cleanup failure: ${error?.code ?? error?.message}\n`);
+  }
 }
 if (unavailableReason) {
   process.stdout.write(`NOT_RUN_ENVIRONMENT: ${unavailableReason}\n`);

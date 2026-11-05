@@ -58,6 +58,12 @@ async function fixture(run) {
       async selectModel(){return{selected:true};}
     }});
   services.agentBroker.register(target);
+  // This is a deterministic Core/context contract, not a discovery benchmark.
+  // A newly recognized local CLI must not turn its five-second assertion into
+  // an ambient native handshake or account test. Only this suite's fixtures run.
+  const fixtureHealth = services.agentBroker.health.bind(services.agentBroker);
+  services.agentBroker.health = id => ['cetamesh', 'repair-fixture', 'lost-follow-fixture'].includes(id)
+    ? fixtureHealth(id) : Promise.resolve({provider:id,available:false,reason:'isolated-fixture'});
   // This fixture's synthetic Model is explicitly zero-cost; production has no
   // such claim and automatic paid selection correctly abstains there.
   const originalCapabilities = services.agentBroker.capabilities.bind(services.agentBroker);

@@ -1,6 +1,6 @@
 # Agent integration status
 
-Updated: 2026-10-26. This page describes the current Desktop source and verification boundaries. It does not establish general runtime availability or a new signed release.
+Updated: 2026-11-05. This page describes the current Desktop source and verification boundaries. It does not establish general runtime availability or a new signed release.
 
 ## Registered providers
 
@@ -8,8 +8,8 @@ Updated: 2026-10-26. This page describes the current Desktop source and verifica
 | --- | --- | --- |
 | DSH | Existing staged Provider retained | Requires its configured runtime and task authorization |
 | Codex | Existing exec transport stays default; App Server adapter added | App Server requires a verified version/schema and native policy; old sessions are not blindly migrated |
-| Claude | Configured native Claude Code runtime, pinned SDK 0.3.308, supervised private runner and all-tool approvals | Requires a real console CLI and explicit API configuration; desktop GUI installation is insufficient. Real account execution is not verified |
-| Gemini CLI | Shared ACP, official 0.65.0 discovery/handshake and native policy probes | This version omits exact tool input from ACP permission requests; native_input_unverified keeps Task execution unavailable |
+| Claude | Configured native Claude Code runtime, pinned SDK 0.3.308, supervised private runner and all-tool approvals; bounded discovery includes the native coding executable shipped with supported Desktop installations | Requires a verified console CLI and explicit API configuration. Native 2.1.308 read/edit/test/import is exercised with a local synthetic model; real account execution and dynamic session reasoning remain unverified |
+| Gemini CLI | Shared ACP, official 0.65.0/0.66.0 discovery/handshake and native policy probes | These verified probes omit exact tool input from ACP permission requests; native_input_unverified keeps Task execution unavailable |
 | OpenCode | Bundled CLI discovery, verified 2.1.4 ACP and private native approval policy | Requires explicit model/API configuration, verified runtime identity and Owner execution consent |
 | Qwen Code | Verified 0.26.1 coding CLI, ACP and explicit builtin-tool permission policy | Requires the coding CLI, standalone Node, explicit model/API configuration and Owner execution consent |
 | ZCode | Protocol presence is recognized; execution unavailable | Exact external control, version, approval and workspace contract unverified |
@@ -117,6 +117,29 @@ result overrides it.
 - Native permission requests default to denial without trusted approval. Import approval remains separate.
 - New ACP snapshot failures use ACP_STAGING_READ_FAILED. The legacy Codex STAGING_READ_FAILED stop-proof meaning is preserved; restarting into the old default does not release unconfirmed native ownership.
 - The optional Claude resource is pinned and hash checked. A future SEA gate requires an explicitly selected artifact with matching source/executable metadata; old release artifacts cannot stand in for the new code.
+
+## Model configuration, activity and concurrency
+
+The [configuration and activity contract](AGENT_CONFIGURATION_AND_ACTIVITY.md) describes
+provider-scoped options, confirmed selections, pending requests and durable Chat observations.
+OpenCode 2.1.4 advertises model and effort controls; Qwen 0.26.1 advertises model controls
+without a reasoning selector. Both use ACP `session/set_config_option` and its complete
+configuration acknowledgement. Permission modes are not model controls. DSH retains its
+own native model catalog and selection protocol. Codex exec reports submitted arguments
+as next-turn requests, not a confirmed current model. The separate App Server pin remains
+unchanged and requires matching schema/runtime evidence.
+
+External native sessions can execute concurrently in independent Workspaces. This is
+exercised with installed OpenCode and Qwen CLIs, local synthetic model requests, actual
+file tools and Core result digests. It is not a remote-model benchmark. External native
+providers still lack the verified boundary required for shared-Workspace read-only children;
+those children remain restricted to the existing Managed contract. The parent retains
+its writer exclusion while readers run. No concurrent shared-directory writers are enabled.
+
+Owner cancellation of an assigned external process waits for exact session closure even
+if runtime readiness changes. Final cancellation rechecks the stopped assignment and run
+before mutating Task state. Codex waits for its existing process finalizer and durable stop
+receipt; uncertain exit retains ownership. These are not permissions to replay unknown tools.
 
 ## Desktop UI included in this source update
 

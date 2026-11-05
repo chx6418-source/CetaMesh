@@ -271,7 +271,7 @@ check('Harbor Chat history refresh does not wait for the remote Model Catalog', 
   assert.match(load, /chatClient\.status\(session\.id\)/);
   assert.doesNotMatch(load, /chatClient\.catalog\(\)/, 'catalog latency cannot hold history and status refresh');
   assert.match(page, /const refreshCatalog = useCallback/);
-  assert.match(page, /useEffect\(\(\) => \{ void refreshCatalog\(\); \}, \[refreshCatalog\]\)/,
+  assert.match(page, /useEffect\(\(\) => \{ void refreshCatalog\(\); \}, \[refreshCatalog,\s*status\.state\]\)/,
     'the model catalog refreshes independently after Chat mounts');
 });
 check('Harbor accessibility and real-world controls avoid clipping and preserve selected content', () => {
