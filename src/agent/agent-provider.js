@@ -76,13 +76,14 @@ export function agentProviderError(code, message, { cause } = {}) {
 // enter this callback. Bind evidence to the actual invocation object, not fields
 // on a Provider error. A fresh wrapper prevents reused exceptions carrying proof.
 const creationPreflights = new WeakMap();
+export function agentCreationPreflightFailure(invocation, cause) {
+  const error = agentProviderError(cause?.code ?? 'PROVIDER_ERROR', cause?.message ?? 'Agent preflight failed', { cause });
+  creationPreflights.set(error, invocation);
+  return error;
+}
 export async function runAgentCreationPreflight(invocation, validate) {
   try { return await validate(); }
-  catch (cause) {
-    const error = agentProviderError(cause?.code ?? 'PROVIDER_ERROR', cause?.message ?? 'Agent preflight failed', { cause });
-    creationPreflights.set(error, invocation);
-    throw error;
-  }
+  catch (cause) { throw agentCreationPreflightFailure(invocation, cause); }
 }
 export function isAgentCreationPreflightFailure(error, invocation) {
   return !!error && typeof error === 'object' && creationPreflights.has(error) && creationPreflights.get(error) === invocation;

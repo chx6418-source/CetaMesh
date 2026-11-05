@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { isNativePermissionSecurity } from './execution-security.js';
-import { agentProviderError as fault, defineAgentProvider, normalizePromptContent, runAgentCreationPreflight } from './agent-provider.js';
+import { agentProviderError as fault, defineAgentProvider, normalizePromptContent, runAgentCreationPreflight, agentCreationPreflightFailure } from './agent-provider.js';
 import { createJsonRpcTransport } from './protocol/json-rpc-transport.js';
 import { createAgentEventBuffer } from './protocol/agent-event-buffer.js';
 import { createAgentPermissionBridge } from './protocol/agent-permission-bridge.js';
@@ -203,8 +203,10 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
           if (shuttingDown) throw fault('PROVIDER_SHUTTING_DOWN','ACP provider is shutting down');
           if (!eligible()) throw fault('PROVIDER_UNAVAILABLE','Verified ACP runtime and native security required');
           await validateRuntime();
-          if (sessions.size + creating >= 16) throw fault('AGENT_SESSION_LIMIT','ACP session limit reached');
         });
+        // Check and reserve in one continuation; another completed preflight
+        // must not pass the limit before this invocation increments creating.
+        if (sessions.size + creating >= 16) throw agentCreationPreflightFailure(invocation, fault('AGENT_SESSION_LIMIT','ACP session limit reached'));
         creating++;
         let completed;
         const record = {done:new Promise(resolve => { completed = resolve; })};

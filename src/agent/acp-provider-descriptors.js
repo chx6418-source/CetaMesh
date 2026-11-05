@@ -3,7 +3,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { CliAgentProcess, createMinimalAgentEnv, terminateCliProcessTree } from './cli-agent-process.js';
 import { createAcpAgentProvider } from './acp-agent-provider.js';
-import { agentProviderError } from './agent-provider.js';
+import { agentProviderError, agentCreationPreflightFailure, runAgentCreationPreflight } from './agent-provider.js';
 import { createNativeAcpRuntime } from './native-acp-runtime.js';
 
 // Official command descriptions are not installed-version or native-policy evidence.
@@ -156,9 +156,18 @@ function configuredProvider(spec,{runtimeConfiguration,launchFactory,taskOptions
         connection:runtimeConnectionEvidence({provider:spec.id,runtimeEvidence:runtime,configuration,taskEligible:!reason && health.taskEligible,reason:reason ?? health.reason})};
     },
     configure(settings={}){if(sessions.size || creating)throw agentProviderError('AGENT_RUNTIME_BUSY','Close Agent sessions before changing runtime configuration');return discovery.configure(settings);},
-    async createSession(params){if(shuttingDown)throw agentProviderError('PROVIDER_SHUTTING_DOWN','ACP provider is shutting down');if(reason || !provider)throw agentProviderError('PROVIDER_UNAVAILABLE','Check the configured ACP connection first');
-      // Runtime refresh belongs to health. Never swap policy after Broker consent was checked.
-      await runtime.validateRuntime();creating++;try{const result=await provider.createSession(params);sessions.set(result.sessionId,provider);return result;}catch(error){if(typeof error?.sessionId==='string' && error.sessionId)sessions.set(error.sessionId,provider);throw error;}finally{creating--;}},
+    async createSession(params){
+      if(shuttingDown)throw agentCreationPreflightFailure(params,agentProviderError('PROVIDER_SHUTTING_DOWN','ACP provider is shutting down'));
+      if(reason || !provider)throw agentCreationPreflightFailure(params,agentProviderError('PROVIDER_UNAVAILABLE','Check the configured ACP connection first'));
+      // Reserve before awaiting validation: health/configuration cannot replace
+      // the policy after Broker consent or while this creation is in progress.
+      creating++;
+      try{
+        await runAgentCreationPreflight(params,()=>runtime.validateRuntime());
+        const result=await provider.createSession(params);sessions.set(result.sessionId,provider);return result;
+      }catch(error){if(typeof error?.sessionId==='string' && error.sessionId)sessions.set(error.sessionId,provider);throw error;}
+      finally{creating--;}
+    },
     async closeSession(params){const target=forSession(params);const result=await target.closeSession(params);sessions.delete(params.sessionId);return result;},
     async shutdown(){shuttingDown=true;await pending;await Promise.all([...new Set([provider,...sessions.values()])].filter(Boolean).map(item=>item.shutdown()));sessions.clear();}
   };

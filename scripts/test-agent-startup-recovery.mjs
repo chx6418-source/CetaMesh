@@ -5,6 +5,7 @@ import path from 'node:path';
 import { PassThrough } from 'node:stream';
 import { setTimeout as delay } from 'node:timers/promises';
 import { createAcpAgentProvider } from '../src/agent/acp-agent-provider.js';
+import { createAcpProviders } from '../src/agent/acp-provider-descriptors.js';
 import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createAgentBroker } from '../src/agent/broker.js';
 import { createWorkspaceService } from '../src/workspace/service.js';
@@ -18,7 +19,7 @@ const parent = fs.realpathSync.native(os.tmpdir());
 const base = fs.mkdtempSync(path.join(parent, 'cetamesh-startup-recovery-'));
 const cases = [], test = (name, run) => cases.push([name, run]);
 const fault = code => Object.assign(new Error(code), { code });
-async function fixture(name) {
+async function fixture(name, { configured = false } = {}) {
   const root = path.join(base, name), project = path.join(root, 'project'), stateDir = path.join(root, 'state');
   fs.mkdirSync(project, { recursive: true }); fs.writeFileSync(path.join(project, 'input.txt'), 'retained input');
   const workspaces = createWorkspaceService({ stateDir });
@@ -30,31 +31,57 @@ async function fixture(name) {
   const descriptor = { id: 'fixture-acp', label: 'Controlled ACP', protocolVersion: 1, verifiedRuntime: true,
     security: { mode: 'native', verified: true, nativeSandboxSupported: true, nativeApprovalSupported: true } };
   const providerOptions = { descriptor, stagingRoot: path.join(root, 'stages'),
-    resolveTaskWorkspace: async ({ taskId }) => ({ task: tasks.runtime.get({ id: taskId }).task, workspace }),
+    resolveTaskWorkspace: async ({ taskId }) => {
+      state.bindingCalls = (state.bindingCalls ?? 0) + 1; await state.bindingGate;
+      return { task: tasks.runtime.get({ id: taskId }).task, workspace };
+    },
     validateRuntime: async () => { state.validations++; if (state.validationError
       && (!state.failValidationAt || state.validations === state.failValidationAt)) throw state.validationError; },
-    launch: async () => {
+    launch: () => {
       state.launches++; if (state.launchError) throw state.launchError;
       const readable = new PassThrough(), writable = new PassThrough();
       let done; const stopped = new Promise(resolve => { done = resolve; });
       const reply = (id, result) => readable.write(JSON.stringify({ jsonrpc: '2.0', id, result }) + '\n');
       writable.on('data', chunk => { for (const line of String(chunk).trim().split('\n')) {
         const frame = JSON.parse(line);
-        if (frame.method === 'initialize') reply(frame.id, { protocolVersion: 1 });
+        if (frame.method === 'initialize') reply(frame.id, { protocolVersion: 1, agentInfo: { name: 'OpenCode', version: '2.1.4' } });
         if (frame.method === 'session/new') reply(frame.id, { sessionId: 'controlled-session' });
         if (frame.method === 'session/prompt') { state.prompts++; reply(frame.id, { stopReason: 'end_turn' }); }
       } });
       return { readable, writable, done: stopped, close: async () => done({ processTreeExitConfirmed: true }) };
     } };
   let acp, provider, agents;
-  function startAgents() {
+  async function startAgents() {
     acp = createAcpAgentProvider(providerOptions);
     provider = { ...acp, health: async () => ({ available: true, authenticated: true, sessionCapable: true }) };
+    if (configured) {
+      fs.mkdirSync(path.join(root, 'profiles'), { recursive: true });
+      const providers = createAcpProviders({
+        runtimeConfiguration: {
+          get: id => ({ provider: id, enabled: id === 'opencode', runtimePath: process.execPath, nodePath: '', model: 'fixture',
+            credentialConfigured: true, baseUrl: 'https://example.invalid/v1' }),
+          identity: () => String(state.runtimeIdentity ?? 0),
+          resolveCredential: () => ({ apiKey: 'synthetic-local-only', baseUrl: 'https://example.invalid/v1' })
+        }, taskOptions: providerOptions, nativeApprovalBridge: async () => ({ outcome: 'rejected' }),
+        runtimeOptions: { profileParent: path.join(root, 'profiles') },
+        launchFactory: ({ argv }) => () => {
+          if (!argv.includes('--version') && !argv.includes('--help')) return providerOptions.launch();
+          const readable = new PassThrough(), writable = new PassThrough(); let stop;
+          const done = new Promise(resolve => { stop = resolve; });
+          setImmediate(() => { readable.end(argv.includes('--version') ? 'opencode v2.1.4' : '  acp  Start ACP'); stop({ exitCode: 0 }); });
+          return { readable, writable, done, close: async () => stop({ exitCode: 0 }) };
+        }
+      });
+      acp = { shutdown: () => Promise.all(providers.map(row => row.shutdown())) };
+      provider = providers.find(row => row.id === 'opencode');
+      const health = await provider.health();
+      assert.equal(health.taskEligible, true, JSON.stringify({ reason: health.reason, version: health.version, compatible: health.compatible }));
+    }
     agents = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [provider] }), resolveWorkspaceIdentity: () => workspace.root });
     const security = agents.describeExecutionSecurity(provider.id, workspace.id);
     agents.authorizeExecution(provider.id, workspace.id, security.fingerprint);
   }
-  startAgents();
+  await startAgents();
   const build = () => createCapabilityService({ stateDir, workspaceService: workspaces, taskRuntime: tasks.runtime, agentBroker: agents });
   let capabilities = build();
   capabilities.grantTask(task.id, { capabilities: ['filesystem.read'], workspaceIds: [workspace.id] });
@@ -63,7 +90,7 @@ async function fixture(name) {
     workspaceId: workspace.id, actor: OWNER_ACTOR, approved: true, input: { provider: provider.id, content: 'Read isolated input' } });
   return { state, stateDir, project, task, workspace, get agents() { return agents; }, get provider() { return provider; }, read, run,
     fences: () => capabilities.taskReviewState({ taskId: task.id, workspaceId: workspace.id }).workspaceFences,
-    async restart() { await capabilities.close(); await acp.shutdown(); tasks = createTaskService({ stateDir }); startAgents(); capabilities = build(); },
+    async restart() { await capabilities.close(); await acp.shutdown(); tasks = createTaskService({ stateDir }); await startAgents(); capabilities = build(); },
     async close() { await capabilities.close(); await acp.shutdown(); } };
 }
 
@@ -177,6 +204,37 @@ test('F3 failed fence-release persistence retains ownership across reconstructio
     await assert.rejects(f.run('must-not-guess'), { code: 'TASK_RECOVERY_REVIEW_REQUIRED' });
     assert.equal(f.state.launches, 0);
   } finally { fs.renameSync = rename; await f.close(); }
+});
+
+test('F2 concurrent preflights cannot bypass the 16-session reservation limit', async () => {
+  const f = await fixture('concurrent-limit'); let release, results;
+  f.state.bindingGate = new Promise(resolve => { release = resolve; });
+  try {
+    results = Promise.allSettled(Array.from({ length: 17 }, (_, i) => f.agents.createSession(f.provider.id, {
+      taskId: f.task.id, workspaceId: f.workspace.id, requestId: 'concurrent-' + i })));
+    const deadline = Date.now() + 1000;
+    while (f.state.validations < 17) { assert.ok(Date.now() < deadline); await delay(1); }
+    await delay(1);
+    assert.equal(f.state.bindingCalls, 16, 'limit check and creating reservation must remain atomic');
+    release(); const outcomes = await results;
+    assert.equal(outcomes.filter(row => row.status === 'fulfilled').length, 16);
+    assert.deepEqual(outcomes.filter(row => row.status === 'rejected').map(row => row.reason.code), ['AGENT_SESSION_LIMIT']);
+  } finally { release(); await results; await f.close(); }
+});
+
+test('F1 configured ACP wrapper preserves preflight evidence through the production factory', async () => {
+  if (process.platform !== 'win32') { console.log('NOT_RUN_ENVIRONMENT configured OpenCode policy requires Windows'); return; }
+  const f = await fixture('configured-wrapper', { configured: true });
+  try {
+    const create = f.agents.createSession, before = f.read(), initialLaunches = f.state.launches;
+    // Controlled race after real health/consent and immediately before creation.
+    f.agents.createSession = (...args) => { f.state.runtimeIdentity = 1; return create(...args); };
+    await assert.rejects(f.run('configured-rejected'), { code: 'AGENT_RUNTIME_CHANGED' });
+    assert.equal(f.state.launches, initialLaunches); assert.deepEqual(f.fences(), []); assert.deepEqual(f.read(), before);
+    f.agents.createSession = create; f.state.runtimeIdentity = 0;
+    assert.equal((await f.run('configured-explicit-retry')).result.taskId, f.task.id);
+    assert.equal(f.state.prompts, 1);
+  } finally { await f.close(); }
 });
 
 try {
