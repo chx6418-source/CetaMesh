@@ -7,7 +7,7 @@ import { inspectTaskSession } from '../agent/session-recovery.js';
 
 /** Owner application operations reuse the existing Task and execution authorities. */
 export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, toolExecutionCoordinator, modelRuntime, legacyModel, prepareTaskContext = null }) {
-  async function stopTask(taskRow, { cancelMissingManagedSession = false } = {}) {
+  function assertTaskControlAvailable(taskRow) {
     if (taskRow.recoveryIntent) throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', '上次核对尚未完整提交，请先在任务详情完成恢复核对');
     if (continuityRuntime?.isInFlight?.(taskRow.id)) {
       throw capabilityError('TASK_HANDOFF_IN_FLIGHT', '任务正在交接执行者，暂不能暂停或取消');
@@ -15,8 +15,14 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     if (!taskRow.currentAgent) {
       const pending = capabilityService?.taskReviewState?.({ taskId: taskRow.id, workspaceId: taskRow.workspaceId });
       if (pending?.workspaceFences?.length) throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', '新建会话仍有未确认归属，请先在任务详情核对后释放占用');
-      return;
     }
+  }
+
+  async function stopTask(taskRow, { cancelMissingManagedSession = false } = {}) {
+    // Repeat the same observation after awaited operation cancellation; a
+    // preflight does not authorize stopping an assignment that changed later.
+    assertTaskControlAvailable(taskRow);
+    if (!taskRow.currentAgent) return;
     try {
       await agentBroker.cancel(taskRow.currentAgent);
       if (taskRow.currentAgent.provider === 'codex'
@@ -69,6 +75,8 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
   async function pauseTask({ id, expectedRev, reason } = {}) {
     const preflight = (await taskRuntime.get({ id })).task;
     if (expectedRev !== undefined && preflight.rev !== expectedRev) throw capabilityError('TASK_CONFLICT', 'Task changed before pause');
+    // A known refusal must not create a blocked Task or cancel its tools.
+    assertTaskControlAvailable(preflight);
     let fence = null;
     if (!preflight.parentTaskId) {
       const children = (await taskRuntime.listChildren({ parentTaskId: preflight.id })).children;
@@ -93,6 +101,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
   async function cancelTask({ id, expectedRev, reason } = {}) {
     const first = (await taskRuntime.get({ id })).task;
     if (expectedRev !== undefined && first.rev !== expectedRev) throw capabilityError('TASK_CONFLICT', 'Task changed before cancellation');
+    assertTaskControlAvailable(first);
     const children = !first.parentTaskId ? (await taskRuntime.listChildren({ parentTaskId: first.id })).children : [];
     if (children.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
       if (!['blocked', 'completed', 'failed', 'cancelled'].includes(first.status)) {
