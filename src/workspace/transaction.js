@@ -54,12 +54,7 @@ function restoreOne(rootReal, dir, row) {
   }
 }
 
-export function recoverWorkspaceImports(rootReal, { journalDir = workspaceJournalDir(rootReal), writeFile } = {}) {
-  if (!fs.existsSync(journalDir)) return [];
-  const journalStat = fs.lstatSync(journalDir);
-  if (!journalStat.isDirectory() || journalStat.isSymbolicLink()) throw failure('IMPORT_JOURNAL_INVALID', 'Workspace import journal directory is invalid');
-  const recovered = [];
-  for (const name of fs.readdirSync(journalDir)) {
+function readImportBatch(rootReal, journalDir, name) {
     const dir = path.join(journalDir, name);
     const stat = fs.lstatSync(dir);
     if (!stat.isDirectory() || stat.isSymbolicLink()) throw failure('IMPORT_JOURNAL_INVALID', 'Workspace import batch directory is invalid');
@@ -73,6 +68,7 @@ export function recoverWorkspaceImports(rootReal, { journalDir = workspaceJourna
     if (!manifestStat.isFile() || manifestStat.isSymbolicLink()) throw failure('IMPORT_JOURNAL_INVALID', 'Workspace import manifest is invalid');
     const manifest = readJsonFile(manifestFile);
     if (manifest?.schemaVersion !== 1 || manifest.root !== rootReal || !Array.isArray(manifest.rows)
+      || manifest.rows.length < 1 || manifest.rows.length > 500
       || !['prepared', 'committing', 'completed'].includes(manifest.status)
       || manifest.rows.some((row, index) => !row || !['write', 'delete'].includes(row.action)
         || typeof row.path !== 'string' || !/^[a-f0-9]{64}$/.test(row.stagedHash ?? '') && row.stagedHash !== null
@@ -80,12 +76,61 @@ export function recoverWorkspaceImports(rootReal, { journalDir = workspaceJourna
         || row.backup !== (row.originalHash === null ? null : `${index}.preimage`))) {
       throw failure('IMPORT_JOURNAL_INVALID', 'Workspace import journal is invalid');
     }
+    const seen = new Set();
+    for (const row of manifest.rows) {
+      const key = resolveInside(rootReal, row.path, { forWrite: true }).absolute;
+      const identity = process.platform === 'win32' ? key.toLowerCase() : key;
+      if (seen.has(identity)) throw failure('IMPORT_JOURNAL_INVALID', 'Duplicate import target');
+      seen.add(identity);
+      if (row.backup !== null) {
+        const file = path.join(dir, row.backup), stat = fs.lstatSync(file);
+        if (!stat.isFile() || stat.isSymbolicLink() || digest(fs.readFileSync(file)) !== row.originalHash) {
+          throw failure('IMPORT_JOURNAL_INVALID', 'Original import preimage cannot be verified');
+        }
+      }
+    }
+    // Manifest binds root, ordered paths, original/staged hashes and backup names.
+    // All non-null original hashes were just checked against actual preimages.
+    return { dir, manifest, evidence: { name, sha256: digest(JSON.stringify(manifest)) } };
+}
+
+function importBatchNames(journalDir) {
+  if (!fs.existsSync(journalDir)) return [];
+  const stat = fs.lstatSync(journalDir);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw failure('IMPORT_JOURNAL_INVALID', 'Workspace import journal directory is invalid');
+  return fs.readdirSync(journalDir).sort();
+}
+
+// Read-only, content-bound evidence for the existing Owner recovery coordinator.
+export function workspaceImportEvidence(rootReal, { journalDir = workspaceJournalDir(rootReal) } = {}) {
+  return importBatchNames(journalDir).map(name => readImportBatch(rootReal, journalDir, name).evidence);
+}
+
+export function recoverWorkspaceImports(rootReal, { journalDir = workspaceJournalDir(rootReal), expectedBatches, onRecovered } = {}) {
+  const evidence = workspaceImportEvidence(rootReal, { journalDir });
+  if (expectedBatches !== undefined && (!expectedBatches.length
+    || JSON.stringify(evidence) !== JSON.stringify(expectedBatches))) {
+    throw failure('WORKSPACE_RECOVERY_REQUIRED', 'Original import batch evidence is missing or changed');
+  }
+  const recovered = [];
+  for (const expected of evidence) {
+    const { dir, manifest, evidence: current } = readImportBatch(rootReal, journalDir, expected.name);
+    if (current.sha256 !== expected.sha256) throw failure('WORKSPACE_RECOVERY_REQUIRED', 'Import evidence changed before recovery');
     if (manifest.status !== 'completed') {
       for (const row of [...manifest.rows].reverse()) restoreOne(rootReal, dir, row);
+      for (const row of manifest.rows) {
+        const { bytes } = targetFor(rootReal, row.path);
+        if ((bytes === null ? null : digest(bytes)) !== row.originalHash) throw failure('WORKSPACE_RECOVERY_REQUIRED', 'Recovered target changed before settlement');
+      }
+    }
+    if (readImportBatch(rootReal, journalDir, expected.name).evidence.sha256 !== expected.sha256) {
+      throw failure('WORKSPACE_RECOVERY_REQUIRED', 'Import evidence changed during recovery');
     }
     removeJournal(dir, journalDir);
-    recovered.push(name);
+    recovered.push(expected.name);
+    onRecovered?.(expected);
   }
+  if (importBatchNames(journalDir).length) throw failure('WORKSPACE_RECOVERY_REQUIRED', 'Another import appeared during recovery');
   return recovered;
 }
 

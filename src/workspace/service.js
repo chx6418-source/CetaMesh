@@ -31,7 +31,7 @@ import {
   applyWorkspaceChanges
 } from './tools.js';
 import { createGitProduct } from './git-product.js';
-import { recoverWorkspaceImports } from './transaction.js';
+import { recoverWorkspaceImports, workspaceImportEvidence } from './transaction.js';
 import { isManagedWorktree } from './managed-worktree.js';
 import { workspaceContentProof } from './handoff-facts.js';
 
@@ -43,13 +43,31 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
   }
   const registry = createWorkspaceRegistry({ file: workspaceRegistryFile(stateDir), now });
   const recovery = new Map();
-  function recoverEntry(workspace) {
-    try { recoverWorkspaceImports(workspace.root); }
-    catch (error) {
+  function retainRecovery(workspace, error) {
+      let retained = recovery.get(workspace.root);
+      if (!retained) {
+        let batches = null;
+        try { batches = workspaceImportEvidence(workspace.root); } catch { /* Incomplete evidence cannot authorize recovery. */ }
+        retained = { batches };
+      }
       // A retained import belongs to one project. Preserve its raw evidence and
       // fence that execution root, rather than taking every other project down.
-      recovery.set(workspace.root, { status: 'blocked', code: 'WORKSPACE_RECOVERY_REQUIRED',
+      recovery.set(workspace.root, { ...retained, status: 'blocked', code: 'WORKSPACE_RECOVERY_REQUIRED',
         causeCode: error?.code === 'ENOENT' ? 'IMPORT_JOURNAL_INCOMPLETE' : String(error?.code ?? 'IMPORT_JOURNAL_INVALID') });
+  }
+  function recoverEntry(workspace, { ownerReview = false } = {}) {
+    const retained = recovery.get(workspace.root);
+    if (retained && (!ownerReview || !retained.batches?.length)) return;
+    try {
+      recoverWorkspaceImports(workspace.root, retained ? {
+        expectedBatches: retained.batches,
+        // Record only affirmative settlement of each original batch. Partial
+        // progress remains retryable; absence alone never counts as settlement.
+        onRecovered: proof => { retained.batches = retained.batches.filter(row => row.name !== proof.name || row.sha256 !== proof.sha256); }
+      } : {});
+      if (retained && retained.batches.length === 0) recovery.delete(workspace.root);
+    } catch (error) {
+      retainRecovery(workspace, error);
     }
   }
   for (const workspace of registry.list()) recoverEntry(workspace);
@@ -82,7 +100,10 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     // Identity changes and alternate ancestor/descendant registrations must not
     // grant another write path to the same unresolved project files.
     for (const [root, state] of recovery) {
-      if (isInsideRoot(root, entry.root) || isInsideRoot(entry.root, root)) return state;
+      if (isInsideRoot(root, entry.root) || isInsideRoot(entry.root, root)) {
+        const { batches, ...projection } = state;
+        return projection;
+      }
     }
     return { status: 'ready' };
   }
@@ -377,7 +398,7 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     try { result = applyWorkspaceChanges(entry.root, changes); }
     catch (error) {
       if (['WORKSPACE_RECOVERY_REQUIRED', 'IMPORT_JOURNAL_INVALID', 'IMPORT_JOURNAL_INCOMPLETE'].includes(error?.code)) {
-        recovery.set(entry.root, { status: 'blocked', code: 'WORKSPACE_RECOVERY_REQUIRED', causeCode: error.code });
+        retainRecovery(entry, error);
       }
       throw error;
     }
@@ -443,7 +464,11 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
 
   // Owner recovery intentionally retains its existing write/recovery fence.
   async function collectRecoveryProof(id) {
-    return contentProof(assertWritable(requireWorkspace({ id })));
+    const entry = requireWorkspace({ id });
+    // Only the original registered root can recover its retained batches.
+    // Alternate ancestor/descendant registrations remain fenced projections.
+    if (!pendingRecoveryState(entry)) recoverEntry(entry, { ownerReview: true });
+    return contentProof(assertWritable(entry));
   }
 
   return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof };

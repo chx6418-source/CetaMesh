@@ -129,7 +129,13 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
     if (!session.stopped) blockers.push({ code: 'SESSION_EXECUTION_UNCONFIRMED',
       message: '旧执行尚无完整停止凭据，不能续接或释放写入权。保留任务和结果，等待原执行结束后重新核查。' });
     let workspace = null;
-    try { workspace = await services.workspaceService.collectRecoveryProof(task.workspaceId); }
+    try {
+      // Import rollback can write files. Inspecting an active/unknown executor
+      // must stay read-only until every execution/operation blocker is settled.
+      workspace = blockers.length
+        ? await services.workspaceService.collectContentProof?.(task.workspaceId) ?? null
+        : await services.workspaceService.collectRecoveryProof(task.workspaceId);
+    }
     catch (error) { blockers.push({ code: codeOf(error?.code), message: '工作区内容无法完整核验，请检查项目可访问性、边界及保留的操作记录后重新核查。' }); }
     const latest = runtime.get({ id: task.id }).task;
     const stable = journals(latest); stable.taskId = latest.id;
