@@ -9,6 +9,9 @@ import { agentProviderError as fault } from './agent-provider.js';
 
 // Audited official npm packages; new releases require native permission revalidation.
 export const GEMINI_QWEN_NATIVE_VERSIONS = Object.freeze({ gemini: '0.65.0', qwen: '0.26.1' });
+// 0.66.0 was characterized with the real CLI. Discovery is supported, but the
+// permission request still omits rawInput: this does not enable Task execution.
+const GEMINI_DISCOVERY_VERSIONS = Object.freeze(['0.65.0','0.66.0']);
 export const GEMINI_QWEN_POLICY_VERSION = 'gemini-0.65.0-qwen-0.26.1-cetamesh-native-ask-v1';
 // Qwen 0.26.1 does not implement '*' for builtin permission names. This is its
 // complete pinned ToolNames registry; denied integrations still have ask coverage.
@@ -32,8 +35,8 @@ export const GEMINI_QWEN_SNAPSHOT_EXCLUDED_PATHS = Object.freeze(['.gemini','.qw
 
 export function knownGeminiQwenRuntime(id,version,initialized) {
   const expected=GEMINI_QWEN_NATIVE_VERSIONS[id];
-  return Boolean(expected && process.platform==='win32' && version===expected && initialized?.protocolVersion===1
-    && initialized.agentInfo?.version===expected && initialized.agentInfo?.name===(id==='gemini'?'gemini-cli':'qwen-code'));
+  return Boolean(expected && process.platform==='win32' && (id==='gemini'?GEMINI_DISCOVERY_VERSIONS.includes(version):version===expected) && initialized?.protocolVersion===1
+    && initialized.agentInfo?.version===version && initialized.agentInfo?.name===(id==='gemini'?'gemini-cli':'qwen-code'));
 }
 
 export function createGeminiQwenProfile({id,configuration={},profileParent=os.tmpdir(),allowLoopbackHttpForTests=false,ownedRoot,initialize=true}={}) {
@@ -119,7 +122,7 @@ export function geminiQwenPackageIdentity(id,entry) {
   let packageRoot=normalized;for(const ignored of parts)packageRoot=path.dirname(packageRoot);
   if(path.join(packageRoot,...parts)!==normalized) return null;
   const manifest=readJsonFile(path.join(packageRoot,'package.json'),{maxBytes:65536});
-  if(manifest?.name!==layout.name || manifest.version!==GEMINI_QWEN_NATIVE_VERSIONS[id] || manifest.bin?.[id]!==layout.bin) return null;
+  if(manifest?.name!==layout.name || !(id==='gemini'?GEMINI_DISCOVERY_VERSIONS.includes(manifest.version):manifest.version===GEMINI_QWEN_NATIVE_VERSIONS[id]) || manifest.bin?.[id]!==layout.bin) return null;
   const nodeModulesRoot=fs.realpathSync(path.dirname(path.dirname(packageRoot)));
   const contentHash=crypto.createHash('sha256'),buffer=Buffer.allocUnsafe(1024*1024),packages=[packageRoot],seen=new Set();let count=0,bytes=0;
   const contained=(root,file)=>{const relative=path.relative(root,file);return relative!=='' && relative!=='..' && !relative.startsWith('..'+path.sep) && !path.isAbsolute(relative);};

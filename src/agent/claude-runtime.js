@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import childProcess from 'node:child_process';
 import { APP_PATHS } from '../app-paths.js';
-import { createMinimalAgentEnv } from './cli-agent-process.js';
+import { createMinimalAgentEnv, findCliCandidates } from './cli-agent-process.js';
 import { CLAUDE_SDK_RESOURCE_FILE, CLAUDE_SDK_RESOURCE_SHA256, verifyClaudeSdkBytes } from './claude-sdk-resource.js';
 
 export const CLAUDE_NATIVE_TOOLS = Object.freeze(['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash']);
@@ -12,6 +12,30 @@ const fault = code => Object.assign(new Error(code), { code });
 const MAX_BINARY_BYTES = 512 * 1024 * 1024;
 const HELP_FLAGS = ['--print', '--input-format', '--output-format', '--permission-mode',
   '--setting-sources', '--strict-mcp-config', '--tools', '--settings'];
+
+/** Bounded native coding CLI discovery; never execute the Desktop GUI or inspect account files. */
+export function findClaudeCodeExecutable(env = process.env) {
+  const user = env.USERPROFILE || env.HOME || os.homedir();
+  const candidates=[path.join(user,'.local','bin',process.platform==='win32'?'claude.exe':'claude'),
+    ...findCliCandidates('claude',{env}).filter(file=>process.platform!=='win32'||/\.exe$/i.test(file))];
+  const nativeFile=file=>{try{return !/(?:^|[\\/])WindowsApps(?:[\\/]|$)/i.test(file)
+    && !fs.lstatSync(file).isSymbolicLink()&&fs.statSync(file).isFile();}catch{return false;}};
+  if(process.platform==='win32' && env.LOCALAPPDATA && path.isAbsolute(env.LOCALAPPDATA)) {
+    // Observed official Desktop-managed coding runtime layout, independent of
+    // Desktop authentication. Each selected binary still passes PE/help/hash checks.
+    const base=path.join(env.LOCALAPPDATA,'Claude-3p','claude-code');
+    try {
+      if(!fs.lstatSync(base).isSymbolicLink())for(const version of fs.readdirSync(base,{withFileTypes:true})
+        .filter(item=>item.isDirectory()&&!item.isSymbolicLink()&&/^\d+\.\d+\.\d+$/.test(item.name))
+        .sort((a,b)=>b.name.localeCompare(a.name,'en',{numeric:true})).slice(0,16)) {
+        for(const generation of fs.readdirSync(path.join(base,version.name),{withFileTypes:true})
+          .filter(item=>item.isDirectory()&&!item.isSymbolicLink()&&/^[a-f0-9]{12,64}$/i.test(item.name)).slice(0,16))
+          candidates.push(path.join(base,version.name,generation.name,'claude.exe'));
+      }
+    } catch { return candidates.find(nativeFile) ?? null; /* Optional installation failure preserves bounded earlier candidates. */ }
+  }
+  return candidates.find(nativeFile) ?? null;
+}
 
 /** A newly owned profile prevents the SDK and native CLI from loading account state. */
 export function createClaudeOwnedProfile() {
@@ -114,7 +138,8 @@ async function probe(executable, argument, ownership={}) {
 export function createClaudeRuntimeVerifier({ resourceRoot = APP_PATHS.resourceRoot, envSource = process.env } = {}) {
   const proofs = new Map();
   return Object.freeze({ async inspect(runtimePath = '', ownership={}) {
-    const selected = runtimePath || path.join(envSource.USERPROFILE || envSource.HOME || os.homedir(), '.local', 'bin', process.platform === 'win32' ? 'claude.exe' : 'claude');
+    const selected = runtimePath || findClaudeCodeExecutable(envSource);
+    if(!selected)return {installed:false,compatible:false,binaryVerified:false,sdkResourcesVerified:false,reason:'claude_code_not_found'};
     let identity;
     try { identity = binaryIdentity(selected); }
     catch (error) { return { installed: error.code === 'claude_code_unreadable' ? null : false, compatible: false,

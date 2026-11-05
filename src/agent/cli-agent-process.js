@@ -82,7 +82,7 @@ export function createMinimalAgentEnv(source = process.env, overrides = {}, { au
 
 const NPM_CLI_PACKAGES = Object.freeze({
   codex: Object.freeze({ packageName: '@openai/codex', binPath: 'bin/codex.js', verifyManifest: false }),
-  gemini: Object.freeze({ packageName: '@google/gemini-cli', binPaths: Object.freeze({ 'dist/index.js': null, 'bundle/gemini.js': '0.65.0' }), verifyManifest: true }),
+  gemini: Object.freeze({ packageName: '@google/gemini-cli', binPaths: Object.freeze({ 'dist/index.js': null, 'bundle/gemini.js': Object.freeze(['0.65.0','0.66.0']) }), verifyManifest: true }),
   qwen: Object.freeze({ packageName: '@qwen-code/qwen-code', binPaths: Object.freeze({ 'dist/index.js': null, 'cli-entry.js': '0.26.1' }), verifyManifest: true })
 });
 
@@ -104,7 +104,8 @@ function resolveNpmShimScript(name, executable) {
           || !Object.hasOwn(manifest.bin, name) || typeof manifest.bin[name] !== 'string'
           || !Object.hasOwn(spec.binPaths, manifest.bin[name])) continue;
         binPath = manifest.bin[name];
-        if (spec.binPaths[binPath] !== null && manifest.version !== spec.binPaths[binPath]) continue;
+        const versions=spec.binPaths[binPath];
+        if (versions !== null && !(Array.isArray(versions)?versions:[versions]).includes(manifest.version)) continue;
       }
       const candidate = path.join(packageRoot, binPath);
       if (!isFile(candidate)) continue;

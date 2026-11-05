@@ -16,6 +16,8 @@ import { createJsonRpcTransport } from '../src/agent/protocol/json-rpc-transport
 
 if(process.env.WHALEBRIDGE_TEST_REAL_GEMINI_QWEN!=='1') {console.log('NOT_RUN_ENVIRONMENT actual Gemini/Qwen CLI opt-in required');process.exit(77);}
 const runtimes={gemini:process.env.WHALEBRIDGE_TEST_GEMINI_CLI,qwen:process.env.WHALEBRIDGE_TEST_QWEN_CLI};
+const geminiVersion=process.env.WHALEBRIDGE_TEST_GEMINI_VERSION || '0.65.0';
+assert.ok(['0.65.0','0.66.0'].includes(geminiVersion),'only explicitly reviewed Gemini versions enter this characterization');
 if(process.platform!=='win32' || Object.values(runtimes).some(file=>!file || !path.isAbsolute(file) || !fs.existsSync(file))) {
  console.log('NOT_RUN_ENVIRONMENT explicit pinned Gemini/Qwen npm command paths are required');process.exit(77);
 }
@@ -98,12 +100,13 @@ try {
   const read=send('read','read_file');await decide(await pending('agent.native.approve'),true);await read;assert.match(lastToolResult,/synthetic input for approved read/);
   const shell=send('shell','run_shell_command');await decide(await pending('agent.native.approve'),false);await shell;assert.equal(fs.existsSync(path.join(currentStage,'shell-denied.txt')),false);
   const deny=send('deny','write_file');await decide(await pending('agent.native.approve'),false);await deny;assert.equal(fs.existsSync(path.join(currentStage,'deny.txt')),false);
-  const cancel=send('cancel','write_file');const stale=await pending('agent.native.approve');await broker.cancel(params());await cancel;await assert.rejects(decide(stale,true));assert.equal(fs.existsSync(path.join(currentStage,'cancel.txt')),false);assert.equal(permissionCalls,5);
   assert.equal(fs.existsSync(marker),false);noStoredCredential(profiles);
   const live=path.join(profiles,fs.readdirSync(profiles)[0],'system','settings.json'),source=fs.readFileSync(live);
   fs.unlinkSync(live);await assert.rejects(provider.send({sessionId:session.sessionId,content:'Missing authority'}),{code:'AGENT_RUNTIME_CHANGED'});fs.writeFileSync(live,source);
-  fs.writeFileSync(live,'{}');await assert.rejects(broker.send({...params(),content:'Changed authority'}),{code:'AGENT_RUNTIME_CHANGED'});fs.writeFileSync(live,source);
-  revision++;await assert.rejects(broker.send({...params(),content:'Changed configured identity'}),{code:'AGENT_RUNTIME_CHANGED'});
+  fs.writeFileSync(live,'{}');await assert.rejects(provider.send({...params(),content:'Changed authority'}),{code:'AGENT_RUNTIME_CHANGED'});fs.writeFileSync(live,source);
+  revision++;await assert.rejects(provider.send({...params(),content:'Changed configured identity'}),{code:'AGENT_RUNTIME_CHANGED'});revision--;
+  const cancel=send('cancel','write_file');const stale=await pending('agent.native.approve');await broker.cancel(params());await cancel;await assert.rejects(decide(stale,true));assert.equal(fs.existsSync(path.join(currentStage,'cancel.txt')),false);assert.equal(permissionCalls,5);
+  assert.equal((await provider.status(params())).running,false,'actual prompt terminal follows the cancellation request');
   console.log('PASS actual Qwen Code 0.26.1: real TaskRuntime/capability.agent.run assignment, full native input, Owner write/read allow, shell/write deny, cancel, hostile config exclusion, missing/changed policy denial, separate Source import');
  } finally {
   await Promise.all(providers.map(item=>item.shutdown()));await capabilityService.close();
@@ -114,12 +117,12 @@ try {
  activeId='gemini';scenario='read';expectedTool='read_file';issued=false;currentStage=path.join(root,'gemini-workspace');fs.mkdirSync(currentStage);fs.writeFileSync(path.join(currentStage,'input.txt'),'must remain unapproved');
  const profile=createGeminiQwenProfile({id:'gemini',configuration:{model:'gemini-2.5-pro',baseUrl:endpoint},profileParent:profiles,allowLoopbackHttpForTests:true});
  const geminiProviders=createAcpProviders({runtimeConfiguration:{get:provider=>({provider,enabled:provider==='gemini',runtimePath:runtimes[provider],nodePath,model:'gemini-2.5-pro',baseUrl:endpoint,credentialConfigured:true}),identity:provider=>provider,resolveCredential:()=>({apiKey:secret,baseUrl:endpoint})},runtimeOptions:{profileParent:profiles,allowLoopbackHttpForTests:true}});
- try{const health=await geminiProviders[0].health();assert.equal(health.protocolVerified,true);assert.equal(health.taskEligible,false);assert.equal(health.reason,'native_input_unverified');}finally{await Promise.all(geminiProviders.map(item=>item.shutdown()));}
+ try{const health=await geminiProviders[0].health();assert.equal(health.protocolVerified,true,JSON.stringify(health));assert.equal(health.version,geminiVersion);assert.equal(health.taskEligible,false);assert.equal(health.reason,'native_input_unverified');}finally{await Promise.all(geminiProviders.map(item=>item.shutdown()));}
  const { CliAgentProcess }=await import('../src/agent/cli-agent-process.js');
  const target=new CliAgentProcess({name:'gemini',executable:runtimes.gemini,nodeExecutable:nodePath}).launchTarget();
  const handle=createAcpProcessLauncher({executable:target.executable,argv:[...target.argsPrefix,'--acp',...profile.argv],trustedEnvironment:{...profile.environment,GEMINI_API_KEY:secret}})({cwd:currentStage});
  let observed=0;const rpc=createJsonRpcTransport({readable:handle.readable,writable:handle.writable,framing:'acp-v1-jsonl',onRequest:async(method,params)=>{assert.equal(method,'session/request_permission');observed++;assert.equal(params.toolCall.rawInput,undefined,'current official Gemini ACP lacks exact input');return {outcome:{outcome:'cancelled'}};}});
- try{await rpc.request('initialize',{protocolVersion:1,clientCapabilities:{},clientInfo:{name:'CetaMesh',version:'1'}},{timeoutMs:15000});const created=await rpc.request('session/new',{cwd:currentStage,mcpServers:[]});await rpc.request('session/prompt',{sessionId:created.sessionId,prompt:[{type:'text',text:'CETAMESH_FIXTURE_read'}]},{timeoutMs:30000});assert.equal(observed,1);profile.validate();console.log('PASS actual Gemini CLI 0.65.0: native ask-all observed; exact-input omission denies task eligibility and rejected tool remains unexecuted');}
+ try{const initialized=await rpc.request('initialize',{protocolVersion:1,clientCapabilities:{},clientInfo:{name:'CetaMesh',version:'1'}},{timeoutMs:15000});assert.equal(initialized.agentInfo.version,geminiVersion);const created=await rpc.request('session/new',{cwd:currentStage,mcpServers:[]});await rpc.request('session/prompt',{sessionId:created.sessionId,prompt:[{type:'text',text:'CETAMESH_FIXTURE_read'}]},{timeoutMs:30000});assert.equal(observed,1);profile.validate();console.log('PASS actual Gemini CLI '+geminiVersion+': native ask-all observed; exact-input omission denies task eligibility and rejected tool remains unexecuted');}
  finally{await rpc.close();await handle.close();await profile.cleanup();}
  if(serverFailure)throw serverFailure;
 } catch(error){fixtureError=error;throw error;} finally {

@@ -180,6 +180,7 @@ try {
  });
  for (const spec of [
   { name: 'gemini', packageName: '@google/gemini-cli', binPath: 'bundle/gemini.js', version: '0.65.0' },
+  { name: 'gemini', packageName: '@google/gemini-cli', binPath: 'bundle/gemini.js', version: '0.66.0' },
   { name: 'qwen', packageName: '@qwen-code/qwen-code', binPath: 'cli-entry.js', version: '0.26.1' }
  ]) {
   await check(spec.name + ' pinned modern npm bin launches without executing shim text', () => {
