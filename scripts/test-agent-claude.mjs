@@ -3,6 +3,7 @@ import { PassThrough } from 'node:stream';
 import { createJsonRpcTransport } from '../src/agent/protocol/json-rpc-transport.js';
 import { createClaudeAgentProvider, claudeRunnerLaunchSpec } from '../src/agent/claude-agent-provider.js';
 import { runClaudeSdkRunner } from '../src/agent/claude-sdk-runner.js';
+import { findClaudeCodeExecutable, createClaudeRuntimeVerifier } from '../src/agent/claude-runtime.js';
 // Production configuration must produce actionable readiness without injected security flags.
 const configuredModule = await import('../src/agent/claude-agent-provider.js');
 assert.equal(typeof configuredModule.createConfiguredClaudeAgentProvider,'function','configured Claude production factory must be exported');
@@ -17,6 +18,20 @@ const runtimeConfiguration=createAgentRuntimeConfiguration({stateDir:configuredR
   raw:provider=>{credentialReads++;return configuredSecrets.get(provider);}
 }});
 try {
+  if(process.platform==='win32') {
+    const discoveryRoot=runtimePath.join(configuredRoot,'discovery'),user=runtimePath.join(discoveryRoot,'user'),local=runtimePath.join(discoveryRoot,'local');
+    const coding=runtimePath.join(local,'Claude-3p','claude-code','2.1.308','c17a819afb40','claude.exe');
+    runtimeFs.mkdirSync(runtimePath.dirname(coding),{recursive:true});runtimeFs.writeFileSync(coding,Buffer.alloc(64));
+    const environment={USERPROFILE:user,LOCALAPPDATA:local,PATH:runtimePath.join(discoveryRoot,'empty'),APPDATA:runtimePath.join(discoveryRoot,'roaming')};
+    assert.equal(findClaudeCodeExecutable(environment),coding,'the installed native coding runtime is discoverable without a user CLI shim');
+    const invalid=await createClaudeRuntimeVerifier({envSource:environment,resourceRoot:configuredRoot}).inspect();
+    assert.equal(invalid.reason,'claude_code_binary_invalid','discovery is not evidence of a runnable CLI');
+    const conventional=runtimePath.join(user,'.local','bin','claude.exe');runtimeFs.mkdirSync(runtimePath.dirname(conventional),{recursive:true});runtimeFs.writeFileSync(conventional,Buffer.alloc(64));
+    assert.equal(findClaudeCodeExecutable(environment),conventional,'explicit conventional CLI installation keeps precedence');
+    runtimeFs.unlinkSync(conventional);runtimeFs.unlinkSync(coding);
+    const invalidLayout=runtimePath.join(local,'Claude-3p','claude-code','unverified-version','c17a819afb40','claude.exe');runtimeFs.mkdirSync(runtimePath.dirname(invalidLayout),{recursive:true});runtimeFs.writeFileSync(invalidLayout,Buffer.alloc(64));
+    assert.equal(findClaudeCodeExecutable(environment),null,'unknown directory layouts never become an execution candidate');
+  }
   const production=configuredModule.createConfiguredClaudeAgentProvider({runtimeConfiguration,
     resourceRoot:runtimePath.join(configuredRoot,'absent-resource'),
     taskOptions:{resolveTaskWorkspace:async()=>{throw Error('health cannot bind Task');}},
@@ -71,7 +86,6 @@ console.log('Claude corrupt optional configuration containment and preservation 
 // Native probes are the only mocked boundary: headers, hashes, config, staging and routing stay real.
 const nativeBoundary=await import('node:child_process'), {mock:runtimeMock}=await import('node:test');
 const {syncBuiltinESMExports}=await import('node:module'), {EventEmitter:ProbeEmitter}=await import('node:events');
-const {createClaudeRuntimeVerifier}=await import('../src/agent/claude-runtime.js');
 const probeRoot=runtimeFs.mkdtempSync(runtimePath.join(runtimeOs.tmpdir(),'claude-native-fixture-'));
 const nativeBinary=runtimePath.join(probeRoot,process.platform==='win32'?'claude.exe':'claude');
 const nativeBytes=Buffer.alloc(256);
@@ -452,13 +466,14 @@ const { mkdtempSync, rmSync } = await import('node:fs');
 const { tmpdir } = await import('node:os');
 const { join } = await import('node:path');
 const source = mkdtempSync(join(tmpdir(), 'claude-fixture-'));
-let fixtureOptions, closedHandle = false;
+let fixtureOptions, closedHandle = false, fixtureLaunches = 0;
 const live = createClaudeAgentProvider({
   taskOptions: { credentialRef: 'ref-only', verifiedRuntime: { verified: true, sdkResourcesVerified: true, binaryVerified: true,
     runtimePath:'/verified/claude', model:'fixture-live-model', tools:[], security:{mode:'native',verified:true,nativeSandboxSupported:true,nativeApprovalSupported:true} },
     resolveTaskWorkspace: async () => ({task:{id:'t',workspaceId:'w'},workspace:{id:'w',root:source}}) },
   resolveCredential: async ref => { assert.equal(ref, 'ref-only'); return 'private-fixture-key'; },
   async launchSdkRunner(binding) {
+    fixtureLaunches++;
     assert.notEqual(binding.cwd, source);
     const readable = new PassThrough(), writable = new PassThrough();
     const done = runClaudeSdkRunner({input:writable,output:readable,loadSdk:async()=>({query({options}) {
@@ -470,7 +485,11 @@ const live = createClaudeAgentProvider({
 });
 try {
   assert.equal((await live.health()).available, true);
-  const session = await live.createSession({taskId:'t',workspaceId:'w'});
+  for(const selection of [{model:'silently-ignored-model'},{reasoningEffort:'high'},{modelProvider:'other-provider'}]) {
+    await assert.rejects(live.createSession({taskId:'t',workspaceId:'w',...selection}),{code:'AGENT_CONFIGURATION_UNSUPPORTED'});
+    assert.equal(fixtureLaunches,0,'unsupported Task settings must be refused before starting a native runtime');
+  }
+  const session = await live.createSession({taskId:'t',workspaceId:'w',model:'fixture-live-model'});
   const sent = await live.send({sessionId:session.sessionId,content:'first'});
   assert.equal(sent.accepted,true);
   for (let i=0;i<100 && (await live.status({sessionId:session.sessionId})).running;i++) await new Promise(r=>setTimeout(r,5));

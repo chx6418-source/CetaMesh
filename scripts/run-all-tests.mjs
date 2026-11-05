@@ -197,6 +197,8 @@ const REGISTRY = {
   'test-agent-native-approval.mjs': { category: 'security', note: 'Owner native-tool approval, exact binding, cancel and stale policy rejection' },
   'test-gemini-qwen-native-policy.mjs': { category: 'environment', requires: ['real-gemini-qwen'], timeoutMs: 240000, note: 'Pinned official Gemini and Qwen CLIs with local synthetic models and native approval policy' },
   'test-opencode-native-runtime.mjs': { category: 'environment', requires: ['real-opencode'], timeoutMs: 180000, note: 'Installed OpenCode CLI with isolated local synthetic model and native approval lifecycle' },
+  'test-agent-acp-configuration.mjs': { category: 'security', timeoutMs: 120000, note: 'ACP advertised model/reasoning controls and confirmed configuration changes' },
+  'test-claude-native-runtime.mjs': { category: 'environment', requires: ['real-claude-local'], timeoutMs: 240000, note: 'Installed Claude CLI and audited SDK with isolated synthetic HTTPS model and production Core' },
   'test-agent-workbuddy.mjs': { category: 'runtime' },
   'test-ui-motion.mjs': { category: 'desktop' },
   'test-chat-composer-layout.mjs': { category: 'desktop' },
@@ -460,6 +462,7 @@ async function probeAvailability() {
     'real-gemini-qwen': process.env.WHALEBRIDGE_TEST_REAL_GEMINI_QWEN === '1',
     'claude-auth-contract': process.platform==='win32' && process.env.WHALEBRIDGE_TEST_CLAUDE_AUTH_CONTRACT==='1',
     'real-opencode': process.env.WHALEBRIDGE_TEST_REAL_OPENCODE === '1',
+    'real-claude-local': process.env.WHALEBRIDGE_TEST_REAL_CLAUDE === '1',
     'native-product': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_NATIVE_PRODUCT === '1',
     'real-managed': process.env.WHALEBRIDGE_TEST_REAL_MANAGED === '1',
     'real-codex': process.env.WHALEBRIDGE_TEST_REAL_CODEX === '1'

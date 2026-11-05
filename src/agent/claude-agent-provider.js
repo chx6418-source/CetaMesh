@@ -66,6 +66,12 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
       requestNativeApproval, log, validateRuntime: taskOptions.validateRuntime, stagingRoot: taskOptions.stagingRoot,
       excludedRoots: taskOptions.excludedRoots, listWorkspaceRoots: taskOptions.listWorkspaceRoots, snapshotExcludedPaths: taskOptions.snapshotExcludedPaths,
       async launch(binding) {
+        // This pinned SDK bridge currently supports the Owner-configured model,
+        // not dynamic session settings. Never silently discard Task overrides.
+        if ((binding.model != null && binding.model !== runtime.model)
+          || binding.reasoningEffort != null || binding.modelProvider != null) {
+          throw agentProviderError('AGENT_CONFIGURATION_UNSUPPORTED', 'Claude supports its configured model; change Agent settings before creating a fresh Session. Session reasoning control is not verified.');
+        }
         // Secret resolved only after Task Workspace binding and staging were established.
         const account = taskOptions.authMode === 'provider-login';
         const credential = account ? null : await resolveCredential(taskOptions.credentialRef);
@@ -102,7 +108,7 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
 
 /** Owner-configured production runtime. All verification and launch inputs stay in Core. */
 export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, taskOptions = {}, requestNativeApproval, log,
-  resourceRoot = APP_PATHS.resourceRoot, resolveAuthProfile } = {}) {
+  resourceRoot = APP_PATHS.resourceRoot, resolveAuthProfile, createRunner } = {}) {
   if (!runtimeConfiguration || ['get', 'identity', 'configure', 'resolveCredential'].some(key => typeof runtimeConfiguration[key] !== 'function')) {
     throw new TypeError('Claude runtime configuration service required');
   }
@@ -177,7 +183,7 @@ export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, task
           }
           return credential;
         },
-        launchSdkRunner:createClaudeTaskRunnerLauncher({authMode:selected.configuration.authMode,resolveAuthProfile,validateRuntime,activeProfiles})
+        launchSdkRunner:createClaudeTaskRunnerLauncher({authMode:selected.configuration.authMode,resolveAuthProfile,validateRuntime,activeProfiles,createRunner})
       });
       inners.add(record.inner);
     }
