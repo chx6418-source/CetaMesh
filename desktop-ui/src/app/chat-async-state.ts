@@ -1,4 +1,4 @@
-import type {ChatContextObservation,ModelUsage} from '../bridge/typed-client';
+import type {ChatActivityObservation,ChatContextObservation,ModelUsage} from '../bridge/typed-client';
 export type ChatRequestKind = 'load' | 'context' | 'older';
 export type ChatRequestToken = { kind: ChatRequestKind; sessionId: string | null; generation: number };
 
@@ -23,7 +23,8 @@ export function shouldApplyChatStatusSnapshot(snapshotRevision: number, currentR
 }, next: { state: string; displayText: string; requestId: string | null }): boolean {
   if (snapshotRevision !== currentRevision) return false;
   const currentStreaming = ['starting', 'streaming', 'recovering', 'cancelling'].includes(current.state);
-  return !(currentStreaming && current.displayText && current.requestId === next.requestId
+  const nextStreaming = ['starting', 'streaming', 'recovering', 'cancelling'].includes(next.state);
+  return !(currentStreaming && nextStreaming && current.displayText && current.requestId === next.requestId
     && next.displayText.length < current.displayText.length);
 }
 
@@ -54,7 +55,7 @@ export class ChatRequestEpoch {
   }
 }
 
-export type ChatStreamUpdate = {
+export type ChatStreamUpdate = ChatActivityObservation & {
   sessionId?: string;
   requestId?: string;
   status?: string;
@@ -70,14 +71,14 @@ export type ChatStreamUpdate = {
 };
 
 /** Keep the last streamed answer until the matching durable message reaches history. */
-export function pendingReplyVisible(reply: { requestId: string | null; text: string } | null,
+export function pendingReplyVisible(reply: ({ requestId: string | null; text: string; toolActivity?: readonly unknown[]; agentActivity?: unknown } & ChatActivityObservation) | null,
   messages: readonly { role: string; requestId?: string | null }[]): boolean {
-  return Boolean(reply?.text && reply.requestId && !messages.some(message =>
+  return Boolean(reply && (reply.text || reply.toolActivity?.length || reply.agentActivity || reply.activityTimeline?.entries.length) && reply.requestId && !messages.some(message =>
     message.role === 'assistant' && message.requestId === reply.requestId));
 }
 
 /** Apply a frame's events in order, keeping every delta and discarding stale identities. */
-export function applyChatStreamUpdates<T extends {
+export function applyChatStreamUpdates<T extends ChatActivityObservation & {
   displayText: string;
   requestId: string | null;
   state: string;
@@ -99,7 +100,10 @@ export function applyChatStreamUpdates<T extends {
     if (!next || next === current) next = { ...current };
     if (update.reset) {
       next.displayText = '';
-      if (requestId && requestId !== acceptedRequestId) { next.context = null; next.turnUsage = null; }
+      if (requestId && requestId !== acceptedRequestId) {
+        next.context = null; next.turnUsage = null;
+        next.activityTimeline = null; next.activityOmitted = 0; next.activityState = null;
+      }
       if (requestId) {
         acceptedRequestId = requestId;
         next.requestId = requestId;
@@ -113,6 +117,9 @@ export function applyChatStreamUpdates<T extends {
     next.statusMessage = update.message ?? next.statusMessage;
     next.toolActivity = update.toolActivity ?? next.toolActivity;
     next.agentActivity = update.agentActivity === undefined ? next.agentActivity : update.agentActivity;
+    if (update.activityTimeline !== undefined) next.activityTimeline = update.activityTimeline;
+    if (update.activityOmitted !== undefined) next.activityOmitted = update.activityOmitted;
+    if (update.activityState !== undefined) next.activityState = update.activityState;
     if (requestId && update.context?.schemaVersion === 1 && (!update.context.requestId || update.context.requestId === requestId)) next.context = update.context;
     if (requestId && update.turnUsage !== undefined) next.turnUsage = update.turnUsage;
   }

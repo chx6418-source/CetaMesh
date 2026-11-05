@@ -732,6 +732,7 @@ try {
     agentProviders: [{ id: 'codex', label: 'Codex', eventProtocol: 'agent-turn-events-v1', workspaceBoundary: 'staged-capability-broker' }],
     agentExecute: async request => {
       harborAgentConfigCalls.push(request);
+      if (request.method === 'agent.status') return restartedBroker.status(request.params);
       if (request.method === 'agent.selectModel') return restartedBroker.selectModel({
         provider: request.params.provider, sessionId: request.params.sessionId,
         model: request.params.model, reasoningEffort: request.params.reasoningEffort
@@ -755,18 +756,18 @@ try {
     'Codex provider output enters the Harbor Chat streaming event protocol');
   assert.equal((await harborChat.execute({ method: 'chat.history', params: { id: harborSession.id } })).messages.at(-1).text,
     `fixture response ${expectedHarborRun}`);
-  await harborChat.execute({ method: 'chat.config.set', params: { id: harborSession.id,
-    config: { model: 'harbor-codex-model', reasoning: 'high' } } });
-  assert.ok(harborAgentConfigCalls.some(call => call.method === 'agent.selectModel'
-    && call.params.provider === 'codex' && call.params.sessionId === harborAgentSession.sessionId),
-  'Chat applies Model and reasoning changes through the active Codex session contract');
+  const priorHarborRequest=(await restartedBroker.status({provider:'codex',sessionId:harborAgentSession.sessionId})).modelControl.requested;
+  await assert.rejects(harborChat.execute({ method: 'chat.config.set', params: { id: harborSession.id,
+    config: { model: 'harbor-codex-model', reasoning: 'high' } } }),{code:'AGENT_MODEL_UNSUPPORTED'});
+  assert.equal(harborAgentConfigCalls.some(call => call.method === 'agent.selectModel'),false,
+    'Chat cannot promote a Codex exec next-turn request to a runtime-confirmed selection');
   const beforeSecondHarborRun = fakeRuns.length;
-  await harborChat.execute({ method: 'chat.send', params: { id: harborSession.id, text: 'use my new Codex settings' } });
+  await harborChat.execute({ method: 'chat.send', params: { id: harborSession.id, text: 'continue using the existing Codex configuration' } });
   await waitFor(async () => harborChat.execute({ method: 'chat.status', params: { id: harborSession.id } }), status => status.turn === null);
   const secondHarborRun = fakeRuns.slice(beforeSecondHarborRun).find(run => run.sessionId.startsWith(harborAgentSession.sessionId + ':'));
-  assert.ok(secondHarborRun.args.includes('--model')
-    && secondHarborRun.args[secondHarborRun.args.indexOf('--model') + 1] === 'harbor-codex-model');
-  assert.ok(secondHarborRun.args.some(arg => arg.includes('model_reasoning_effort="high"')));
+  assert.equal(secondHarborRun.args.includes('--model')?secondHarborRun.args[secondHarborRun.args.indexOf('--model') + 1]:null,priorHarborRequest.model);
+  assert.ok(!secondHarborRun.args.some(arg => arg.includes('model_reasoning_effort="high"')),
+    'unconfirmed UI model changes do not affect normal subsequent Codex execution');
   const beforeThirdHarborRun = fakeRuns.length;
   await harborChat.execute({ method: 'chat.send', params: { id: harborSession.id, text: 'continue this Codex conversation a third time' } });
   await waitFor(async () => harborChat.execute({ method: 'chat.status', params: { id: harborSession.id } }), status => status.turn === null);

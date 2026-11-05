@@ -20,7 +20,7 @@
 // rolloverStrategy：DSH 无原生压缩/续接能力，上下文临限时的推荐策略是"开新会话"。
 import crypto from 'node:crypto';
 import { agentProviderError, defineAgentProvider, normalizePromptContent, AGENT_EVENT_PROTOCOL_DSH } from './agent-provider.js';
-import { selectDshSessionModel } from '../dsh-model-selection.js';
+import { fetchDshModelCatalog, selectDshSessionModel } from '../dsh-model-selection.js';
 import { createDshFollowHub } from './dsh-follow-hub.js';
 
 const CALL_TIMEOUT_MS = 15_000;
@@ -48,6 +48,40 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
     reasoningEffort: defaults.reasoningEffort ? String(defaults.reasoningEffort) : null
   };
   const followHub = createDshFollowHub({ api });
+  const modelSessions = new Map();
+  let modelCatalog=null,modelCatalogAt=0,modelCatalogRead=null;
+  const nativeValue=(value,max=256)=>typeof value==='string'&&value.length>0&&value.length<=max&&!/[\x00-\x1f\x7f]/.test(value);
+  const modelState=sid=>{
+    if(!modelSessions.has(sid))modelSessions.set(sid,{selection:null,unknown:false,configuring:false,dispatching:0});
+    return modelSessions.get(sid);
+  };
+  async function readModelCatalog(refresh=false){
+    if(!refresh&&Date.now()-modelCatalogAt<30000)return modelCatalog;
+    if(modelCatalogRead)return modelCatalogRead;
+    modelCatalogRead=fetchDshModelCatalog(api,{timeoutMs:HEALTH_TIMEOUT_MS})
+      .then(value=>modelCatalog=value).catch(()=>modelCatalog=null).finally(()=>{modelCatalogAt=Date.now();modelCatalogRead=null;});
+    return modelCatalogRead;
+  }
+  async function modelControl(sid){
+    const state=modelState(sid),catalog=await readModelCatalog();
+    const group=catalog?.groups.find(row=>row.id===state.selection?.modelProvider&&catalog.routableProviders.includes(row.id));
+    const entry=group?.models.find(row=>row.id===state.selection?.model);
+    const options=(values=[])=>[...new Set(values.filter(value=>nativeValue(value)))].slice(0,256).map(value=>({value,label:value}));
+    return {status:state.selection&&!state.unknown?'available':'unknown',source:'dsh-session',application:'runtime-confirmed',
+      selection:state.selection?{...state.selection}:null,
+      model:group?{options:options(group.models.map(row=>row.id))}:null,
+      reasoning:entry?.efforts.length?{options:options(entry.efforts)}:null};
+  }
+  function confirmedSelection(value,expected){
+    const selected=value?.selected;
+    if(!nativeValue(selected?.model)||!nativeValue(selected?.provider,80)
+      || (selected.reasoningEffort!=null&&!nativeValue(selected.reasoningEffort))
+      || selected.model!==expected.model || selected.provider!==expected.modelProvider
+      || (expected.reasoningEffort&&selected.reasoningEffort!==expected.reasoningEffort)){
+      throw agentProviderError('AGENT_CONFIGURATION_UNCONFIRMED','DSH did not confirm the requested native model configuration');
+    }
+    return{model:selected.model,modelProvider:selected.provider,reasoningEffort:selected.reasoningEffort??null};
+  }
 
   /** session/list 单条投影；找不到返回 null（不抛错，由调用方决定语义）。 */
   async function findSessionItem(sessionId) {
@@ -106,42 +140,48 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
         // 未绑定成功的会话不能对外返回 Ready；尽力归档失败的半初始化 session 后报错。
         const wantModel = model !== undefined && model !== null ? String(model) : dshDefaults.model;
         let bound = null;
-        let modelBindingError = null;
         if (wantModel) {
           try {
-            const { value: result } = await selectDshSessionModel(api, {
+            const desiredReasoning=reasoningEffort??dshDefaults.reasoningEffort??undefined;
+            const { value: result,request: applied } = await selectDshSessionModel(api, {
               sessionId,
               provider: String(modelProvider ?? dshDefaults.provider),
               model: wantModel,
-              reasoningEffort: String(reasoningEffort ?? dshDefaults.reasoningEffort ?? 'max')
+              reasoningEffort: desiredReasoning
             }, { timeoutMs: CALL_TIMEOUT_MS, log });
-            bound = result?.selected ?? null;
+            bound=confirmedSelection(result,{model:wantModel,modelProvider:applied.provider,reasoningEffort:desiredReasoning});
+            modelState(sessionId).selection=bound;
           } catch (error) {
             try {
               await api.callEndpoint('workspace/archiveSession', { request: { sessionId } }, AbortSignal.timeout(LIST_TIMEOUT_MS));
             } catch (cleanupError) {
               log(`DSH 模型绑定失败后的临时会话清理失败（${sessionId}）：${cleanupError?.code ?? 'cleanup-error'}`);
             }
+            modelSessions.delete(sessionId);
             throw agentProviderError('MODEL_BIND_FAILED', `DSH Agent 模型绑定失败，未创建可用会话：${String(error?.message ?? error)}`, { cause: error });
           }
         }
-        return { sessionId, provider: 'dsh', model: bound?.model ?? wantModel, modelBindingError: null };
+        return { sessionId, provider: 'dsh', model: bound?.model ?? null, modelBindingError: null,modelControl:await modelControl(sessionId) };
       },
 
       async send({ sessionId, content, mode = 'queue', onRequestId } = {}) {
         const sid = requireSessionId(sessionId);
+        const configuration=modelState(sid);
+        if(configuration.configuring)throw agentProviderError('CONFIG_BUSY','DSH model configuration is awaiting acknowledgement');
+        if(configuration.unknown)throw agentProviderError('AGENT_CONFIGURATION_UNKNOWN','DSH configuration outcome is unknown; reconcile the session before dispatch');
         const blocks = normalizePromptContent(content);
         const requestId = `cetamesh-agent-${Date.now().toString(36)}-${crypto.randomBytes(4).toString('hex')}`;
-        // In-process provenance binding precedes dispatch: Follow can beat the acknowledgement.
-        onRequestId?.(requestId);
+        configuration.dispatching+=1;
         let value;
         try {
+          // In-process provenance binding precedes dispatch: Follow can beat the acknowledgement.
+          onRequestId?.(requestId);
           value = await api.callEndpoint('session/prompt', {
             request: { requestId, sessionId: sid, mode, content: blocks }
           }, AbortSignal.timeout(CALL_TIMEOUT_MS));
         } catch (error) {
           throw wrapDshError(error, '提交回合失败');
-        }
+        }finally{configuration.dispatching-=1;}
         return { accepted: true, requestId, sessionId: sid, value: value ?? null };
       },
 
@@ -165,11 +205,12 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
         return {
           sessionId: sid,
           provider: 'dsh',
-          running: item.running === true,
+          running: typeof item.running==='boolean'?item.running:null,
           blank: item.blank === true,
           updatedAt: item.updatedAt ?? null,
           cwd: typeof item.cwd === 'string' ? item.cwd : null,
-          title: item.projections?.values?.title ?? null
+          title: item.projections?.values?.title ?? null,
+          modelControl:await modelControl(sid)
         };
       },
 
@@ -210,6 +251,7 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
         try {
           await api.callEndpoint('workspace/archiveSession', { request: { sessionId: sid } }, AbortSignal.timeout(LIST_TIMEOUT_MS));
           followHub.closeSession(sid);
+          modelSessions.delete(sid);
           return { closed: true, sessionId: sid };
         } catch (error) {
           if (String(error?.message ?? error).includes('session/not-found')) {
@@ -228,19 +270,39 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
 
       async selectModel({ sessionId, model, reasoningEffort, modelProvider } = {}) {
         const sid = requireSessionId(sessionId);
-        if (!model) throw agentProviderError('INVALID_PARAMS', 'selectModel 需要 model');
-        let value;
+        const state=modelState(sid);
+        if(state.unknown)throw agentProviderError('AGENT_CONFIGURATION_UNKNOWN','DSH configuration outcome is unknown; reconcile the session first');
+        if(state.configuring)throw agentProviderError('CONFIG_BUSY','DSH model configuration is awaiting acknowledgement');
+        if(state.dispatching)throw agentProviderError('TURN_BUSY','DSH prompt dispatch is awaiting acknowledgement');
+        const selectedModel=model??state.selection?.model;
+        const selectedProvider=modelProvider??state.selection?.modelProvider??dshDefaults.provider;
+        if(!nativeValue(selectedModel)||!nativeValue(selectedProvider,80)||(reasoningEffort!=null&&!nativeValue(reasoningEffort)))
+          throw agentProviderError('INVALID_PARAMS','Invalid DSH native model selection');
+        if(state.selection&&selectedProvider!==state.selection.modelProvider)throw agentProviderError('AGENT_CONFIGURATION_UNSUPPORTED','DSH model choices belong to the current native provider');
+        state.configuring=true;
+        let attempted=false;
         try {
-          ({ value } = await selectDshSessionModel(api, {
+          const item=await findSessionItem(sid);
+          if(!item)throw agentProviderError('SESSION_NOT_FOUND',`会话不存在：${sid}`);
+          if(item.running!==false)throw agentProviderError('TURN_BUSY','DSH session must be confirmed idle before changing its model');
+          const catalog=await readModelCatalog(true);
+          const group=catalog?.groups.find(row=>row.id===selectedProvider&&catalog.routableProviders.includes(row.id));
+          const entry=group?.models.find(row=>row.id===selectedModel);
+          if(group&&!entry||reasoningEffort!=null&&entry&&!entry.efforts.includes(reasoningEffort))
+            throw agentProviderError('AGENT_CONFIGURATION_UNSUPPORTED','DSH did not advertise the requested model or reasoning choice');
+          attempted=true;
+          const {value,request:applied}=await selectDshSessionModel(api, {
             sessionId: sid,
-            provider: String(modelProvider ?? dshDefaults.provider),
-            model: String(model),
-            reasoningEffort: String(reasoningEffort ?? dshDefaults.reasoningEffort ?? 'max')
-          }, { timeoutMs: CALL_TIMEOUT_MS, log }));
+            provider:selectedProvider,model:selectedModel,reasoningEffort
+          }, { timeoutMs: CALL_TIMEOUT_MS, log });
+          const confirmed=confirmedSelection(value,{model:selectedModel,modelProvider:applied.provider,reasoningEffort});
+          state.selection=confirmed;
+          return {sessionId:sid,selected:true,confirmed:true,...confirmed,modelControl:await modelControl(sid)};
         } catch (error) {
+          if(attempted&&!/session\/model-unavailable|session\/not-found/.test(String(error?.message??'')))state.unknown=true;
+          if(['TURN_BUSY','SESSION_NOT_FOUND','AGENT_CONFIGURATION_UNSUPPORTED','AGENT_CONFIGURATION_UNCONFIRMED'].includes(error?.code))throw error;
           throw wrapDshError(error, '绑定模型失败');
-        }
-        return { sessionId: sid, selected: value?.selected ?? null };
+        }finally{state.configuring=false;}
       },
 
       async health() {

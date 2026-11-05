@@ -1,5 +1,5 @@
 import {useState} from 'react';
-import type {ChatContextObservation, ChatModelProvider, ModelUsage, ChatModelCapabilities} from '../bridge/typed-client';
+import type {ChatContextObservation, ChatModelProvider, ModelUsage, ChatModelCapabilities, AgentModelControl} from '../bridge/typed-client';
 import {Popover} from '../components/primitives/overlays';
 import {Icon} from '../components/icons';
 import './chat-composer-panels.css';
@@ -14,8 +14,9 @@ export function contextPresentation(context:ChatContextObservation|null|undefine
   const percent=usable&&effective!==null?context.inputTokens!*100/effective:null;
   return {effective,percent,inputTokens:usable?context.inputTokens:null};
 }
-export function configurationChangeBlocked(status:{state:string;followState?:string;errorCode?:string|null}){
-  return ['starting','streaming','running','recovering','cancelling','waiting-approval','needs-reconciliation','outcome-unknown','interrupted','awaiting-reply'].includes(status.state)
+export function configurationChangeBlocked(status:{state:string;followState?:string;errorCode?:string|null},taskState?:string){
+  const active=['starting','dispatching','streaming','running','recovering','cancelling','waiting-approval','needs-reconciliation','outcome-unknown','interrupted','awaiting-reply'];
+  return active.includes(status.state)||active.includes(taskState??'')
     || ['recovering','reconnecting','connecting'].includes(status.followState??'')
     || /OUTCOME_UNKNOWN|NEEDS_RECONCILIATION|RECONCILIATION_REQUIRED|EXECUTION_UNKNOWN|EXIT_UNCONFIRMED/.test(status.errorCode??'');
 }
@@ -47,18 +48,40 @@ export function ChatUsagePopover(props:{context?:ChatContextObservation|null;tur
 }
 const modelId=(model:ChatModelProvider['models'][number])=>model.id||model.name||model.modelName||'';
 const modelName=(model:ChatModelProvider['models'][number])=>model.displayName||model.label||model.name||model.modelName||model.id||'默认模型';
-export function supportedReasoning(capabilities:ChatModelCapabilities|undefined){return capabilities?.reasoning?.status==='declared'?[...new Set(capabilities.reasoning.levels)].filter(level=>['off','low','high','max'].includes(level)):[];}
+export function supportedReasoning(capabilities:ChatModelCapabilities|undefined){return capabilities?.reasoning?.status==='declared'?[...new Set(capabilities.reasoning.levels)].filter(level=>typeof level==='string'&&level.length>0&&level.length<=256&&!/[\x00-\x1f\x7f]/.test(level)):[];}
+export const usesAgentModelControls=(provider:string|null|undefined)=>Boolean(provider&&!['none','cetamesh'].includes(provider));
 function CapabilityLabel({name,capability}:{name:string;capability:ChatModelCapabilities['vision']|undefined}){
   const label=capability?.supported===true&&capability.status==='verified'?`${name}已验证`:capability?.supported===true&&capability.status==='declared'?`${name}声明支持`:capability?.supported===false&&capability.status!=='unknown'?`${name}不支持`:`${name}能力未知`;
   return <span title={capability?.source||'来源未知'} className={capability?.status==='verified'&&capability.supported===true?'verified':''}>{label}</span>;
 }
-export type ChatModelPickerProps={models:ChatModelProvider[];selectedModelKey:string;selectedAgent:string;agentLabel:string;selectedReasoning?:string;disabledReason?:string|null;query:string;onQueryChange(value:string):void;onModelChange(value:string):void;onReasoningChange(value:string):void;onConfigure():void;onClose():void};
-export function ChatModelPickerContent({models,selectedModelKey,selectedAgent,agentLabel,selectedReasoning,disabledReason,query,onQueryChange,onModelChange,onReasoningChange,onConfigure,onClose}:ChatModelPickerProps){
+export type ChatModelPickerProps={models:ChatModelProvider[];selectedModelKey:string;selectedAgent:string;agentLabel:string;modelControl?:AgentModelControl|null;selectedReasoning?:string;disabledReason?:string|null;query:string;onQueryChange(value:string):void;onModelChange(value:string):void;onReasoningChange(value:string):void;onConfigure():void;onClose():void;onOpenTask?():void};
+function AgentModelPickerContent({modelControl,agentLabel,disabledReason,query,onQueryChange,onModelChange,onReasoningChange,onClose,onOpenTask}:ChatModelPickerProps){
+  const confirmed=modelControl?.status==='available'&&modelControl.application==='runtime-confirmed';
+  const selection=modelControl?.selection;
+  const models=modelControl?.model?.options??[];
+  const reasoning=modelControl?.reasoning?.options??[];
+  const current=models.find(option=>option.value===selection?.model);
+  const unavailable=modelControl?.application==='next-turn'?'设置将在下一回合应用，当前模型尚未确认。':modelControl?.application==='requires-new-session'?'模型变更需要新会话，请在任务详情通过交接或恢复继续。':modelControl?.status==='unsupported'?'当前 Agent 未提供模型或推理控制。':'Agent 会话尚未连接或模型状态尚未确认。';
+  return <div className="chat-model-panel"><div className="chat-panel-heading"><h3>模型与推理</h3><span className="chat-evidence-label">{agentLabel}</span></div>
+    <div className="chat-current-model"><small>{confirmed?'当前 Agent 模型':'模型状态'}</small><strong>{confirmed?(current?.label||selection?.model||'运行时默认模型'):'尚未确认'}</strong><small>{confirmed?'Agent 运行时已确认':unavailable}</small></div>
+    {!confirmed&&selection?.model&&modelControl?.application==='runtime-confirmed'&&<p className="chat-context-caption">最近确认：{current?.label||selection.model}{selection.reasoningEffort?` · 推理 ${selection.reasoningEffort}`:''}。当前状态待核验。</p>}
+    {!confirmed&&modelControl?.application==='next-turn'&&modelControl.requested?.model&&<p className="chat-context-caption">下一回合请求：{modelControl.requested.model}{modelControl.requested.reasoningEffort?` · 推理 ${modelControl.requested.reasoningEffort}`:''}。实际模型仍需运行时确认。</p>}
+    {disabledReason&&<p className="chat-panel-lock" role="status">{disabledReason}</p>}
+    {confirmed&&<><label className="chat-model-search"><Icon name="search" size={15}/><input aria-label="搜索 Agent 模型" value={query} placeholder="搜索 Agent 模型" onChange={event=>onQueryChange(event.target.value)}/></label>
+      <div className="chat-model-options" role="listbox" aria-label="可用 Agent 模型">{models.filter(option=>`${option.label} ${option.value}`.toLowerCase().includes(query.toLowerCase())).map(option=><button type="button" role="option" aria-selected={option.value===selection?.model} disabled={!!disabledReason} key={option.value} onClick={()=>{onModelChange(JSON.stringify([selection?.modelProvider??'',option.value]));onClose();}}><span className="chat-model-option-name"><strong>{option.label}</strong>{option.value===selection?.model&&<Icon name="check" size={15}/>}</span></button>)}</div>
+      <section className="chat-reasoning"><div className="chat-panel-heading"><h4>推理强度</h4><small>{reasoning.length?'Agent 声明':'不可配置'}</small></div>{reasoning.length?<div className="chat-reasoning-levels">{reasoning.map(option=><button type="button" key={option.value} aria-label={`推理强度 ${option.value}`} aria-pressed={selection?.reasoningEffort===option.value} disabled={!!disabledReason} onClick={()=>onReasoningChange(option.value)}>{option.label}</button>)}</div>:<p className="chat-context-caption">此 Agent 当前未提供可配置的推理选项。</p>}</section></>}
+    <p className="chat-context-caption">连接信息可在 Agent 页面查看。</p>
+    {onOpenTask&&<button className="chat-panel-settings" type="button" onClick={()=>{onClose();onOpenTask();}}>查看任务</button>}
+  </div>;
+}
+export function ChatModelPickerContent(props:ChatModelPickerProps){
+  const {models,selectedModelKey,selectedAgent,agentLabel,selectedReasoning,disabledReason,query,onQueryChange,onModelChange,onReasoningChange,onConfigure,onClose}=props;
+  if(usesAgentModelControls(selectedAgent))return AgentModelPickerContent(props);
   let providerId='',currentModel='';try{[providerId,currentModel]=JSON.parse(selectedModelKey);}catch{/* Unknown selections are displayed without inventing an alternative. */}
   const selectedProvider=models.find(provider=>provider.id===providerId);
   const selected=selectedProvider?.models.find(model=>modelId(model)===currentModel);
   const levels=supportedReasoning(selected?.capabilities);
-  const external=selectedAgent==='codex';
+  const external=false;
   return <div className="chat-model-panel"><div className="chat-panel-heading"><h3>模型与推理</h3><span className="chat-evidence-label">{agentLabel}</span></div>
     <div className="chat-current-model"><small>当前提供方</small><strong>{external?'Codex 本机配置':selectedProvider?.label||providerId||'自动选择'}</strong><span>{external?'模型由本机 Agent 管理':selected?modelName(selected):currentModel||'默认模型'}</span><small>{external?'外部 Agent 能力需单独验证':selectedProvider?.configured?(selectedProvider.inferencing===true?'推理已验证':selectedProvider.authenticated===true?'认证已验证 · 推理未验证':'已配置 · 认证未验证'):'未配置或不可用'}</small>{!external&&<small>上下文窗口 {count(selected?.capabilities?.context?.contextWindowTokens)} · 最大输出 {count(selected?.capabilities?.context?.maxOutputTokens)}</small>}</div>
     {disabledReason&&<p className="chat-panel-lock" role="status">{disabledReason}</p>}
@@ -70,5 +93,8 @@ export function ChatModelPickerContent({models,selectedModelKey,selectedAgent,ag
 export function ChatModelPicker(props:Omit<ChatModelPickerProps,'query'|'onQueryChange'|'onClose'>){
   const [query,setQuery]=useState('');let providerId='',id='';try{[providerId,id]=JSON.parse(props.selectedModelKey);}catch{/* Preserve unknown selection. */}
   const selected=props.models.find(provider=>provider.id===providerId)?.models.find(model=>modelId(model)===id);
-  return <Popover avoidOverlapWith=".chat-composer" label="选择模型与推理" className="chat-model-popover" triggerClassName="composer-panel-trigger composer-model-trigger" width={368} summary={<><Icon name="sparkles" size={14}/><span>{props.selectedAgent==='codex'?'Codex 本机配置':selected?modelName(selected):id||'选择模型'}</span><Icon name="down" size={13}/></>}>{close=><ChatModelPickerContent {...props} query={query} onQueryChange={setQuery} onClose={close}/>}</Popover>;
+  const native=usesAgentModelControls(props.selectedAgent);
+  const nativeConfirmed=props.modelControl?.status==='available'&&props.modelControl.application==='runtime-confirmed';
+  const nativeModel=props.modelControl?.model?.options.find(option=>option.value===props.modelControl?.selection?.model);
+  return <Popover avoidOverlapWith=".chat-composer" label="选择模型与推理" className="chat-model-popover" triggerClassName="composer-panel-trigger composer-model-trigger" width={368} summary={<><Icon name="sparkles" size={14}/><span>{native?(nativeConfirmed?(nativeModel?.label||props.modelControl?.selection?.model||'Agent 模型'):`${props.agentLabel} · 待确认`):selected?modelName(selected):id||'选择模型'}</span><Icon name="down" size={13}/></>}>{close=><ChatModelPickerContent {...props} query={query} onQueryChange={setQuery} onClose={close}/>}</Popover>;
 }

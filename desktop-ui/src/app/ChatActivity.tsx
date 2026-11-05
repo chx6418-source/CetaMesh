@@ -10,6 +10,8 @@ type ActivityState = 'pending' | 'running' | 'retrying' | 'waiting-approval' | '
 export type ChatActivityProps = {
   tools: ChatMessage['toolActivity'];
   agentActivity?: ChatMessage['agentActivity'];
+  timeline?: ChatMessage['activityTimeline'];
+  omitted?: number;
   state?: string;
   taskId?: string | null;
   onOpenTask?(taskId: string): void;
@@ -57,7 +59,8 @@ function summarize(tools: ActivityTool[], agent: ChatMessage['agentActivity'], s
   const settledWithFailures = phase === 'completed' && Boolean(latest('failed'))
     && tools.every(tool => ['completed', 'failed', 'cancelled'].includes(activityState(tool.status)));
   let status: ActivityState;
-  if (phase === 'waiting-approval' || latest('waiting-approval')) status = 'waiting-approval';
+  if (state === 'settling') status = 'unknown';
+  else if (phase === 'waiting-approval' || latest('waiting-approval')) status = 'waiting-approval';
   else if (phase === 'outcome-unknown' || latest('outcome-unknown')) status = 'outcome-unknown';
   else if (phase === 'cancelled' || phase === 'failed') status = phase;
   else if (phase === 'completed' && tools.some(tool => ['pending', 'running', 'retrying'].includes(activityState(tool.status)))) status = 'unknown';
@@ -80,6 +83,8 @@ function summarize(tools: ActivityTool[], agent: ChatMessage['agentActivity'], s
     : status === 'cancelled' ? '当前操作已取消'
     : status === 'outcome-unknown' ? '操作结果待核验'
     : status === 'completed' ? tools.length ? '工具调用已结束' : '执行者本轮已结束'
+    : state === 'settling' ? '正在同步活动记录'
+    : state === 'interrupted' ? '执行已中断，活动保留待核验'
     : state === 'cancelling' ? '正在停止，状态待核验' : '活动状态待核验';
   return { status, headline, settledWithFailures };
 }
@@ -127,17 +132,33 @@ export function ToolActivity({ tools }: { tools: ChatMessage['toolActivity'] }) 
   </section>;
 }
 
-export function ChatActivity({ tools, agentActivity, state, taskId, onOpenTask }: ChatActivityProps) {
+function ActivityTimeline({ timeline }: { timeline: NonNullable<ChatMessage['activityTimeline']> }) {
+  const [page, setPage] = useState(0);
+  const current = Math.min(page, Math.max(0, Math.ceil(timeline.entries.length / 20) - 1));
+  return <section className="chat-activity-timeline" aria-label="活动时间线">
+    <strong>活动时间线</strong>
+    {timeline.omittedCount > 0 && <p>较早的 {timeline.omittedCount} 条活动未保留；以下为最近记录。</p>}
+    {timeline.gapCount > 0 && <p>来源事件有 {timeline.gapCount} 条缺口，缺失内容与结果未知。</p>}
+    <ol>{timeline.entries.slice(current * 20, (current + 1) * 20).map(entry => <li key={entry.id}>
+      <span>{entry.at === null ? '时间未知' : new Date(entry.at).toLocaleTimeString()} · {entry.kind === 'gap' ? `事件缺口 ${entry.missingCount} 条` : `${entry.kind === 'tool' ? entry.capability || '工具活动' : '回合'} · ${STATUS[activityState(entry.status)].label}`}</span>
+      <details><summary>记录详情</summary><dl><dt>事件标识</dt><dd><code>{entry.id}</code></dd><dt>顺序</dt><dd>{entry.sequence}</dd><dt>来源</dt><dd>{entry.source}</dd><dt>来源顺序</dt><dd>{entry.sourceSequence ?? '未知'}</dd>{entry.toolId && <><dt>工具标识</dt><dd><code>{entry.toolId}</code></dd></>}</dl></details>
+    </li>)}</ol>
+    <ActivityPager page={current} total={timeline.entries.length} onPage={setPage} label="活动时间线分页" />
+    <details><summary>运行归属</summary><dl>{(['turnId', 'requestId', 'taskId', 'runId', 'attemptId', 'providerId', 'sessionId'] as const).map(key => <div key={key}><dt>{key}</dt><dd><code>{timeline[key] ?? '未知'}</code></dd></div>)}</dl></details>
+  </section>;
+}
+
+export function ChatActivity({ tools, agentActivity, timeline, omitted = 0, state, taskId, onOpenTask }: ChatActivityProps) {
   const [expanded, setExpanded] = useState(false);
-  if (!tools.length && !agentActivity && (!state || state === 'idle')) return null;
+  if (!tools.length && !agentActivity && !timeline?.entries.length && (!state || state === 'idle')) return null;
   const { status, headline, settledWithFailures } = summarize(tools, agentActivity, state);
   const view = settledWithFailures ? { ...STATUS[status], label: '已结束 · 有失败记录', tone: 'warning' as const } : STATUS[status];
   const names: Record<string, string> = { codex: 'Codex', cetamesh: 'CetaMesh Agent', dsh: 'DeepSeek Harness', claude: 'Claude', gemini: 'Gemini', qwen: 'Qwen', opencode: 'OpenCode' };
   const provider = agentActivity ? agentActivity.label && agentActivity.label !== agentActivity.providerId ? agentActivity.label : Object.hasOwn(names, agentActivity.providerId) ? names[agentActivity.providerId] : 'Agent' : null;
   return <section className="chat-activity" aria-label="Agent 活动" onKeyDown={closeDisclosure}>
     <details className={`chat-activity-card ${settledWithFailures ? 'settled' : status}`} onToggle={event => { if (event.target === event.currentTarget) setExpanded(event.currentTarget.open); }}>
-      <summary className="chat-activity-summary"><span className="chat-activity-main"><span className="chat-activity-icon"><Icon name={view.icon} size={17} /></span><span className="chat-activity-copy"><strong role="status" aria-live="polite" aria-atomic="true">{headline}</strong><small>{[provider, tools.length ? `${tools.length} 项工具活动` : '尚无工具活动记录'].filter(Boolean).join(' · ')}</small></span></span><Badge tone={view.tone}>{view.label}</Badge><Icon name="down" size={14} /></summary>
-      {expanded && <div className="chat-activity-body"><ToolActivity tools={tools} />{!tools.length && <p className="chat-activity-empty">执行者尚未报告工具活动。</p>}{taskId && onOpenTask && <Button type="button" compact variant="ghost" icon="work" onClick={() => onOpenTask(taskId)}>查看任务</Button>}<details className="chat-activity-advanced"><summary>高级详情</summary><dl>{agentActivity && <><dt>执行者标识</dt><dd><code>{agentActivity.providerId}</code></dd><dt>执行者状态</dt><dd>{agentActivity.status}</dd></>}{taskId && <><dt>任务标识</dt><dd><code>{taskId}</code></dd></>}{state && <><dt>会话状态</dt><dd>{state}</dd></>}</dl></details></div>}
+      <summary className="chat-activity-summary"><span className="chat-activity-main"><span className="chat-activity-icon"><Icon name={view.icon} size={17} /></span><span className="chat-activity-copy"><strong role="status" aria-live="polite" aria-atomic="true">{headline}</strong><small>{[provider, tools.length ? `${tools.length} 项工具活动` : '尚无工具活动记录', omitted || timeline?.omittedCount || timeline?.gapCount ? '有记录缺口' : null].filter(Boolean).join(' · ')}</small></span></span><Badge tone={view.tone}>{view.label}</Badge><Icon name="down" size={14} /></summary>
+      {expanded && <div className="chat-activity-body">{omitted > 0 && <p>仅保留最近 {tools.length} 项工具摘要，较早 {omitted} 项未保留。</p>}<ToolActivity tools={tools} />{!tools.length && <p className="chat-activity-empty">执行者尚未报告工具活动。</p>}{timeline && <ActivityTimeline timeline={timeline} />}{taskId && onOpenTask && <Button type="button" compact variant="ghost" icon="work" onClick={() => onOpenTask(taskId)}>查看任务</Button>}<details className="chat-activity-advanced"><summary>高级详情</summary><dl>{agentActivity && <><dt>执行者标识</dt><dd><code>{agentActivity.providerId}</code></dd><dt>执行者状态</dt><dd>{agentActivity.status}</dd></>}{taskId && <><dt>任务标识</dt><dd><code>{taskId}</code></dd></>}{state && <><dt>会话状态</dt><dd>{state}</dd></>}</dl></details></div>}
     </details>
   </section>;
 }

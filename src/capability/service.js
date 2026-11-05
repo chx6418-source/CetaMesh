@@ -992,7 +992,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       delegationDirection: {type:'string',enum:['outbound','verification']},
       modelProvider: stringField('Optional Model Provider id.'),
       model: stringField('Optional Model id.'),
-      reasoningEffort: { type: 'string', enum: ['low', 'medium', 'high', 'max'] },
+      reasoningEffort: { type: 'string', minLength: 1, maxLength: 40, description: 'Native Provider reasoning value; the selected runtime validates support.' },
     }),
     async execute(r) {
       return idempotent(r, async () => {
@@ -1238,9 +1238,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             throw capabilityError('TASK_NOT_RUNNING', 'Task changed while Agent accepted the instruction');
           }
           if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
-          if (Object.values(modelConfig).some(value => value !== null && value !== undefined && value !== '')) {
+          const confirmedConfig=created.modelControl?.status==='available' && created.modelControl.application==='runtime-confirmed'
+            ? {...modelConfig,...created.modelControl.selection} : modelConfig;
+          if (Object.values(confirmedConfig).some(value => value !== null && value !== undefined && value !== '')) {
             const latest = taskFor(task.id);
-            taskRuntime.setModelConfig({ id: task.id, expectedRev: latest.rev, ...modelConfig });
+            taskRuntime.setModelConfig({ id: task.id, expectedRev: latest.rev, ...confirmedConfig });
           }
           // The durable Task assignment now owns this execution. Clear the
           // provisioning fence before waking the next serialized instruction.

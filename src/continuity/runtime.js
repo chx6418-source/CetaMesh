@@ -732,10 +732,16 @@ export function createContinuityRuntime({
       let bootstrapBoundary = {};
       const nativeReadinessToken=requireNativeReadiness ? 'CM_READY_'+crypto.randomBytes(16).toString('hex') : null;
       const inheritedModel = taskModelForAgent(task, target.id);
+      const confirmedModel = target.id === previousAgent.provider
+        && previousStatus?.modelControl?.status === 'available'
+        && previousStatus.modelControl.application === 'runtime-confirmed'
+        ? previousStatus.modelControl.selection : null;
       const selectedModelConfig = {
-        modelProvider: modelProvider ?? inheritedModel.modelProvider ?? (target.id === previousAgent.provider ? previousStatus?.modelProvider : null) ?? target.defaults?.modelProvider,
-        model: model ?? inheritedModel.model ?? (target.id === previousAgent.provider ? previousStatus?.model : null) ?? target.defaults?.model,
-        reasoningEffort: reasoningEffort ?? inheritedModel.reasoningEffort ?? (target.id === previousAgent.provider ? previousStatus?.reasoningEffort : null) ?? target.defaults?.reasoningEffort
+        modelProvider: modelProvider ?? (confirmedModel ? confirmedModel.modelProvider ?? undefined
+          : inheritedModel.modelProvider ?? (target.id === previousAgent.provider ? previousStatus?.modelProvider : null) ?? target.defaults?.modelProvider),
+        model: model ?? confirmedModel?.model ?? inheritedModel.model ?? (target.id === previousAgent.provider ? previousStatus?.model : null) ?? target.defaults?.model,
+        reasoningEffort: reasoningEffort ?? (confirmedModel ? confirmedModel.reasoningEffort ?? undefined
+          : inheritedModel.reasoningEffort ?? (target.id === previousAgent.provider ? previousStatus?.reasoningEffort : null) ?? target.defaults?.reasoningEffort)
       };
       try {
         authorizationGuard?.({provider:target.id});
@@ -747,6 +753,19 @@ export function createContinuityRuntime({
         });
         if (!created?.sessionId) {
           throw continuityError('PROVIDER_ERROR', `Agent Provider「${target.id}」未返回 sessionId`);
+        }
+        if (created.modelControl || confirmedModel) {
+          const control = created.modelControl;
+          const requested = Object.entries(selectedModelConfig).filter(([,value])=>value!==undefined&&value!==null&&value!=='');
+          if (requested.length && (control?.status!=='available' || control.application!=='runtime-confirmed'
+            || requested.some(([key,value])=>control.selection?.[key]!==value))) {
+            throw continuityError('MODEL_ACK_MISMATCH','目标 Agent 尚未确认模型配置；原执行者保持绑定，请核验目标运行时');
+          }
+          if (control?.status==='available' && control.application==='runtime-confirmed' && control.selection?.model) {
+            selectedModelConfig.model=control.selection.model;
+            selectedModelConfig.modelProvider=control.selection.modelProvider??null;
+            selectedModelConfig.reasoningEffort=control.selection.reasoningEffort??null;
+          }
         }
         authorizationGuard?.({provider:target.id,sessionId:created.sessionId});
         transaction.to = { provider: target.id, sessionId: created.sessionId };
@@ -974,6 +993,7 @@ export function createContinuityRuntime({
         from: previousAgent,
         to: { provider: target.id, sessionId: created.sessionId },
         crossProvider: target.id !== previousAgent.provider,
+        ...(created.modelControl ? {modelControl:created.modelControl} : {}),
         reconciliation,
         task: taskRuntime.get({ id: task.id }).task
       };

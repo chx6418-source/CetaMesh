@@ -6,6 +6,7 @@
 // 期望：按官方 session/modelCatalog 解析为 deepseek-official 并成功绑定；
 // 其他错误（模型不存在、传输失败）不得被吞掉或错误重试。
 import assert from 'node:assert/strict';
+import './helpers/dsh-agent-model-control-fixtures.mjs';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';

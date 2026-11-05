@@ -1,4 +1,4 @@
-import {projectChatContext} from './chat-telemetry.js';
+import {projectChatContext,projectAgentModelControl} from './chat-telemetry.js';
 import { explicitDelegationTarget } from './explicit-delegation.js';
 import { canDispatchTaskAgent, taskAgentUnavailableReason } from '../agent/execution-security.js';
 import { aggregateModelUsage, normalizeModelUsage } from '../model/usage.js';
@@ -42,13 +42,19 @@ import { PRODUCT_IDENTITY_PROMPT } from '../context/product-context.js';
 import { OWNER_ACTOR } from '../capability/types.js';
 import { findMessageReference } from './reference-preview.js';
 import { buildOwnerContext, renderOwnerContext } from '../task/owner-context.js';
+import { appendChatActivity, interruptedChatActivity, projectChatActivityTimeline, projectChatToolActivity, updateChatToolActivity } from './chat-activity.js';
 
 const SCHEMA_VERSION = 1;
-const REASONING_EFFORTS = Object.freeze(['off', 'low', 'high', 'max']);
 const CHAT_MODES = Object.freeze(['chat', 'smart']);
 const PROVIDERS = Object.freeze(['dsh']);
 /** agentProvider 哨兵值：用户显式禁用 Agent（Smart 路由不得产生 agent 意图/执行）。 */
 const AGENT_PROVIDER_DISABLED = 'none';
+const externalAgent = provider => Boolean(provider && !['none','cetamesh'].includes(provider));
+const modelAgentProvider = record => record?.config.agentProvider ?? (record?.taskId ? record.runtimeProvider : null);
+const boundedModelValue = value => typeof value === 'string' && value.length <= 256 && !/[\u0000-\u001f\u007f]/.test(value);
+// Compatibility for the old direct-DSH Chat wire only. External Agent controls
+// and Model Runtime capability directories never inherit these values.
+const LEGACY_DSH_REASONING_EFFORTS = new Set(['off','low','high','max']);
 
 const MAX_TITLE_CHARS = 200;
 const MAX_PROMPT_CHARS = 32 * 1024;
@@ -208,6 +214,15 @@ export function createChatService({
     for (const record of list) {
       if (!record || typeof record.id !== 'string') continue;
       const restored = normalizeRecord(record);
+      const historyStore = loadChatFile(historyFile(record.id), null);
+      if (historyStore?.activeTurn?.turnId && historyStore.activeTurn.id) {
+        const interrupted = interruptedChatActivity(historyStore.activeTurn, now());
+        const messages = Array.isArray(historyStore.messages) ? historyStore.messages : [];
+        if (!messages.some(message => message.id === interrupted.id)) messages.push(interrupted);
+        writeJsonAtomic(historyFile(record.id), { schemaVersion: SCHEMA_VERSION, messages });
+        restored.interruptedAt = now();
+        invalidated = true;
+      }
       if (restored.dshSessionId) {
         restored.interruptedAt = now();
         restored.dshSessionId = null;
@@ -243,10 +258,11 @@ export function createChatService({
       config: {
         provider: PROVIDERS.includes(record.config?.provider) ? record.config.provider : baseConfig.provider,
         model: typeof record.config?.model === 'string' ? record.config.model : baseConfig.model,
-        reasoning: REASONING_EFFORTS.includes(record.config?.reasoning) ? record.config.reasoning : baseConfig.reasoning,
+        reasoning: boundedModelValue(record.config?.reasoning) ? record.config.reasoning : baseConfig.reasoning,
         mode: CHAT_MODES.includes(record.config?.mode) ? record.config.mode : baseConfig.mode,
         modelProvider: typeof record.config?.modelProvider === 'string' && record.config.modelProvider
-          && (!modelRuntime || modelRuntime.isRegistered(record.config.modelProvider))
+          && (externalAgent(record.config?.agentProvider) ? boundedModelValue(record.config.modelProvider)
+            : !modelRuntime || modelRuntime.isRegistered(record.config.modelProvider))
           ? record.config.modelProvider
           : null,
         workspaceId: typeof record.config?.workspaceId === 'string' ? record.config.workspaceId : null,
@@ -361,10 +377,42 @@ export function createChatService({
   }
 
   function appendMessage(id, message) {
-    const messages = readHistory(id);
-    messages.push({ ...message, sourceWorkspaceId: sessions.get(id)?.config?.workspaceId ?? null });
-    writeJsonAtomic(historyFile(id), { schemaVersion: SCHEMA_VERSION, messages });
+    const store = loadChatFile(historyFile(id), null);
+    const messages = Array.isArray(store?.messages) ? store.messages : [];
+    const next = { ...message, sourceWorkspaceId: sessions.get(id)?.config?.workspaceId ?? null };
+    const existing = messages.findIndex(row => row.id === message.id);
+    if (existing >= 0) messages[existing] = next; else messages.push(next);
+    writeJsonAtomic(historyFile(id), { schemaVersion: SCHEMA_VERSION, messages,
+      ...(store?.activeTurn && store.activeTurn.turnId !== message.turnId ? { activeTurn: store.activeTurn } : {}) });
     return messages.length;
+  }
+
+  function activityProjection(turn) {
+    return { activityTimeline: projectChatActivityTimeline(turn.activityTimeline),
+      activityOmitted: Number.isSafeInteger(turn.activityOmitted) ? turn.activityOmitted : 0,
+      activityState: turn.state };
+  }
+
+  function retainActivity(record, turn, details = {}) {
+    appendChatActivity(turn, { at: now(), taskId: turn.accountingTaskId ?? record.taskId,
+      providerId: record.runtimeProvider ?? record.config.agentProvider ?? turn.accountingProviderId,
+      sessionId: record.dshSessionId, ...details });
+    turn.activityMessageId ??= `activity-${turn.id}`;
+    const store = loadChatFile(historyFile(record.id), null);
+    writeJsonAtomic(historyFile(record.id), { schemaVersion: SCHEMA_VERSION,
+      messages: Array.isArray(store?.messages) ? store.messages : [],
+      activeTurn: { id: turn.activityMessageId, role: 'assistant', text: '', at: turn.activityTimeline.entries[0]?.at ?? now(),
+        turnId: turn.id, requestId: turn.requestId ?? null, sourceWorkspaceId: record.config.workspaceId ?? null,
+        toolActivity: (turn.toolActivity ?? []).map(projectChatToolActivity).filter(Boolean),
+        ...(turn.agentActivity ? { agentActivity: { providerId: turn.agentActivity.providerId, label: turn.agentActivity.label, status: turn.agentActivity.status } } : {}),
+        ...activityProjection(turn) } });
+  }
+
+  function receiveToolActivity(record, turn, activity, event = null, source = 'model-coordinator') {
+    const tool = updateChatToolActivity(turn, activity);
+    if (!tool) return false;
+    retainActivity(record, turn, { kind: 'tool', status: tool.status, tool, event, source });
+    return true;
   }
 
   function touch(record) {
@@ -399,6 +447,7 @@ export function createChatService({
 
   function createSession({ title } = {}) {
     const modelDefaults = typeof defaultModelConfig === 'function' ? defaultModelConfig() : null;
+    const agentProvider = resolveDefaultAgentProvider();
     const configuredDefaultProvider = modelDefaults?.provider
       && (typeof modelRuntime?.hasKey !== 'function' || modelRuntime.hasKey(modelDefaults.provider))
       ? modelDefaults.provider : null;
@@ -409,7 +458,8 @@ export function createChatService({
       updatedAt: now(),
       config: { ...baseConfig, reasoning: modelDefaults?.reasoningEffort || baseConfig.reasoning,
         model: configuredDefaultProvider ? modelDefaults.defaultModel || baseConfig.model : baseConfig.model,
-        modelProvider: configuredDefaultProvider, agentProvider: resolveDefaultAgentProvider() }
+        modelProvider: configuredDefaultProvider, agentProvider,
+        ...(externalAgent(agentProvider) ? {model:'',modelProvider:null,reasoning:''} : {}) }
     });
     sessions.set(record.id, record);
     saveStore();
@@ -570,11 +620,18 @@ export function createChatService({
 
   async function applyConfig({ id, config } = {}) {
     const record = sessionOrThrow(id);
+    const requestedAgent = config?.agentProvider === undefined || config.agentProvider === record.config.agentProvider
+      ? modelAgentProvider(record) : config.agentProvider;
     if (config?.provider !== undefined && !PROVIDERS.includes(config.provider)) {
       throw chatError('INVALID_PARAMS', `未知 Provider：${String(config.provider)}`);
     }
-    if (config?.reasoning !== undefined && !REASONING_EFFORTS.includes(config.reasoning)) {
-      throw chatError('INVALID_PARAMS', `reasoning 必须是 ${REASONING_EFFORTS.join('/')}`);
+    if (config?.reasoning !== undefined && !boundedModelValue(config.reasoning)) {
+      throw chatError('INVALID_PARAMS', 'reasoning 必须是有效的运行时选项值');
+    }
+    if (config?.reasoning !== undefined && !externalAgent(requestedAgent) && !modelRuntime
+      && requestedAgent === record.config.agentProvider
+      && !LEGACY_DSH_REASONING_EFFORTS.has(config.reasoning)) {
+      throw chatError('INVALID_PARAMS', '当前旧版 DSH 通道不支持该推理设置');
     }
     if (config?.mode !== undefined && !CHAT_MODES.includes(config.mode)) {
       throw chatError('INVALID_PARAMS', `mode 必须是 ${CHAT_MODES.join('/')}`);
@@ -586,6 +643,8 @@ export function createChatService({
       // Model Provider（Model Runtime）：null = 自动（按已配置 Key 的 Provider 解析）。
       if (config.modelProvider === null || config.modelProvider === '') {
         config.modelProvider = null;
+      } else if (externalAgent(requestedAgent)) {
+        if (!boundedModelValue(config.modelProvider)) throw chatError('INVALID_PARAMS', '无效的 Agent 模型提供方');
       } else if (!modelRuntime || !modelRuntime.isRegistered(String(config.modelProvider))) {
         throw chatError('INVALID_PARAMS', `未知 Model Provider：${String(config.modelProvider)}`);
       } else {
@@ -629,13 +688,18 @@ export function createChatService({
     for (const key of ['provider', 'model', 'reasoning', 'mode', 'modelProvider', 'agentProvider', 'workspaceId']) {
       if (config[key] !== undefined) nextConfig[key] = config[key];
     }
+    const previousAgentProvider = previousConfig.agentProvider;
+    const agentProviderChanged = nextConfig.agentProvider !== previousAgentProvider;
+    // Model identities and effort values are owned by their executor. An Agent
+    // change cannot silently carry a Model Runtime selection into a native CLI.
+    if (agentProviderChanged && (externalAgent(nextConfig.agentProvider) || externalAgent(modelAgentProvider(record)))) {
+      nextConfig.model = ''; nextConfig.modelProvider = null; nextConfig.reasoning = '';
+    }
     if (config.reasoning !== undefined && config.reasoning !== previousConfig.reasoning && config.reasoning !== 'off'
-      && nextConfig.modelProvider && typeof modelRuntime?.modelCapabilities === 'function') {
+      && !externalAgent(requestedAgent) && nextConfig.modelProvider && typeof modelRuntime?.modelCapabilities === 'function') {
       const capabilities=modelRuntime.modelCapabilities(nextConfig.modelProvider,nextConfig.model);
       if (!capabilities?.reasoning?.levels?.includes(nextConfig.reasoning)) throw chatError('MODEL_REASONING_UNSUPPORTED','当前模型未声明支持所选推理强度');
     }
-    const previousAgentProvider = previousConfig.agentProvider;
-    const agentProviderChanged = nextConfig.agentProvider !== previousAgentProvider;
     const modelConfigChanged = nextConfig.model !== previousConfig.model
       || nextConfig.reasoning !== previousConfig.reasoning
       || nextConfig.modelProvider !== previousConfig.modelProvider;
@@ -660,8 +724,17 @@ export function createChatService({
     if (state.turn && (agentProviderChanged || modelConfigChanged || workspaceChanged)) {
       throw chatError('TURN_BUSY', '当前会话有回合进行中，结束后再切换 Agent、模型或工作区');
     }
+    if (executionChanged && ['running','starting','dispatching','waiting-approval'].includes(linkedTask?.executionObservation?.state)) {
+      throw chatError('TURN_BUSY', '任务正在执行，请等待当前执行结束后再切换配置');
+    }
+    if (modelConfigChanged && !agentProviderChanged && linkedTask?.currentAgent && !record.dshSessionId) {
+      throw chatError('TASK_HANDOFF_REQUIRED','任务仍保留原执行者，请先在任务详情恢复并核验会话后再修改模型');
+    }
     const previousAgentSession = agentProviderChanged ? previousProviderSession(record, previousAgentProvider) : null;
     if (releasedTask && (agentProviderChanged || modelConfigChanged || workspaceChanged)) {
+      if (externalAgent(nextConfig.agentProvider) && modelConfigChanged && !agentProviderChanged) {
+        throw chatError('AGENT_MODEL_SESSION_REQUIRED','任务已释放 Agent，请先从任务恢复入口建立并确认会话');
+      }
       // The authoritative Task has ended and released its executor. Keep its history,
       // but do not require a live Handoff or reuse its obsolete Chat session binding.
       const candidate = { ...record, taskId: null, dshSessionId: null, runtimeProvider: null,
@@ -688,7 +761,13 @@ export function createChatService({
         }
         await prepareTaskContext({ record, taskId: task.id });
         const transferred = await handoffTask({ taskId: task.id, reason: 'provider-switch', targetProvider: nextConfig.agentProvider,
-          modelProvider: nextConfig.modelProvider, model: nextConfig.model, reasoningEffort: nextConfig.reasoning });
+          modelProvider: nextConfig.modelProvider || undefined, model: nextConfig.model || undefined, reasoningEffort: nextConfig.reasoning || undefined });
+        const confirmed = projectAgentModelControl(transferred.modelControl);
+        if (externalAgent(nextConfig.agentProvider) && confirmed?.status==='available' && confirmed.application==='runtime-confirmed') {
+          nextConfig.model=confirmed.selection?.model??'';
+          nextConfig.modelProvider=confirmed.selection?.modelProvider??null;
+          nextConfig.reasoning=confirmed.selection?.reasoningEffort??'';
+        }
         stopFollow(record.id);
         record.config = nextConfig;
         record.dshSessionId = transferred.to.sessionId;
@@ -709,40 +788,81 @@ export function createChatService({
     // 模型/reasoning 变更即时生效：仍在 DSH 通道上的会话立即重新绑定（切换模型验收项）；
     // 已走 Model Runtime 的会话没有 DSH 绑定可刷——丢弃遗留 DSH 会话，模型下次回合生效。
     if (record.dshSessionId && modelConfigChanged) {
-      const agentActive = previousConfig.agentProvider && previousConfig.agentProvider !== AGENT_PROVIDER_DISABLED;
+      const agentActive = previousConfig.agentProvider !== AGENT_PROVIDER_DISABLED && (record.runtimeProvider || previousConfig.agentProvider);
       if (agentActive) {
         const provider = record.runtimeProvider || previousConfig.agentProvider;
         if (typeof agentExecute !== 'function') {
           throw chatError('PROVIDER_ERROR', `Agent 运行时不可用，无法应用 ${provider} 的模型/推理设置。`);
         }
         try {
-          await agentExecute({ method: 'agent.selectModel', params: {
-            provider,
-            sessionId: record.dshSessionId,
-            model: nextConfig.model,
-            modelProvider: nextConfig.modelProvider,
-            reasoningEffort: nextConfig.reasoning
-          } });
-          record.config = nextConfig;
-          touch(record);
-          return publicSession(record);
-        } catch (error) {
-          if (provider === 'dsh') {
-            const failedSessionId = record.dshSessionId;
-            stopFollow(record.id);
-            record.dshSessionId = null;
-            record.runtimeProvider = null;
-            saveStore();
-            // DSH cannot report that its old model binding is still safe to reuse after a
-            // failed selection; archive it best-effort and force the next turn to create anew.
-            try {
-              await agentExecute({ method: 'agent.closeSession', params: { provider, sessionId: failedSessionId } });
-            } catch (cleanupError) {
-              // The live binding is already invalidated; cleanup failure must not restore Ready.
-              onEvent?.({ event: 'chat.warning', data: { sessionId: record.id,
-                code: cleanupError?.code ?? 'SESSION_CLEANUP_FAILED', message: 'DSH 模型切换失败后旧会话未能归档。' } });
+          const native = externalAgent(provider);
+          let before;
+          if (native) {
+            const observed = await agentExecute({method:'agent.status',params:{provider,sessionId:record.dshSessionId}});
+            if (observed?.running || observed?.waitingForApproval || observed?.approvalId || Number(observed?.queued)>0) {
+              throw chatError('TURN_BUSY','Agent 正在执行或等待审批，请在安全点切换模型');
+            }
+            if (observed?.running !== false || observed?.runtimeValid === false || ['unknown','outcome-unknown','reconciliation-required'].includes(observed?.state)) {
+              throw chatError('CONFIG_RECONCILIATION_REQUIRED','Agent 执行状态尚未确认，请先在任务详情核验');
+            }
+            before = projectAgentModelControl(observed.modelControl);
+            if (before?.status !== 'available') throw chatError('AGENT_MODEL_UNSUPPORTED','当前 Agent 未提供已确认的模型控制能力');
+            if (before.application !== 'runtime-confirmed') throw chatError('TASK_HANDOFF_REQUIRED','此 Agent 的配置需要通过任务交接或新会话应用');
+            if (nextConfig.modelProvider !== previousConfig.modelProvider && nextConfig.modelProvider
+              && before.selection?.modelProvider !== nextConfig.modelProvider) {
+              throw chatError('AGENT_MODEL_UNSUPPORTED','所选模型提供方不属于当前 Agent 的已确认连接');
+            }
+            if (nextConfig.model !== previousConfig.model && !before.model?.options.some(option=>option.value===nextConfig.model)) {
+              throw chatError('AGENT_MODEL_UNSUPPORTED','所选模型不在当前 Agent 的目录中');
+            }
+            if (nextConfig.reasoning !== previousConfig.reasoning && !before.reasoning?.options.some(option=>option.value===nextConfig.reasoning)) {
+              throw chatError('MODEL_REASONING_UNSUPPORTED','当前 Agent 未声明所选推理选项');
             }
           }
+          let transferred = null;
+          let applied;
+          if (native && record.taskId) {
+            if (!linkedTask?.currentAgent || linkedTask.currentAgent.provider !== provider
+              || linkedTask.currentAgent.sessionId !== record.dshSessionId) throw chatError('TASK_SESSION_MISMATCH','当前 Chat 不再拥有该任务执行会话');
+            if (typeof handoffTask !== 'function') throw chatError('TASK_HANDOFF_REQUIRED','任务模型变更需要通过任务详情的交接或恢复入口完成');
+            await prepareTaskContext({record,taskId:linkedTask.id});
+            transferred = await handoffTask({taskId:linkedTask.id,reason:'owner-request',targetProvider:provider,
+              model:nextConfig.model !== previousConfig.model ? nextConfig.model : before.selection?.model,
+              modelProvider:nextConfig.modelProvider || before.selection?.modelProvider || undefined,
+              reasoningEffort:nextConfig.reasoning !== previousConfig.reasoning ? nextConfig.reasoning : before.selection?.reasoningEffort ?? undefined});
+            if (transferred?.to?.provider !== provider || !transferred.to.sessionId) throw chatError('TASK_SESSION_MISMATCH','任务交接未返回确认的目标会话');
+            applied = transferred.modelControl ? transferred : await agentExecute({method:'agent.status',params:transferred.to});
+          } else applied = await agentExecute({ method: 'agent.selectModel', params: {
+            provider,
+            sessionId: record.dshSessionId,
+            ...(native ? {
+              ...(nextConfig.model !== previousConfig.model ? {model:nextConfig.model} : {}),
+              ...(nextConfig.modelProvider !== previousConfig.modelProvider ? {modelProvider:nextConfig.modelProvider} : {}),
+              ...(nextConfig.reasoning !== previousConfig.reasoning ? {reasoningEffort:nextConfig.reasoning} : {})
+            } : {model:nextConfig.model,modelProvider:nextConfig.modelProvider,reasoningEffort:nextConfig.reasoning})
+          } });
+          if (native) {
+            const confirmed = projectAgentModelControl(applied?.modelControl);
+            if (confirmed?.status !== 'available' || confirmed.application !== 'runtime-confirmed'
+              || confirmed.selection?.model !== (nextConfig.model !== previousConfig.model ? nextConfig.model : before.selection?.model)
+              || (nextConfig.reasoning !== previousConfig.reasoning && confirmed.selection?.reasoningEffort !== nextConfig.reasoning)
+              || (nextConfig.modelProvider && confirmed.selection?.modelProvider !== nextConfig.modelProvider)) {
+              throw chatError('MODEL_ACK_MISMATCH','Agent 未确认所选模型或推理设置，已保留原配置；请重新核验运行时状态');
+            }
+            nextConfig.model = confirmed.selection.model;
+            nextConfig.reasoning = confirmed.selection.reasoningEffort ?? '';
+            nextConfig.modelProvider = confirmed.selection.modelProvider ?? null;
+          }
+          const candidate={...record,config:nextConfig,updatedAt:now(),
+            ...(transferred?{dshSessionId:transferred.to.sessionId,runtimeProvider:transferred.to.provider}:{})};
+          writeJsonAtomic(sessionsFile,{schemaVersion:SCHEMA_VERSION,sessions:[...sessions.values()].map(item=>item===record?candidate:item)});
+          if(transferred)stopFollow(record.id);
+          Object.assign(record,candidate);
+          if(transferred)ensureFollow(record);
+          return publicSession(record);
+        } catch (error) {
+          if (['TURN_BUSY','CONFIG_RECONCILIATION_REQUIRED','AGENT_MODEL_UNSUPPORTED','MODEL_REASONING_UNSUPPORTED','TASK_HANDOFF_REQUIRED','MODEL_ACK_MISMATCH',
+            'WORKSPACE_UNVERIFIED','WORKSPACE_CHANGED','HANDOFF_RECOVERY_REQUIRED','ROLLOVER_NOT_SAFE','SESSION_EXECUTION_UNCONFIRMED','TASK_SESSION_MISMATCH'].includes(error?.code)) throw error;
           throw chatError('MODEL_BIND_FAILED', `Agent 模型切换失败（${provider}）：${error?.message ?? error}`);
         }
       }
@@ -766,6 +886,9 @@ export function createChatService({
       closePreviousProviderSession(record, previousModelSession, '已切换到 Model Runtime');
       return publicSession(record);
     }
+    if (externalAgent(nextConfig.agentProvider) && modelConfigChanged && !agentProviderChanged) {
+      throw chatError('AGENT_MODEL_SESSION_REQUIRED','Agent 会话尚未连接，模型配置需先由运行时确认');
+    }
     record.config = nextConfig;
     touch(record);
     return publicSession(record);
@@ -785,7 +908,18 @@ export function createChatService({
     return value;
   }
 
-  async function catalog({ refresh = false } = {}) {
+  async function catalog({ refresh = false, id } = {}) {
+    const record = id ? sessionOrThrow(id) : null;
+    const nativeProvider = externalAgent(modelAgentProvider(record)) ? modelAgentProvider(record) : null;
+    let modelControl = null;
+    if (nativeProvider) {
+      try {
+        const observed = record.dshSessionId && typeof agentExecute === 'function'
+          ? await agentExecute({method:'agent.status',params:{provider:record.runtimeProvider || nativeProvider,sessionId:record.dshSessionId}}) : null;
+        modelControl = projectAgentModelControl(observed?.modelControl);
+      } catch { /* Discovery cannot invent or replace the last confirmed selection. */ }
+      modelControl ??= {status:'unknown',source:null,runtimeVersion:null,application:null,selection:null,model:null,reasoning:null};
+    }
     let liveAgentProviders = [];
     let agentDiscoveryError = null;
     if (typeof agentExecute === 'function') {
@@ -835,7 +969,7 @@ export function createChatService({
     // Model Runtime 目录（独立于 DSH，DSH 不运行时依然可用）。
     // 只返回 hasKey 布尔与模型列表，绝不携带 API Key 材料。
     let modelProviders = [];
-    if (modelRuntime) {
+    if (modelRuntime && !nativeProvider) {
       const nowAt = now();
       if (!refresh && modelCatalogCache && nowAt - modelCatalogCache.at < MODEL_CATALOG_CACHE_MS) {
         modelProviders = modelCatalogCache.value;
@@ -860,8 +994,11 @@ export function createChatService({
     }
     const modelProviderBase = {
       modelProviders,
-      defaultModelProvider: modelRuntime ? modelRuntime.defaultProviderId() : null
+      ...(record ? {sessionId:record.id} : {}),
+      defaultModelProvider: !nativeProvider && modelRuntime ? modelRuntime.defaultProviderId() : null,
+      ...(nativeProvider ? {agentProvider:nativeProvider,modelControl} : {})
     };
+    if (nativeProvider) return {providers:[],agentProviders,modes:[...CHAT_MODES],reasoning:[],models:[],error:null,...modelProviderBase};
     try {
       if (typeof controlExecute !== 'function') throw chatError('DSH_UNAVAILABLE', 'DSH model catalog is unavailable');
       const value = await controlExecute({ method: 'model.catalog.list', params: {} });
@@ -870,7 +1007,7 @@ export function createChatService({
         providers: [...PROVIDERS],
         agentProviders,
         modes: [...CHAT_MODES],
-        reasoning: [...REASONING_EFFORTS],
+        reasoning: [],
         models: entries.map((entry) => ({
           id: String(entry?.model ?? entry?.id ?? ''),
           label: String(entry?.label ?? entry?.model ?? entry?.id ?? ''),
@@ -885,7 +1022,7 @@ export function createChatService({
         providers: [...PROVIDERS],
         agentProviders,
         modes: [...CHAT_MODES],
-        reasoning: [...REASONING_EFFORTS],
+        reasoning: [],
         models: [],
         error: String(error?.message ?? error),
         ...modelProviderBase
@@ -964,7 +1101,7 @@ export function createChatService({
       onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn?.requestId, reset: true } });
     } else if (type === 'tool/activity') {
       onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', requestId: state.turn?.requestId,
-        toolActivity: state.turn?.toolActivity ?? [] } });
+        toolActivity: state.turn?.toolActivity ?? [], ...(state.turn ? activityProjection(state.turn) : {}) } });
     } else if (type === 'assistant/message') {
       pendingUiDeltas.delete(record.id);
       onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', requestId: state.turn?.requestId, replaceText: state.turn?.displayText ?? '', toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
@@ -977,6 +1114,7 @@ export function createChatService({
 
   function applyChatEvent(record, state, event) {
     const data = event?.data ?? {};
+    const activitySource = state.modelTurn?.kind === 'model' ? 'model-runtime' : 'agent-follow';
     if (!state.turn || (data.sessionId && data.sessionId !== record.dshSessionId)) return false;
     if (state.turn.providerRequestId && data.requestId && data.requestId !== state.turn.providerRequestId) return false;
     if (state.turn.providerTurnId && data.turn && data.turn !== state.turn.providerTurnId) return false;
@@ -991,6 +1129,17 @@ export function createChatService({
       } else if (data.turn !== state.turn.providerTurnId) return false;
     }
     if (!state.turn.providerRequestId && data.requestId && record.dshSessionId && data.requestId !== state.turn.requestId) return false;
+    if (state.turn.activityTimeline?.runId && data.runId && data.runId !== state.turn.activityTimeline.runId) return false;
+    if (state.turn.activityTimeline?.attemptId && data.attemptId && data.attemptId !== state.turn.activityTimeline.attemptId) return false;
+    if (Number.isSafeInteger(event.seq)) {
+      const previousSequence = state.turn.activitySourceSequence;
+      if (Number.isSafeInteger(previousSequence) && event.seq <= previousSequence) return false;
+      if (Number.isSafeInteger(previousSequence) && event.seq > previousSequence + 1) {
+        retainActivity(record, state.turn, { kind: 'gap', status: 'unknown', source: activitySource, event,
+          missingCount: event.seq - previousSequence - 1 });
+      }
+      state.turn.activitySourceSequence = event.seq;
+    }
     if (event.type === 'turn/start') {
       if (data.resumed || state.turn.state === 'waiting-approval') { state.messageTexts = []; state.chunkBuffer = ''; }
       if (state.turn) { state.turn.state = 'streaming'; state.turn.statusMessage = null; }
@@ -1000,6 +1149,7 @@ export function createChatService({
         ...(data.requestedModel ? { requestedModel: data.requestedModel } : {}),
         ...(data.resolvedModel ? { resolvedModel: data.resolvedModel } : {})
       };
+      retainActivity(record, state.turn, { event, source: activitySource });
       return true;
     }
     if (event.type === 'assistant/reset') {
@@ -1015,15 +1165,15 @@ export function createChatService({
     if (event.type === 'tool/result') {
       const rows=state.turn.toolActivity??[];
       const row=[...rows].reverse().find(item=>item.capability===data.capability||item.label===data.capability);
-      if(row){if(typeof data.filePath==='string')row.filePath=data.filePath.slice(0,500);if(Number.isSafeInteger(data.exitCode))row.exitCode=data.exitCode;}
+      if(row) receiveToolActivity(record, state.turn, { ...row,
+        ...(typeof data.filePath === 'string' ? { filePath: data.filePath } : {}),
+        ...(Number.isSafeInteger(data.exitCode) ? { exitCode: data.exitCode } : {}) }, event, activitySource);
       return Boolean(row);
     }
     if (event.type === 'tool/activity') {
       const activity = data.activity;
       if (!activity?.id) return false;
-      const rows = state.turn.toolActivity ?? [];
-      state.turn.toolActivity = [...rows.filter(row => row.id !== activity.id), activity].slice(-32);
-      return true;
+      return receiveToolActivity(record, state.turn, activity, event, activitySource);
     }
     if (event.type === 'assistant/chunk') {
       const chunk = data.chunk;
@@ -1082,6 +1232,7 @@ export function createChatService({
         state.turn.state = 'waiting-approval';
         state.turn.approvalId = data?.reason?.approvalId ?? null;
         state.turn.statusMessage = 'Waiting for Owner approval.';
+        retainActivity(record, state.turn, { event, source: activitySource });
         return true;
       }
       if (reasonKind === 'completed') {
@@ -1108,6 +1259,7 @@ export function createChatService({
   /** 回合终态：有文本就落盘 assistant 消息；取消后丢弃 DSH 会话以隔离迟到事件。 */
   function finalizeTurn(record, state) {
     const turn = state.turn;
+    if (!turn) return;
     if (turn.state === 'error' && !turn.failureStage) {
       turn.failureStage = turn.agentAcked || turn.displayText?.trim() || turn.toolActivity?.length ? 'execution' : 'unknown';
     }
@@ -1132,7 +1284,9 @@ export function createChatService({
       }
     }
     if (text.trim() || turn.state === 'done' || turn.state === 'error' || turn.state === 'cancelled' || turn.toolActivity?.length) {
-      const messageId = crypto.randomUUID();
+      appendChatActivity(turn, { at: now(), status: turn.state, taskId: turn.accountingTaskId ?? record.taskId,
+        providerId: record.runtimeProvider ?? record.config.agentProvider ?? turn.accountingProviderId, sessionId: record.dshSessionId });
+      const messageId = turn.activityMessageId ?? `activity-${turn.id}`;
       const historyRevision = appendMessage(record.id, {
         id: messageId,
         role: turn.state === 'error' && turn.failureStage === 'pre-dispatch' && !text.trim() && !turn.toolActivity?.length ? 'system' : 'assistant',
@@ -1146,6 +1300,7 @@ export function createChatService({
         ...(turn.state === 'done' && turn.modelContinuation ? { modelContinuation: turn.modelContinuation } : {}),
         ...(turn.state === 'done' && turn.modelMessages?.length ? { modelMessages: turn.modelMessages } : {}),
         toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
+        ...activityProjection(turn),
         ...(turn.agentActivity ? { agentActivity: { ...turn.agentActivity } } : {}),
         ...(turn.routing ? { routing: turn.routing } : {}),
         ...(turn.state === 'error' ? { error: turn.error ?? '回合异常', errorCode: turn.errorCode ?? 'PROVIDER_ERROR', failureStage: turn.failureStage } : {}),
@@ -1224,7 +1379,12 @@ export function createChatService({
             ? agentFollow({ provider, sessionId, signal: controller.signal, sinceSequence: state.follow.sequence })
             : requireDshApi(api, 'session follow').openRemoteStream('session/follow', { request: { address: { kind: 'session', sessionId } } }, { signal: controller.signal });
           for await (const item of stream) {
-            const event = item.type === 'event' ? item.event : item;
+            // ACP journals attach ordering/provenance to the outer Follow item;
+            // DSH and Managed may attach it to the inner event. Keep the trusted
+            // envelope fields when unwrapping so both use the same cursor fence.
+            const event = item?.type === 'event' && item.event ? { ...item.event,
+              seq: item.seq ?? item.event.seq, timestamp: item.timestamp ?? item.event.timestamp,
+              source: item.source ?? item.event.source, eventId: item.eventId ?? item.event.eventId } : item;
             if (!event) continue;
             if (controller.signal.aborted || !state.follow?.active || state.follow.controller !== controller) break;
             if (record.dshSessionId !== sessionId) break;
@@ -1326,9 +1486,10 @@ export function createChatService({
     const activity = agentActivityFor(providerId);
     if (!activity) return null;
     state.turn.agentActivity = activity;
+    retainActivity(record, state.turn);
     onEvent?.({ event: 'chat.streaming', data: {
       sessionId: record.id, status: state.turn.state, requestId: state.turn.requestId,
-      agentActivity: activity, toolActivity: state.turn.toolActivity ?? []
+      agentActivity: activity, toolActivity: state.turn.toolActivity ?? [], ...activityProjection(state.turn)
     } });
     return activity;
   }
@@ -1356,7 +1517,7 @@ export function createChatService({
     for (const message of prior) {
       if (message.id === omitHistoryMessageId) continue;
       if (message.role !== 'user' && message.role !== 'assistant') continue;
-      if (message.error || message.cancelled) continue;
+      if (message.error || message.cancelled || message.interrupted) continue;
       const text = typeof message.text === 'string' ? message.text : '';
       const hasProtocol = message.role === 'assistant'
         && (message.modelContinuation || message.modelMessages?.length);
@@ -1410,6 +1571,7 @@ export function createChatService({
     return snapshot;
   }
   function startModelTurn(record, state, promptText, routing, resolved, retryMessageId = null) {
+    const originatingTurn = state.turn;
     if (state.turn) state.turn.routing = routing ?? null;
     const model = modelForRuntime(record);
     if (state.turn) { state.turn.accountingProviderId = resolved.id; state.turn.accountingModel = model; }
@@ -1434,7 +1596,7 @@ export function createChatService({
             providerId: resolved.id,
             model: model ?? undefined,
             reasoning: record.config.reasoning,
-            onContext: value=>observeContext(record,state,value),
+            onContext: value=>{ if (state.turn === originatingTurn) observeContext(record,state,value); },
             messages,
             manifest: productContext.manifest,
             actor: OWNER_ACTOR,
@@ -1445,17 +1607,12 @@ export function createChatService({
             signal: controller.signal,
             onActivity: activity => {
               const turn = state.turn;
-              if (!turn) return;
-              const rows = Array.isArray(turn.toolActivity) ? turn.toolActivity : [];
-              const existing = rows.findIndex(item => item.id === activity.id);
-              const next = { ...activity, label: activity.capability };
-              if (existing >= 0) rows[existing] = next; else rows.push(next);
-              turn.toolActivity = rows.slice(-32);
-              onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId, toolActivity: rows.slice(-32), agentActivity: turn.agentActivity ?? null } });
+              if (!turn || turn !== originatingTurn || !receiveToolActivity(record, turn, activity)) return;
+              onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId, toolActivity: turn.toolActivity, agentActivity: turn.agentActivity ?? null, ...activityProjection(turn) } });
             },
             onTextDelta: delta => {
               const turn = state.turn;
-              if (!turn || typeof delta !== 'string' || !delta) return;
+              if (!turn || turn !== originatingTurn || typeof delta !== 'string' || !delta) return;
               if(turn.state==='starting')turn.state='streaming';
               settleOk();
               state.chunkBuffer += delta;
@@ -1465,7 +1622,7 @@ export function createChatService({
             },
             onStreamReset: () => {
               const turn = state.turn;
-              if (!turn) return;
+              if (!turn || turn !== originatingTurn) return;
               state.messageTexts = [];
               state.chunkBuffer = '';
               turn.displayText = '';
@@ -1473,12 +1630,14 @@ export function createChatService({
                 reset: true, toolActivity: turn.toolActivity ?? [], agentActivity: turn.agentActivity ?? null } });
             },
             onCapabilityResult: ({ capability, result: toolResult }) => {
+              if (state.turn !== originatingTurn) return;
               if (capability === 'task.create' && toolResult?.status === 'completed') {
                 const taskId = toolResult.result?.task?.id;
                 if (typeof taskId === 'string' && taskId) { record.taskId = taskId; saveStore(); }
               }
             },
             refreshContext: async ({ capability }) => {
+              if (state.turn !== originatingTurn) return null;
               if (capability !== 'task.create') return null;
               productContext = await buildTurnContext(record, routing, resolved, model);
               return productContext;
@@ -1486,7 +1645,7 @@ export function createChatService({
           });
           settleOk();
           const turn = state.turn;
-          if (turn) {
+          if (turn && turn === originatingTurn) {
             turn.routing = { ...(routing ?? {}), toolCalling: result.toolCalling,
               requestedModel: model ?? 'provider-default', resolvedModel: result.resolvedModel ?? null };
             if (result.resolvedModel) {
@@ -1499,6 +1658,7 @@ export function createChatService({
               turn.approvalId = result.approvalId;
               turn.approvalExpiresAt = result.expiresAt ?? null;
               turn.displayText = 'Waiting for Owner approval.';
+              retainActivity(record, turn);
               onEvent?.({ event: 'approval.pending', data: { approvalId: result.approvalId, sessionId: record.id } });
               onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: turn.state } });
               return;
@@ -1524,20 +1684,20 @@ export function createChatService({
           model,
           messages,
           reasoning: record.config.reasoning,
-          onContext: value=>observeContext(record,state,value),
+          onContext: value=>{ if (state.turn === originatingTurn) observeContext(record,state,value); },
           signal: controller.signal
         });
         for await (const event of events) {
-          if (!state.turn) break;
+          if (!state.turn || state.turn !== originatingTurn) break;
           settleOk();
           handleChatEvent(record, state, event);
         }
         settleOk();
       } catch (error) {
         const turn = state.turn;
-        if (turn && error?.usage) turn.usage = error.usage;
+        if (turn && turn === originatingTurn && error?.usage) turn.usage = error.usage;
         settleErr(error);
-        if (turn) {
+        if (turn && turn === originatingTurn) {
           const aborted = controller.signal.aborted || error?.code === 'ABORTED' || error?.name === 'AbortError';
           turn.displayText = displayTextOf(state);
           if (aborted) {
@@ -1554,7 +1714,7 @@ export function createChatService({
         }
       } finally {
         settleOk();
-        state.modelTurn = null;
+        if (state.modelTurn?.controller === controller) state.modelTurn = null;
       }
     })();
     state.modelTurn.done = done;
@@ -2141,7 +2301,7 @@ export function createChatService({
         lastRequestId: recovery ? null : last?.requestId ?? null,
         lastFailureStage: recovery ? 'unknown' : last?.failureStage ?? null,
         lastRouting: last?.routing ?? null,
-        lastState: recovery?.state ?? (last?.role === 'user' ? (record.interruptedAt ? 'interrupted' : 'awaiting-reply') : last?.error ? 'error' : 'idle'),
+        lastState: recovery?.state ?? (last?.interrupted ? 'interrupted' : last?.role === 'user' ? (record.interruptedAt ? 'interrupted' : 'awaiting-reply') : last?.error ? 'error' : 'idle'),
         lastError: recovery ? 'Core 重启前的工具操作或审批需要人工核对'
           : ['assistant', 'system'].includes(last?.role) && typeof last.error === 'string' ? last.error : null,
         lastErrorCode: recovery ? recovery.state.toUpperCase().replace(/-/g, '_')
@@ -2170,6 +2330,7 @@ export function createChatService({
         context: displayedContext(record,turn.context,'active-request'),
         toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
         agentActivity: turn.agentActivity ?? null,
+        ...activityProjection(turn),
         ...(turn.approvalId ? { approvalId: turn.approvalId, approvalExpiresAt: turn.approvalExpiresAt ?? null } : {}),
         routing: turn.routing ?? null
       }
@@ -2184,6 +2345,7 @@ export function createChatService({
     const state = runtimeOf(record.id);
     if (!state.turn) state.turn = { id: target.turnId, state: 'waiting-approval', displayText: 'Waiting for Owner approval.', error: null, usage: null, routing: null };
     if (state.turn.id !== target.turnId) return null;
+    const originatingTurn = state.turn;
     state.turn.state = 'streaming';
     state.turn.displayText = '';
     delete state.turn.approvalId;
@@ -2201,20 +2363,15 @@ export function createChatService({
     state.modelTurn = { controller, providerId: resolved.id, kind: 'model' };
     try {
       const result = await toolExecutionCoordinator.resumeApproval({
-        onContext: value=>observeContext(record,state,value), approvalId, requestFingerprint, decisionResult, signal: controller.signal,
+        onContext: value=>{ if (state.turn === originatingTurn) observeContext(record,state,value); }, approvalId, requestFingerprint, decisionResult, signal: controller.signal,
         onActivity: activity => {
           const turn = state.turn;
-          if (!turn) return;
-          const rows = Array.isArray(turn.toolActivity) ? turn.toolActivity : [];
-          const existing = rows.findIndex(item => item.id === activity.id);
-          const next = { ...activity, label: activity.capability };
-          if (existing >= 0) rows[existing] = next; else rows.push(next);
-          turn.toolActivity = rows.slice(-32);
-          onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId, toolActivity: rows.slice(-32), agentActivity: turn.agentActivity ?? null } });
+          if (!turn || turn !== originatingTurn || !receiveToolActivity(record, turn, activity)) return;
+          onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId, toolActivity: turn.toolActivity, agentActivity: turn.agentActivity ?? null, ...activityProjection(turn) } });
         },
         onTextDelta: delta => {
           const turn = state.turn;
-          if (!turn || typeof delta !== 'string' || !delta) return;
+          if (!turn || turn !== originatingTurn || typeof delta !== 'string' || !delta) return;
           state.chunkBuffer += delta;
           turn.displayText = displayTextOf(state);
           onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId, delta,
@@ -2222,7 +2379,7 @@ export function createChatService({
         },
         onStreamReset: () => {
           const turn = state.turn;
-          if (!turn) return;
+          if (!turn || turn !== originatingTurn) return;
           state.messageTexts = [];
           state.chunkBuffer = '';
           turn.displayText = '';
@@ -2230,12 +2387,14 @@ export function createChatService({
             toolActivity: turn.toolActivity ?? [], agentActivity: turn.agentActivity ?? null } });
         },
         onCapabilityResult: ({ capability, result: toolResult }) => {
+          if (state.turn !== originatingTurn) return;
           if (capability === 'task.create' && toolResult?.status === 'completed') {
             const taskId = toolResult.result?.task?.id;
             if (typeof taskId === 'string' && taskId) { record.taskId = taskId; saveStore(); }
           }
         },
         refreshContext: async ({ capability }) => {
+          if (state.turn !== originatingTurn) return null;
           if (capability !== 'task.create' && capability !== null) return null;
           const snapshot = await buildTurnContext(record, state.turn.routing, resolved, model);
           return snapshot;
@@ -2243,12 +2402,14 @@ export function createChatService({
       });
       // Coordinator usage is cumulative across approval suspensions. Persist the
       // latest snapshot even when another approval is required, including cancel.
+      if (state.turn !== originatingTurn) return { resumed: false, error: 'TURN_REPLACED' };
       state.turn.usage = result.usage ?? state.turn.usage ?? null;
       if (result.status === 'pending') {
         state.turn.state = 'waiting-approval';
         state.turn.approvalId = result.approvalId;
         state.turn.approvalExpiresAt = result.expiresAt ?? null;
         state.turn.displayText = 'Waiting for Owner approval.';
+        retainActivity(record, state.turn);
         onEvent?.({ event: 'approval.pending', data: { approvalId: result.approvalId, sessionId: record.id } });
         onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: state.turn.state } });
         return { resumed: true, pending: true, approvalId: result.approvalId };
@@ -2276,7 +2437,7 @@ export function createChatService({
       onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: 'idle' } });
       return { resumed: true, pending: false };
     } catch (error) {
-      if (state.turn) {
+      if (state.turn && state.turn === originatingTurn) {
         if (error?.usage) state.turn.usage = error.usage;
         const cancelled = controller.signal.aborted || error?.code === 'INVOKE_CANCELLED';
         state.turn.state = cancelled ? 'cancelled' : 'error';
@@ -2285,7 +2446,7 @@ export function createChatService({
       }
       onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: controller.signal.aborted ? 'cancelled' : 'error' } });
       return { resumed: false, error: error?.code ?? 'TOOL_RESUME_FAILED' };
-    } finally { signal?.removeEventListener('abort', cancelOperation); state.modelTurn = null; }
+    } finally { signal?.removeEventListener('abort', cancelOperation); if (state.modelTurn?.controller === controller) state.modelTurn = null; }
   }
 
   async function stop({ id } = {}) {
@@ -2394,7 +2555,7 @@ export function createChatService({
     'chat.retry': (params) => retry(params ?? {}),
     'chat.continue': (params) => continueTurn(params ?? {}),
     'chat.config.set': (params) => setConfig(params ?? {}),
-    'chat.catalog': p => catalog({ refresh: p?.refresh === true })
+    'chat.catalog': p => catalog({ refresh: p?.refresh === true, id:p?.id })
   };
 
   return {

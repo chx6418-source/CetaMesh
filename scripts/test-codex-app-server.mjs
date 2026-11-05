@@ -11,6 +11,7 @@ import { createAgentBroker } from '../src/agent/broker.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { createCodexSessionLifecycle } from '../src/agent/codex-session-lifecycle.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
+import './helpers/codex-model-control-fixtures.mjs';
 const tick=()=>new Promise(r=>setTimeout(r,15));
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-app-fixture-'));
 const peers=[];

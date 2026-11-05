@@ -32,8 +32,33 @@ try{
  const lockedNodes=descendants(ui.ChatModelPickerContent({...props,disabledReason:'回合结果尚未确认'}));
  assert.equal(lockedNodes.find(node=>node.props?.role==='option').props.disabled,true);
  assert.equal(lockedNodes.find(node=>node.props?.['aria-label']==='推理强度 low').props.disabled,true);
+ for(const provider of ['qwen','opencode','gemini','claude','dsh','codex']){
+  const native=render(ui.ChatModelPickerContent,{...props,selectedAgent:provider,agentLabel:provider});
+  assert.doesNotMatch(native,/样例模型|样例服务|推理强度 low/,'external Agent cannot borrow Model Runtime choices');
+  assert.match(native,/尚未确认|未提供|未连接/,'missing native model evidence remains explicit');
+ }
+ const modelControl={status:'available',source:'acp-session',application:'runtime-confirmed',selection:{model:'native-a',reasoningEffort:'medium'},
+  model:{configId:'model',options:[{value:'native-a',label:'Native A'},{value:'native-b',label:'Native B'}]},
+  reasoning:{configId:'reasoning',options:[{value:'medium',label:'Medium'},{value:'xhigh',label:'Extra high'}]}};
+ const nativeProps={...props,selectedAgent:'qwen',agentLabel:'Qwen',modelControl};
+ const nativeHtml=render(ui.ChatModelPickerContent,nativeProps);
+ assert.match(nativeHtml,/Native A|Native B/);assert.match(nativeHtml,/推理强度 medium/);assert.match(nativeHtml,/推理强度 xhigh/);assert.doesNotMatch(nativeHtml,/样例模型|推理强度 low/);
+ const nativeNodes=descendants(ui.ChatModelPickerContent(nativeProps));
+ nativeNodes.find(node=>node.props?.['aria-label']==='推理强度 xhigh').props.onClick();assert.equal(reasoning.at(-1),'xhigh');
+ nativeNodes.filter(node=>node.props?.role==='option')[1].props.onClick();assert.equal(changes.at(-1),'["","native-b"]');
+ const awaiting=render(ui.ChatModelPickerContent,{...nativeProps,modelControl:{...modelControl,application:'next-turn',requested:{model:'native-requested',reasoningEffort:'medium'}}});
+ assert.match(awaiting,/下一回合/);assert.doesNotMatch(awaiting,/当前模型[^<]*Native B/);
+ assert.match(awaiting,/下一回合请求[^<]*native-requested/);assert.doesNotMatch(awaiting,/当前 Agent 模型/);
+ const uncertain=render(ui.ChatModelPickerContent,{...nativeProps,modelControl:{...modelControl,status:'unknown'}});
+ assert.match(uncertain,/最近确认[^<]*Native A/,'uncertain runtime keeps the last confirmed value visible without calling it current');
+ assert.doesNotMatch(uncertain,/当前 Agent 模型|role="option"/);
+ let taskOpened=0;
+ const recoveryNodes=descendants(ui.ChatModelPickerContent({...nativeProps,modelControl:{...modelControl,application:'requires-new-session'},onOpenTask:()=>{taskOpened++;}}));
+ const recoveryAction=recoveryNodes.find(node=>node.type==='button'&&node.props.children==='查看任务');
+ assert.ok(recoveryAction,'fresh-session configuration offers the existing Task review entry');recoveryAction.props.onClick();assert.equal(taskOpened,1);
  assert.equal(ui.configurationChangeBlocked({state:'needs-reconciliation',followState:'idle',errorCode:null}),true);
  assert.equal(ui.configurationChangeBlocked({state:'idle',followState:'idle',errorCode:null}),false);
+ assert.equal(ui.configurationChangeBlocked({state:'idle',followState:'idle',errorCode:null},'running'),true,'Task execution locks model controls even when Chat itself is idle');
  const sourced=render(ui.ChatUsageContent,{context:null,turnUsage:{...usage,measurement:{status:'actual',source:'structured-provider-receipts'}},sessionUsage:null});
  assert.match(sourced,/实际.*结构化供应商回执/,'counter source is distinct from accounting completeness');
  for(const[source,label]of[['structured-provider-receipts','结构化供应商回执'],['explicit-usage-estimate','显式用量估算'],['unattributed-usage','来源未归属']]){

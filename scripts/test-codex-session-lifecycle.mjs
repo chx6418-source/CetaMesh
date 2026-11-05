@@ -90,6 +90,27 @@ try {
   assert.equal((await restored.verifyStoppedTask({...scope,sessionId:'never-created'})).stopped,false,'Owner or Task prose never substitutes for a receipt');
   console.log('PASS provider completion survives Core transport loss; run mismatch, active generation and unknown tree cannot recover');
 
+  for(const unknownExit of [false,true]) {
+    const cancelledTask={id:'cancel-proof-'+unknownExit,workspaceId:task.workspaceId,goal:'Controlled cancellation receipt',attempts:[]};
+    let finish,cancelSettled=false,cancelCalls=0;
+    const cancelCli={...fakeCli,startSession(){return {done:new Promise(resolve=>{finish=resolve;}),
+      cancel:()=>{cancelCalls++;return {cancelled:true};},terminationConfirmed:()=>!unknownExit};}};
+    const cancellable=createCodexAgentProvider({...options,stateDir:path.join(integration,'cancel-'+unknownExit),cliProcess:cancelCli,
+      resolveTaskWorkspace:()=>({task:cancelledTask,workspace:{id:cancelledTask.workspaceId,root:workspace}})});
+    const session=await cancellable.createSession({taskId:cancelledTask.id,workspaceId:cancelledTask.workspaceId});
+    cancelledTask.currentAgent={provider:'codex',sessionId:session.sessionId};cancelledTask.executionObservation={runId:'cancel-run'};
+    await cancellable.send({...session,content:'pending native execution',runId:'cancel-run'});
+    const cancelled=cancellable.cancel(session).then(value=>{cancelSettled=true;return value;});
+    await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(cancelCalls,1);assert.equal(cancelSettled,false,'Owner cancellation must wait for the actual process outcome, not its request ACK');
+    finish(unknownExit?{exitCode:null,terminationConfirmed:false,effectStatus:'unknown'}:{exitCode:130,cancelled:true,terminationConfirmed:true});
+    const result=await cancelled;
+    assert.equal(result.cancelled,!unknownExit);
+    assert.equal((await cancellable.verifyStoppedTask({taskId:cancelledTask.id,workspaceId:cancelledTask.workspaceId,sessionId:session.sessionId})).stopped,!unknownExit);
+    assert.equal((await cancellable.status(session)).running,unknownExit);
+  }
+  console.log('PASS cancellation waits for durable process-tree receipt and unknown execution remains owned');
+
   const handoffDir=path.join(root,'handoff'), tasks=createTaskRuntime({stateDir:handoffDir});
   const handoffTask=tasks.create({goal:'Recover a prepared native Handoff',workspaceId:'handoff-workspace'});
   const current=()=>tasks.get({id:handoffTask.id}).task;

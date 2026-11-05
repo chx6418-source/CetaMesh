@@ -39,13 +39,32 @@ export interface ChatModelCapabilities {
 }
 export interface ChatCatalogModel { id?: string; name?: string; label?: string; displayName?: string; modelName?: string; toolCalling?: string; streaming?: string; reasoning?: string; capabilities?: ChatModelCapabilities }
 export interface ChatModelProvider { id: string; label: string; configured: boolean; catalogState?: string; reachable?: boolean | null; authenticated?: boolean | null; inferencing?: boolean | null; toolCalling?: boolean; error?: string | null; settingsFields?: ProviderSettingField[]; models: ChatCatalogModel[] }
+export interface AgentModelControl {
+  status: 'available' | 'unsupported' | 'unknown'; source: string | null; runtimeVersion?: string | null;
+  application: 'runtime-confirmed' | 'next-turn' | 'requires-new-session' | null;
+  selection: {model:string|null;reasoningEffort:string|null;modelProvider?:string|null}|null;
+  requested?: {model:string|null;reasoningEffort:string|null;modelProvider?:string|null}|null;
+  lastRequest?: {model:string|null;reasoningEffort:string|null;modelProvider?:string|null;source:'cli-argv';turnId:string|null};
+  model: {configId?:string|null;options:{value:string;label:string}[]}|null;
+  reasoning: {configId?:string|null;options:{value:string;label:string}[]}|null;
+}
 export interface ModelUsage {
   measurement?: { status: EvidenceStatus; source: string | null };
   inputTokens: number | null; outputTokens: number | null; totalTokens: number | null;
   reasoningTokens: number | null; cacheReadTokens: number | null; cacheWriteTokens: number | null;
   requestCount: number | null; cacheHitRate: number | null; cost: { status: 'actual' | 'estimated' | 'unknown'; amount: number | null; knownAmount: number | null; currency: string | null; complete: boolean; sources: string[]; versions: string[] } | null; accountingComplete: boolean | null;
 }
-export interface ChatMessage {
+export interface ChatActivityTimeline {
+  schemaVersion: 1; turnId: string; requestId: string | null; taskId: string | null;
+  runId: string | null; attemptId: string | null; providerId: string | null; sessionId: string | null;
+  state: string; nextSequence: number; omittedCount: number; gapCount: number;
+  entries: { id: string; sequence: number; at: number | null; source: 'chat' | 'agent-follow' | 'model-coordinator' | 'model-runtime' | 'recovery';
+    sourceSequence: number | null; kind: 'tool' | 'lifecycle' | 'gap'; status: string; toolId: string | null; capability: string | null; missingCount: number }[];
+}
+export interface ChatActivityObservation {
+  activityTimeline?: ChatActivityTimeline | null; activityOmitted?: number; activityState?: string | null;
+}
+export interface ChatMessage extends ChatActivityObservation {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
   requestId?: string | null;
   errorCode?: string | null;
@@ -54,7 +73,8 @@ export interface ChatMessage {
   usage?: ModelUsage | null;
   attachmentRefs?: {ref:string;name:string;kind:string;size:number;mimeType:string;modelRef?:string|null}[];
   attachments: string[]; toolActivity: { id: string; label: string; status: string; summary: string; durationMs: number | null; capability?: string | null; filePath?: string | null; exitCode?: number | null }[];
-  agentActivity?: { providerId: string; label: string; status: 'running' | 'completed' | 'cancelled' | 'failed' } | null;
+  agentActivity?: { providerId: string; label: string; status: 'running' | 'completed' | 'cancelled' | 'failed' | 'unknown' } | null;
+  interrupted?: boolean;
   error: string | null; cancelled: boolean;
 }
 export interface ProviderSettingField {
@@ -236,7 +256,7 @@ export type DesktopEvent = 'preview.browser' | 'core.status' | 'chat.updated' | 
   | 'agent.updated' | 'workspace.updated' | 'plugin.updated' | 'plugin.downloadProgress' | 'approval.pending' | 'approval.resolved'
   | 'approval.operation' | 'channel.message' | 'channel.delivery'
   | 'model.updated' | 'memory.updated' | 'update.status' | 'device.updated';
-export interface DesktopEventData {
+export interface DesktopEventData extends ChatActivityObservation {
   targetId?: string; revision?: number; generation?: number; url?: string; title?: string; loading?: boolean; error?: string; canBack?: boolean; canForward?: boolean; focusRequested?: boolean; historyUrls?: string[]; historyIndex?: number;
   sessionId?: string; taskId?: string; agentId?: string; pluginId?: string; serverId?: string; approvalId?: string; requestId?: string; retryCount?: number;
   turnId?: string; messageId?: string; historyRevision?: number;
@@ -431,7 +451,7 @@ export const chatClient = {
   history: (id: string, limit = 100, beforeMessageId: string | null = null, afterMessageId: string | null = null) => uiCall<{
     id: string; total: number; messages: ChatMessage[]; sessionUsage?: ModelUsage | null; nextBeforeMessageId: string | null; hasMore: boolean; nextAfterMessageId: string | null; hasMoreAfter: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
-  status: (id: string) => uiCall<{ id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; context?: ChatContextObservation | null; turnUsage?: ModelUsage | null; quota?: { status: 'unknown'; reason: string }; error: string | null; errorCode: string | null; failureStage?: ChatMessage['failureStage']; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
+  status: (id: string) => uiCall<ChatActivityObservation & { id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; context?: ChatContextObservation | null; turnUsage?: ModelUsage | null; quota?: { status: 'unknown'; reason: string }; error: string | null; errorCode: string | null; failureStage?: ChatMessage['failureStage']; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
   send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => {
     const params = { id, text, attachments:attachments.map(a=>a.ref?{ref:a.ref}:a), ...(clientMessageId ? { clientMessageId } : {}) };
     return uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', params).catch(error => {
@@ -444,7 +464,7 @@ export const chatClient = {
   stop: (id: string) => uiCall<{ stopped?: boolean; state?: string; reason?: string }>('ui.chat.stop', { id }),
   retry: (id: string) => uiCall<{ userMessageId?: string }>('ui.chat.retry', { id }),
   continue: (id: string) => uiCall<{ continued?: boolean }>('ui.chat.continue', { id }),
-  catalog: (refresh = false) => uiCall<{ models: unknown[]; modelProviders: ChatModelProvider[]; agentProviders: Agent[]; modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', { refresh }),
+  catalog: (refresh = false, id?:string) => uiCall<{ models: unknown[]; modelProviders: ChatModelProvider[]; agentProviders: Agent[]; sessionId?:string|null;agentProvider?:string|null;modelControl?:AgentModelControl|null;modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', { refresh, ...(id?{id}:{}) }),
   setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config })
 };
 export const taskClient = {
@@ -464,8 +484,8 @@ export const taskClient = {
       uiCall<{ task: Task }>('ui.task.complete', { id, expectedRev, summary, reviewed: true, ...review }),
   verifyOutcome: (id: string, input: { kind: 'code' | 'file' | 'tool' | 'analysis'; expectedFile?: string; expectedSha256?: string; expectedCapability?: string }) =>
     uiCall<{ status: 'VERIFIED' | 'NEEDS_REVIEW'; kind: string; evidenceEventIds: string[]; reasons: string[] }>('ui.task.outcome.verify', { id, ...input }),
-  create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; requestId?: string; note?: string; collaboration?: TaskCollaboration }) => uiCall<{ task: Task }>('ui.task.create', input),
-  start: (id: string, expectedRev?: number, agentProvider?: string) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev, agentProvider }),
+  create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; reasoningEffort?: string; requestId?: string; note?: string; collaboration?: TaskCollaboration }) => uiCall<{ task: Task }>('ui.task.create', input),
+  start: (id: string, expectedRev?: number, agentProvider?: string, reasoningEffort?:string) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev, agentProvider, reasoningEffort }),
   pause: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.pause', { id, expectedRev }),
   resume: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.resume', { id, expectedRev }),
   reconcile: (id: string, input: { expectedRev: number; reviewToken: string; reviewedOperationIds: string[]; reviewSummary: string; action: 'resume' | 'release'; provider?: string; nextInstruction?: string; requestId?: string }) =>

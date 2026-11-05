@@ -48,8 +48,9 @@ try{
  await ui('ui.task.start',{id:pinned.id,expectedRev:pinned.rev,agentProvider:'cetamesh'});
  task=await finished(pinned.id);assert.match(task.checkpoint?.summary??'',/synthetic task result/);assert.equal(task.modelConfig.model,'chosen-a','changed global default must not override a persisted Task model');
  await ui('ui.task.cancel',{id:task.id,expectedRev:task.rev});
- const explicit=(await ui('ui.task.create',{goal:'Use explicit per-task model',workspaceId:workspace.id,agentProvider:'cetamesh',modelProvider:provider,model:'chosen-explicit'})).task;
+ const explicit=(await ui('ui.task.create',{goal:'Use explicit per-task model',workspaceId:workspace.id,agentProvider:'cetamesh',modelProvider:provider,model:'chosen-explicit',reasoningEffort:'medium'})).task;
  task=await finished(explicit.id);assert.match(task.checkpoint?.summary??'',/synthetic task result/);assert.equal(task.modelConfig.model,'chosen-explicit');
+ assert.equal(task.modelConfig.reasoningEffort,'medium','Task creation must preserve the explicit native reasoning request');
  assert.deepEqual(calls,['chosen-a','chosen-a','chosen-explicit']);
  console.log('PASS production Work defaults without provider intrinsic model; persisted and explicit models remain pinned');
 }finally{

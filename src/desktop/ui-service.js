@@ -1,4 +1,4 @@
-import {projectChatContext,projectModelCapabilities} from './chat-telemetry.js';
+import {projectChatContext,projectModelCapabilities,projectAgentModelControl} from './chat-telemetry.js';
 import { explicitDelegationTarget } from './explicit-delegation.js';
 import {SIMULATION_UI_METHODS} from '../simulation/ui-methods.js';
 import {OWNER_ACTOR} from '../capability/types.js';
@@ -13,6 +13,7 @@ import { createTaskRecovery } from './task-recovery.js';
 import { unreviewedTaskEffects } from '../task/recovery-evidence.js';
 import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
 import { LEGACY_RETIRED_TOOLS, isDesktopLocalService } from '../integrations/catalog.js';
+import { projectChatActivityTimeline, projectChatToolActivity } from './chat-activity.js';
 
 // Narrow, renderer-safe DTO adapter for the privileged Desktop WebView.
 // Business state stays in existing Core services; this module owns no persistent data.
@@ -25,7 +26,7 @@ const EVENT_NAMES = Object.freeze([
 
 const EVENT_DATA_KEYS = Object.freeze(['context',
   'sessionId', 'taskId', 'workspaceId', 'agentId', 'pluginId', 'serverId', 'approvalId', 'requestId', 'retryCount',
-  'provider', 'status', 'progress', 'ready', 'needsAttention', 'delta', 'replaceText', 'message', 'reset', 'toolActivity', 'agentActivity'
+  'provider', 'status', 'progress', 'ready', 'needsAttention', 'delta', 'replaceText', 'message', 'reset', 'toolActivity', 'agentActivity', 'activityTimeline', 'activityOmitted', 'activityState'
   , 'turnId', 'messageId', 'historyRevision', 'operationId', 'decision', 'code',
   'accountId', 'channelId', 'eventId', 'sequence', 'consumerId'
 ]);
@@ -104,7 +105,7 @@ function projectSession(value) {
     updatedAt: scalar(row.updatedAt), archived: row.archived === true, taskId: string(row.taskId, 128) || null,
     config: {
       mode: string(config.mode, 40), modelProvider: string(config.modelProvider, 80) || null,
-      reasoning: ['off','low','high','max'].includes(config.reasoning)?config.reasoning:null,
+      reasoning: typeof config.reasoning==='string'&&!/[\x00-\x1f\x7f]/.test(config.reasoning)?string(config.reasoning,256):null,
       model: string(config.model, 200), agentProvider: string(config.agentProvider, 80) || null,
       workspaceId: string(config.workspaceId, 128) || null
     }
@@ -148,19 +149,12 @@ function projectMessage(value) {
   const row = record(value);
   const role = ['user', 'assistant', 'system'].includes(row.role) ? row.role : 'assistant';
   const attachments = boundedStrings(row.attachments, 50, 200);
-  const toolActivity = Array.isArray(row.toolActivity) ? row.toolActivity.slice(0, 50).map(item => {
-    const tool = record(item);
-    return {
-      id: string(tool.id, 128), capability:string(tool.capability,180)||null, filePath:string(tool.filePath,500)||null,exitCode:Number.isSafeInteger(tool.exitCode)?tool.exitCode:null, label: string(tool.label ?? tool.name ?? tool.capability, 200),
-      status: ['pending', 'running', 'retrying', 'waiting-approval', 'completed', 'failed', 'cancelled', 'outcome-unknown','unknown'].includes(tool.status) ? tool.status : 'unknown',
-      summary: string(tool.summary, 1000), durationMs: Number.isFinite(tool.durationMs) ? Math.max(0, tool.durationMs) : null
-    };
-  }) : [];
+  const toolActivity = Array.isArray(row.toolActivity) ? row.toolActivity.slice(0, 50).map(projectChatToolActivity).filter(Boolean) : [];
   const rawAgentActivity = record(row.agentActivity);
   const agentActivity = typeof rawAgentActivity.providerId === 'string' ? {
     providerId: string(rawAgentActivity.providerId, 80), label: string(rawAgentActivity.label, 180),
     status: row.error ? 'failed' : row.cancelled === true ? 'cancelled'
-      : ['running', 'completed', 'cancelled', 'failed'].includes(rawAgentActivity.status) ? rawAgentActivity.status : 'running'
+      : ['running', 'completed', 'cancelled', 'failed', 'unknown'].includes(rawAgentActivity.status) ? rawAgentActivity.status : 'unknown'
   } : null;
   return {
     id: string(row.id, 128), role, text: string(row.text, MAX_TEXT), at: scalar(row.at),
@@ -168,6 +162,10 @@ function projectMessage(value) {
     errorCode: /^[A-Z][A-Z0-9_]{0,99}$/.test(row.errorCode ?? '') ? row.errorCode : null,
     failureStage: ['pre-dispatch', 'execution', 'unknown'].includes(row.failureStage) ? row.failureStage : null,
     routing: selected(row.routing, ['taskId', 'blockingTaskId']),
+    activityTimeline: projectChatActivityTimeline(row.activityTimeline),
+    activityOmitted: Number.isSafeInteger(row.activityOmitted) && row.activityOmitted >= 0 ? row.activityOmitted : 0,
+    activityState: string(row.activityState, 40) || null,
+    interrupted: row.interrupted === true,
     attachments, attachmentRefs:(Array.isArray(row.attachmentRefs)?row.attachmentRefs:[]).slice(0,50).map(r=>({ref:string(r.ref,32),name:string(r.name,200),kind:string(r.kind,20),size:Number(r.size)||0,mimeType:string(r.mimeType,80),modelRef:string(r.modelRef,32)||null,quality:r.quality?{width:Number(r.quality.width),height:Number(r.quality.height),processed:true}:null})), toolActivity, agentActivity, usage: projectUsage(row.usage), error: row.error ? string(row.error, 1000) : null,
     cancelled: row.cancelled === true
   };
@@ -668,20 +666,14 @@ export function createDesktopUiEventBus({ now = () => Date.now(), maxEvents = 50
       else if (typeof value === 'number' && Number.isFinite(value)) safe[key] = value;
       else if (typeof value === 'boolean') safe[key] = value;
       else if (key === 'context') safe.context=projectChatContext(value,'active-request');
-      else if (key === 'toolActivity' && Array.isArray(value)) safe[key] = value.slice(-32).map(activity => {
-        const row = record(activity);
-        return {
-          id: string(row.id, 200), capability:string(row.capability,180)||null,filePath:string(row.filePath,500)||null,exitCode:Number.isSafeInteger(row.exitCode)?row.exitCode:null, label: string(row.label ?? row.capability, 180),
-          status: string(row.status, 50), summary: string(row.summary, 500),
-          durationMs: Number.isFinite(row.durationMs) ? Math.max(0, row.durationMs) : null
-        };
-      });
+      else if (key === 'activityTimeline') safe.activityTimeline = projectChatActivityTimeline(value);
+      else if (key === 'toolActivity' && Array.isArray(value)) safe[key] = value.slice(-32).map(projectChatToolActivity).filter(Boolean);
       else if (key === 'agentActivity' && value === null) safe[key] = null;
       else if (key === 'agentActivity' && value && typeof value === 'object' && !Array.isArray(value)) {
         const row = record(value);
         if (typeof row.providerId === 'string') safe[key] = {
           providerId: string(row.providerId, 80), label: string(row.label, 180),
-          status: ['running', 'completed', 'cancelled', 'failed'].includes(row.status) ? row.status : 'running'
+          status: ['running', 'completed', 'cancelled', 'failed', 'unknown'].includes(row.status) ? row.status : 'unknown'
         };
       }
     }
@@ -830,7 +822,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     return provider;
   }
 
-  async function runTask(taskRow, { provider, content, requestId, modelProvider, model } = {}) {
+  async function runTask(taskRow, { provider, content, requestId, modelProvider, model, reasoningEffort } = {}) {
     if (!taskRow.workspaceId) throw uiError('TASK_WORKSPACE_REQUIRED', '任务需要绑定工作区才能启动 Agent');
     if (taskRow.recoveryIntent) throw uiError('TASK_RECOVERY_REVIEW_REQUIRED', '上次核对尚未完整提交，请在任务详情重新检查并完成恢复核对');
     if (/approval-pending/i.test(taskRow.progress?.note ?? '')) {
@@ -896,7 +888,7 @@ export function createDesktopUiService({ services = {}, system = services.system
           content: (content || [taskRow.goal, ...(taskRow.requirements ?? []),
             taskRow.checkpoint?.summary ?? '', taskRow.checkpoint?.nextAction ?? ''].filter(Boolean).join('\n'))
             + childBriefing + recoveryFacts,
-          ...(modelProvider ? { modelProvider } : {}), ...(model ? { model } : {}) },
+          ...(modelProvider ? { modelProvider } : {}), ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) },
         reason: 'Desktop Owner Task execution' });
       if (result.status !== 'completed' || result.result?.accepted !== true) {
         throw uiError('AGENT_SEND_REJECTED', 'Agent 未接受任务指令');
@@ -1001,6 +993,9 @@ export function createDesktopUiService({ services = {}, system = services.system
         context: projectChatContext(turn.context??result.context,turn.context?'active-request':'last-request'),
         turnUsage: projectUsage(turn.usage??result.turnUsage),
         quota:{status:'unknown',reason:'quota-not-observed'},
+        activityTimeline: projectChatActivityTimeline(turn.activityTimeline),
+        activityOmitted: Number.isSafeInteger(turn.activityOmitted) && turn.activityOmitted >= 0 ? turn.activityOmitted : 0,
+        activityState: string(turn.activityState, 40) || null,
         requestId: string(turn.requestId ?? result.lastRequestId, 200) || null,
         failureStage: ['pre-dispatch', 'execution', 'unknown'].includes(turn.failureStage ?? result.lastFailureStage)
           ? (turn.failureStage ?? result.lastFailureStage) : null,
@@ -1011,13 +1006,9 @@ export function createDesktopUiService({ services = {}, system = services.system
         errorCode: string(turn.errorCode ?? result.lastErrorCode, 100) || null,
         agentActivity: turn.agentActivity && typeof turn.agentActivity === 'object' ? {
           providerId: string(turn.agentActivity.providerId, 80), label: string(turn.agentActivity.label, 180),
-          status: ['running', 'completed', 'cancelled', 'failed'].includes(turn.agentActivity.status) ? turn.agentActivity.status : 'running'
+          status: ['running', 'completed', 'cancelled', 'failed', 'unknown'].includes(turn.agentActivity.status) ? turn.agentActivity.status : 'unknown'
         } : null,
-        toolActivity: (Array.isArray(turn.toolActivity) ? turn.toolActivity : []).slice(-32).map(item => ({
-          id: string(item.id, 200), capability:string(item.capability,180)||null,filePath:string(item.filePath,500)||null,exitCode:Number.isSafeInteger(item.exitCode)?item.exitCode:null, label: string(item.label ?? item.capability, 180),
-          status: string(item.status, 50), summary: string(item.summary, 500),
-          durationMs: Number.isFinite(item.durationMs) ? Math.max(0, item.durationMs) : null
-        })),
+        toolActivity: (Array.isArray(turn.toolActivity) ? turn.toolActivity : []).slice(-32).map(projectChatToolActivity).filter(Boolean),
         approvalId: string(turn.approvalId, 128) || null, approvalExpiresAt: scalar(turn.approvalExpiresAt),
         routing: selected(turn.routing ?? result.lastRouting, ['modelProvider', 'requestedModel', 'resolvedModel', 'toolCalling', 'taskId', 'blockingTaskId'])
       };
@@ -1061,7 +1052,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.chat.retry': async p => selected(await chat('chat.retry', { id: idParam(p) }), ['userMessageId', 'requestId']),
     'ui.chat.continue': async p => selected(await chat('chat.continue', { id: idParam(p) }), ['continued', 'requestId']),
     'ui.chat.catalog': async p => {
-      const result = await chat('chat.catalog', { refresh: p.refresh === true });
+      const result = await chat('chat.catalog', { refresh: p.refresh === true, ...(p.id ? {id:idParam(p)} : {}) });
       return {
         models: (result.models ?? []).map(item => selected(item, ['id', 'label', 'provider'])),
         modelProviders: (result.modelProviders ?? []).map(item => ({
@@ -1079,6 +1070,7 @@ export function createDesktopUiService({ services = {}, system = services.system
           models: (item.models ?? []).map(value => ({...selected(value, ['id', 'name', 'label', 'owned_by', 'toolCalling', 'streaming', 'reasoning']),capabilities:projectModelCapabilities(value.capabilities)}))
         })),
         agentProviders: (result.agentProviders ?? []).map(projectAgent),
+        sessionId:string(result.sessionId,128)||null,agentProvider: string(result.agentProvider,80)||null, modelControl:projectAgentModelControl(result.modelControl),
         modes: boundedStrings(result.modes, 10, 40), defaultModelProvider: string(result.defaultModelProvider, 80) || null,
         available: !result.error, reason: string(result.error, 300) || null
       };
@@ -1309,7 +1301,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       }
       return created.workspaceId ? runTask(created, { provider: dispatchProvider,
         requestId: requestId || undefined, modelProvider: string(p.modelProvider, 80) || undefined,
-        model: string(p.model, 160) || undefined }) : created;
+        model: string(p.model, 160) || undefined,
+        reasoningEffort:p.reasoningEffort===undefined?undefined:boundedText(p.reasoningEffort,'reasoningEffort',40).trim() }) : created;
       })();
       if (requestId) taskCreateDispatches.set(requestId, dispatch);
       let current;
@@ -1330,7 +1323,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (current.status !== 'queued') throw uiError('TASK_NOT_QUEUED', '只有待启动任务可以启动；请查看当前任务状态');
       return { task: projectTaskWithUsage(await runTask(current, { provider: string(p.agentProvider, 80) || undefined,
         requestId: string(p.requestId, 160) || undefined,
-        modelProvider:string(p.modelProvider,80)||undefined,model:string(p.model,160)||undefined })) };
+        modelProvider:string(p.modelProvider,80)||undefined,model:string(p.model,160)||undefined,
+        reasoningEffort:p.reasoningEffort===undefined?undefined:boundedText(p.reasoningEffort,'reasoningEffort',40).trim() })) };
     },
     'ui.task.pause': async p => {
       if (typeof services.platformRuntime?.pauseTask !== 'function') throw uiError('SERVICE_UNAVAILABLE', '此项能力当前不可用');

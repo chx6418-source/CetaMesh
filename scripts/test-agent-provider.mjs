@@ -181,7 +181,7 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
     async callEndpoint(endpoint, args) {
       calls.push({ endpoint, args });
       if (endpoint === 'session/create') return { sessionId: 'session-mock-1' };
-      if (endpoint === 'session/selectModel') return { selected: { provider: 'deepseek-official', model: args.request.model } };
+      if (endpoint === 'session/selectModel') return { selected: { provider: 'deepseek-official', model: args.request.model,reasoningEffort:args.request.reasoningEffort } };
       if (endpoint === 'session/prompt') return { accepted: true };
       if (endpoint === 'session/list') {
         return {
@@ -319,6 +319,9 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
     const directCalls = [];
     let failDshModelSelection = false;
     let agentTurnSent = false;
+    const nativeModelControl={status:'available',source:'dsh-session',application:'runtime-confirmed',
+      selection:{model:'deepseek-flash',modelProvider:'deepseek-official',reasoningEffort:'max'},
+      model:{options:[{value:'deepseek-flash',label:'deepseek-flash'},{value:'deepseek-r2',label:'deepseek-r2'}]},reasoning:{options:[{value:'max',label:'max'}]}};
     const chat = createChatService({
       api: {
         async callEndpoint(endpoint, args) { directCalls.push({ endpoint, args }); return { sessionId: 'dsh-direct-1' }; },
@@ -331,6 +334,7 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
         if (method === 'agent.createSession') return { sessionId: 'dsh-agent-1', provider: 'dsh', model: params.model ?? null, modelBindingError: null };
         if (method === 'agent.send') { agentTurnSent = true; return { accepted: true }; }
         if (method === 'agent.cancel') return { cancelled: true };
+        if (method === 'agent.status') return {running:false,modelControl:nativeModelControl};
         if (method === 'agent.selectModel') {
           if (failDshModelSelection) throw Object.assign(new Error('model selection denied'), { code: 'MODEL_BIND_FAILED' });
           return { selected: { model: params.model } };
@@ -383,14 +387,17 @@ async function waitFor(predicate, label, timeoutMs = 1000) {
     assert.equal(directCalls.filter((c) => c.endpoint === 'session/prompt').length, 0, 'Agent 路径不得直连 DSH prompt');
     ok('E2 Agent Provider 路径经 agent.createSession/agent.send（不直连 DSH）');
 
+    const priorDshConfig=(await exec('chat.sessions.list',{})).sessions.find(row=>row.id===sessionA.id).config;
     failDshModelSelection = true;
     await assert.rejects(() => exec('chat.config.set', { id: sessionA.id, config: { model: 'deepseek-r2' } }),
       error => error.code === 'MODEL_BIND_FAILED');
-    const invalidatedDshSession = await exec('chat.status', { id: sessionA.id });
-    assert.equal(invalidatedDshSession.dshSessionAlive, false,
-      'a failed DSH model selection cannot leave the old session projected as ready');
-    assert.deepEqual(closedAgentSessions, ['dsh-agent-1'], 'the failed DSH session is archived best-effort');
-    ok('A07 failed DSH selectModel invalidates the stale session and archives it');
+    const retainedDshSession = await exec('chat.status', { id: sessionA.id });
+    assert.equal(retainedDshSession.dshSessionAlive, true,
+      'an explicitly rejected DSH model change retains the established session');
+    assert.deepEqual((await exec('chat.sessions.list',{})).sessions.find(row=>row.id===sessionA.id).config,priorDshConfig);
+    assert.deepEqual(closedAgentSessions, [], 'configuration rejection does not archive the existing execution owner');
+    assert.ok(agentCalls.some(call=>call.method==='agent.selectModel'),'the test reaches the native selection rejection');
+    ok('A07 rejected DSH selectModel preserves the previous configuration and binding');
     failDshModelSelection = false;
 
     // E3 Normal Model 路径：不设 agentProvider 时行为与阶段 03 完全一致（直连 DSH）

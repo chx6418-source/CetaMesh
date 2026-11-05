@@ -803,6 +803,45 @@ ok('Handoff Packet retains complete Task requirements');
 }
 
 {
+  const { runtime, taskRuntime, broker, log, rev } = setup();
+  const task = taskRuntime.create({ goal:'Keep the runtime-confirmed native model',workspaceId:'ws-confirmed-model' });
+  taskRuntime.attachAgent({id:task.id,expectedRev:rev(task.id),provider:'alpha',sessionId:'alpha-old'});
+  taskRuntime.setModelConfig({id:task.id,expectedRev:rev(task.id),agentProvider:'alpha',model:'old-task-model',reasoningEffort:'low'});
+  broker.status=async()=>({running:false,model:'unconfirmed-echo',reasoningEffort:'low',modelControl:{status:'available',application:'runtime-confirmed',selection:{model:'native-current-model',reasoningEffort:'medium'}}});
+  const create=broker.createSession;
+  broker.createSession=async(...args)=>({...await create(...args),modelControl:{status:'available',application:'runtime-confirmed',selection:{model:args[1].model,reasoningEffort:args[1].reasoningEffort}}});
+  await runtime.rollover({taskId:task.id,targetProvider:'alpha',reason:'owner-request'});
+  const creation=log.find(item=>item.kind==='create');
+  assert.equal(creation.options.model,'native-current-model');assert.equal(creation.options.reasoningEffort,'medium');
+  assert.equal(taskRuntime.get({id:task.id}).task.modelConfig.model,'native-current-model');
+  ok('confirmed native selection takes precedence over stale saved Task config during same-provider Continuity');
+}
+
+{
+  const {runtime,taskRuntime,broker,log,rev}=setup();
+  const task=taskRuntime.create({goal:'Reject mismatched fresh model before stopping the owner',workspaceId:'ws-ack'});
+  taskRuntime.attachAgent({id:task.id,expectedRev:rev(task.id),provider:'alpha',sessionId:'alpha-old'});
+  const create=broker.createSession;
+  broker.createSession=async(...args)=>({...await create(...args),modelControl:{status:'available',application:'runtime-confirmed',selection:{model:'wrong-model',reasoningEffort:'medium'}}});
+  await assert.rejects(runtime.rollover({taskId:task.id,targetProvider:'alpha',model:'requested-model',reasoningEffort:'medium',reason:'owner-request'}),{code:'MODEL_ACK_MISMATCH'});
+  assert.equal(log.filter(row=>row.kind==='cancel'&&row.sessionId==='alpha-old').length,0,'cleanup may cancel the unused target, never the original owner');
+  assert.equal(taskRuntime.get({id:task.id}).task.currentAgent.sessionId,'alpha-old');
+  ok('fresh-session model ACK mismatch preserves the original Task execution owner');
+}
+
+{
+  const {runtime,taskRuntime,broker,log,rev}=setup();
+  const task=taskRuntime.create({goal:'Do not silently lose native model confirmation',workspaceId:'ws-missing-model-ack'});
+  taskRuntime.attachAgent({id:task.id,expectedRev:rev(task.id),provider:'alpha',sessionId:'alpha-old'});
+  broker.status=async()=>({running:false,modelControl:{status:'available',application:'runtime-confirmed',selection:{model:'native-current-model',reasoningEffort:'medium'}}});
+  await assert.rejects(runtime.rollover({taskId:task.id,targetProvider:'alpha',model:'requested-model',reason:'owner-request'}),{code:'MODEL_ACK_MISMATCH'});
+  assert.equal(log.filter(row=>row.kind==='cancel'&&row.sessionId==='alpha-old').length,0);
+  assert.equal(taskRuntime.get({id:task.id}).task.currentAgent.sessionId,'alpha-old');
+  assert.equal(log.find(row=>row.kind==='create').options.reasoningEffort,'medium','a model change must retain the confirmed native reasoning request');
+  ok('missing new-session model ACK retains original ownership and native reasoning');
+}
+
+{
   const bootstrapGate = { blocked: true, release: null };
   const { runtime, taskRuntime, rev } = setup({ betaBootstrapGate: bootstrapGate });
   const task = taskRuntime.create({ goal: 'Wait for recovery turn', workspaceId: 'ws-bootstrap' });

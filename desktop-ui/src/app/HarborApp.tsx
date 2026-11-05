@@ -25,8 +25,8 @@ import {DevicesPage} from './DevicesPage';
 import {StartupDiagnosticsBoundary, DiagnosticsEntry, DiagnosticsStatusEntry, FeedbackDeveloperButton} from './StartupDiagnostics';
 import {useChatAttachments} from './ChatAttachments';
 import {AttachmentSettings,HistoryAttachments} from './AttachmentSettings';
-import type {ChatContextObservation, ChatModelProvider, ModelUsage, WorkspaceSummary} from '../bridge/typed-client';
-import {ChatModelPicker, ChatUsagePopover, configurationChangeBlocked, supportedReasoning} from './ChatComposerPanels';
+import type {ChatActivityObservation, ChatContextObservation, ChatModelProvider, ModelUsage, WorkspaceSummary, AgentModelControl} from '../bridge/typed-client';
+import {ChatModelPicker, ChatUsagePopover, configurationChangeBlocked, supportedReasoning, usesAgentModelControls} from './ChatComposerPanels';
 import {ChatActivity} from './ChatActivity';
 import { ChatFailureCard, chatFailureInHistory, type ChatFailure } from './ChatFailure';
 export { chatFailureInHistory } from './ChatFailure';
@@ -325,7 +325,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const [sessionUsage, setSessionUsage] = useState<ChatMessageDto['usage']>(null);
   const [hasMoreHistory, setHasMoreHistory] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
-  const [status, setStatus] = useState<{ state: string; displayText: string; statusMessage: string | null; requestId: string | null; retryCount: number; followState: string; followError: string | null; toolActivity: ChatMessageDto['toolActivity']; agentActivity: ChatMessageDto['agentActivity']; context?:ChatContextObservation|null;turnUsage?:ModelUsage|null; error: string | null; errorCode: string | null; failureStage?: ChatMessageDto['failureStage']; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', statusMessage: null, requestId: null, retryCount: 0, followState: 'idle', followError: null, toolActivity: [], agentActivity: null, error: null, errorCode: null, approvalId: null, routing: {} });
+  const [status, setStatus] = useState<ChatActivityObservation & { state: string; displayText: string; statusMessage: string | null; requestId: string | null; retryCount: number; followState: string; followError: string | null; toolActivity: ChatMessageDto['toolActivity']; agentActivity: ChatMessageDto['agentActivity']; context?:ChatContextObservation|null;turnUsage?:ModelUsage|null; error: string | null; errorCode: string | null; failureStage?: ChatMessageDto['failureStage']; approvalId: string | null; routing: Record<string, unknown> }>({ state: 'idle', displayText: '', statusMessage: null, requestId: null, retryCount: 0, followState: 'idle', followError: null, toolActivity: [], agentActivity: null, error: null, errorCode: null, approvalId: null, routing: {} });
   const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof chatClient.catalog>> | null>(null);
   const [linkedTask, setLinkedTask] = useState<Task | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
@@ -335,7 +335,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const [hasNewMessages, setHasNewMessages] = useState(false);
   const [sendErrors, setSendErrors] = useState<Record<string, ChatFailure>>({});
   const [retryingMessageId, setRetryingMessageId] = useState<string | null>(null);
-  const [settlingReply, setSettlingReply] = useState<{ requestId: string | null; text: string } | null>(null);
+  const [settlingReply, setSettlingReply] = useState<(Pick<ChatMessageDto, 'requestId' | 'text' | 'toolActivity' | 'agentActivity'> & ChatActivityObservation & { requestId: string | null }) | null>(null);
 
   const historySessionIdRef = useRef<string | null>(null);
   const lastHistoryMessageIdRef = useRef<string | null>(null);
@@ -358,10 +358,12 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const sendingIdsRef = useRef(new Set<string>());
   const previousStreamRef = useRef({ state: 'idle', text: '' });
 
+  const catalogEpochRef=useRef(0);
   const refreshCatalog = useCallback(async () => {
-    try { setCatalog(await chatClient.catalog()); }
+    const epoch=++catalogEpochRef.current, id=activeSessionIdRef.current;
+    try { const result=await chatClient.catalog(false,id??undefined); if(epoch===catalogEpochRef.current&&id===activeSessionIdRef.current)setCatalog(result); }
     catch { /* A slow or failed directory must not block local Chat history refresh. */ }
-  }, []);
+  }, [session?.id,session?.config.agentProvider]);
 
   const load = useCallback(async () => {
     const sessionId = session?.id ?? null;
@@ -457,7 +459,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     }
   }, [session?.id, load]);
 
-  useEffect(() => { void refreshCatalog(); }, [refreshCatalog]);
+  useEffect(() => { void refreshCatalog(); }, [refreshCatalog,status.state]);
   useEffect(() => { void load(); }, [load]);
   useEffect(() => { setSettlingReply(null); }, [session?.id]);
   useEffect(() => {
@@ -565,15 +567,17 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
 
   const streaming = ['starting', 'streaming', 'recovering', 'cancelling'].includes(status.state);
   const cancellable = isChatTurnCancellable(status.state);
-  const configurationLocked = configurationChangeBlocked(status) || linkedTask?.execution?.state === 'needs-reconciliation';
+  const configurationLocked = configurationChangeBlocked(status,linkedTask?.execution?.state);
   useLayoutEffect(() => {
-    if (streaming && status.displayText && status.requestId) {
+    if (streaming && (status.displayText || status.toolActivity.length || status.agentActivity) && status.requestId) {
       setSettlingReply(current => current?.requestId === status.requestId && current.text === status.displayText
-        ? current : { requestId: status.requestId, text: status.displayText });
+        && current.toolActivity === status.toolActivity && current.agentActivity === status.agentActivity && current.activityTimeline === status.activityTimeline
+        ? current : { requestId: status.requestId, text: status.displayText, toolActivity: status.toolActivity, agentActivity: status.agentActivity,
+          activityTimeline: status.activityTimeline, activityOmitted: status.activityOmitted });
     } else if (settlingReply && !pendingReplyVisible(settlingReply, messages)) {
       setSettlingReply(null);
     }
-  }, [streaming, status.displayText, status.requestId, settlingReply, messages]);
+  }, [streaming, status.displayText, status.requestId, status.toolActivity, status.agentActivity, status.activityTimeline, status.activityOmitted, settlingReply, messages]);
   useEffect(() => {
     if (!session || streaming || !pendingReplyVisible(settlingReply, messages)) return;
     void refreshHistory();
@@ -591,11 +595,12 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     if (streaming && !status.displayText && !status.toolActivity.length && !status.agentActivity) rows.push({ id: 'preparing', kind: 'preparing' });
     else if (streaming) rows.push({
       id: 'streaming', kind: 'streaming',
-      message: { id: 'streaming', role: 'assistant', text: status.displayText || status.statusMessage || (status.agentActivity ? `${status.agentActivity.label} 正在执行…` : status.toolActivity.length ? '正在处理工具调用…' : '正在思考…'), at: null, attachments: [], toolActivity: status.toolActivity, agentActivity: status.agentActivity, error: null, cancelled: false }
+      message: { id: 'streaming', role: 'assistant', text: status.displayText || status.statusMessage || (status.agentActivity ? `${status.agentActivity.label} 正在执行…` : status.toolActivity.length ? '正在处理工具调用…' : '正在思考…'), at: null, attachments: [], toolActivity: status.toolActivity, agentActivity: status.agentActivity, activityTimeline: status.activityTimeline, activityOmitted: status.activityOmitted, error: null, cancelled: false }
     });
     if (keepSettlingReply && settlingReply) rows.push({ id: 'streaming', kind: 'streaming',
       message: { id: 'streaming', role: 'assistant', text: settlingReply.text, at: null,
-        attachments: [], toolActivity: [], agentActivity: null, error: null, cancelled: false } });
+        attachments: [], toolActivity: settlingReply.toolActivity, agentActivity: settlingReply.agentActivity,
+        activityTimeline: settlingReply.activityTimeline, activityOmitted: settlingReply.activityOmitted, activityState: 'settling', error: null, cancelled: false } });
     if (status.error && !streaming && !chatFailureInHistory(status, messages)) rows.push({ id: 'turn-error', kind: 'turn-error', failure: status });
     rows.push(...approvals.map(approval => ({ id: `approval:${approval.id}`, kind: 'approval' as const, approval })));
     return rows;
@@ -688,6 +693,10 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   }
   async function updateModel(provider: string, model: string) {
     if (!session || configurationLocked) return;
+    if(usesAgentModelControls(modelAgent)){
+      try{onSessionUpdate(await chatClient.setConfig(session.id,{model,...(provider?{modelProvider:provider}:{})}));await refreshCatalog();await load();}
+      catch(cause){setError(messageOf(cause));await refreshCatalog();}return;
+    }
     const selected = catalog?.modelProviders.find(item=>item.id===provider)?.models.find(item=>(item.id||item.name||item.modelName)===model);
     const reasoning = supportedReasoning(selected?.capabilities).includes(session.config.reasoning ?? '') ? session.config.reasoning : 'off';
     try { onSessionUpdate(await chatClient.setConfig(session.id, { ...session.config, modelProvider: provider, model, reasoning })); await load(); void refreshContext(); }
@@ -695,6 +704,11 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   }
   async function updateReasoning(reasoning:string) {
     if (!session || configurationLocked) return;
+    if(usesAgentModelControls(modelAgent)){
+      if(!modelControl?.reasoning?.options.some(option=>option.value===reasoning))return;
+      try{onSessionUpdate(await chatClient.setConfig(session.id,{reasoning}));await refreshCatalog();await load();}
+      catch(cause){setError(messageOf(cause));await refreshCatalog();}return;
+    }
     const [providerId, modelId] = JSON.parse(selectedModelKey) as [string, string];
     const provider = providers.find(item=>item.id===providerId);
     const model = provider?.models.find(item=>(item.id||item.name||item.modelName)===modelId);
@@ -719,9 +733,12 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   }
 
   if (!session) return <div className="content-page chat-empty-page"><EmptyNotice icon="chat" title="开始一段新会话" detail="会话记录保存在本机 Core 中。发送消息后，当前配置的模型与 Agent 将处理请求。" action={<Button variant="primary" icon="add" onClick={() => void onNew()}>新建会话</Button>} /></div>;
-  const providers = catalog?.modelProviders ?? [];
+  const nativeCatalog = catalog?.sessionId===session.id ? catalog : null;
+  const modelAgent = session.config.agentProvider ?? (linkedTask?.id===session.taskId ? linkedTask?.currentAgent?.provider : null) ?? nativeCatalog?.agentProvider;
+  const modelControl = nativeCatalog?.agentProvider===modelAgent ? nativeCatalog?.modelControl : null;
+  const providers = usesAgentModelControls(modelAgent) ? [] : catalog?.modelProviders ?? [];
   const selectedProvider = providers.find(provider => provider.id === session.config.modelProvider) ?? providers.find(provider => provider.configured) ?? providers[0];
-  const selectedModelKey = session.config.agentProvider === 'codex' && !session.config.modelProvider && !session.config.model ? JSON.stringify(['', '']) : JSON.stringify([session.config.modelProvider ?? selectedProvider?.id ?? '', session.config.model || '']);
+  const selectedModelKey = usesAgentModelControls(modelAgent) ? JSON.stringify([modelControl?.selection?.modelProvider??'',modelControl?.selection?.model??'']) : JSON.stringify([session.config.modelProvider ?? selectedProvider?.id ?? '', session.config.model || '']);
   return <div className="chat-workspace">
     <section className="conversation-pane">
       <div className="conversation-toolbar"><div className="conversation-heading"><h1 title={session.title || '新会话'}>{session.title || '新会话'}</h1><div className="conversation-meta"><StatusBadge value={status.state || 'idle'} /><span>更新于 {relativeLabel(session.updatedAt)}</span><span>·</span><ChatCatalogStatus catalog={catalog} /></div></div><div className="conversation-actions"><IconButton label="刷新会话" icon="refresh" onClick={() => void load()} /></div></div>
@@ -743,7 +760,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         }}>有新消息 · 跳到最新</Button> : null}
         render={renderTimelineItem}
       />
-      <div className="composer-dock"><ChatContextPanel key={session.id} task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} /><ChatComposer sessionId={session.id} busy={cancellable} configurationLocked={configurationLocked} context={status.context} turnUsage={status.turnUsage??null} sessionUsage={historySessionIdRef.current===session.id?sessionUsage:null} reasoning={session.config.reasoning} onReasoningChange={value=>void updateReasoning(value)} onConfigureModels={onConfigureModels} models={providers} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} workspaces={workspaces} workspaceId={session.config.workspaceId ?? ''} activeWorkspaceId={activeWorkspaceId} onWorkspaceChange={updateWorkspace} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
+      <div className="composer-dock"><ChatContextPanel key={session.id} task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} /><ChatComposer sessionId={session.id} busy={cancellable} configurationLocked={configurationLocked} context={status.context} turnUsage={status.turnUsage??null} sessionUsage={historySessionIdRef.current===session.id?sessionUsage:null} reasoning={session.config.reasoning} onReasoningChange={value=>void updateReasoning(value)} onConfigureModels={onConfigureModels} models={providers} modelControl={modelControl} modelAgent={modelAgent} onOpenTask={session.taskId?()=>onReviewTask(session.taskId!):undefined} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} workspaces={workspaces} workspaceId={session.config.workspaceId ?? ''} activeWorkspaceId={activeWorkspaceId} onWorkspaceChange={updateWorkspace} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
     </section>
   </div>;
 }
@@ -754,11 +771,11 @@ export function MessageBubble({ message, reference, streaming = false, sendError
   }
   const role = message.role === 'user' ? 'user' : 'assistant';
   const agentActivity = message.agentActivity;
-  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.attachmentRefs?.length ? <HistoryAttachments files={message.attachmentRefs} sessionId={reference?.sessionId??''}/> : null}<ChatActivity tools={message.toolActivity} agentActivity={agentActivity} state={activityState} taskId={taskId} onOpenTask={onOpenTask} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <ChatFailureCard failure={sendError} taskId={taskId} onOpenTask={onOpenTask} onRetry={onRetry} retrying={retrying} />}{message.error && <ChatFailureCard failure={message} taskId={taskId} onOpenTask={onOpenTask} />}{message.cancelled && <small>本轮已停止</small>}</div></article>;
+  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.attachmentRefs?.length ? <HistoryAttachments files={message.attachmentRefs} sessionId={reference?.sessionId??''}/> : null}<ChatActivity tools={message.toolActivity} agentActivity={agentActivity} timeline={message.activityTimeline} omitted={message.activityOmitted} state={message.activityState ?? activityState} taskId={message.activityTimeline?.taskId ?? taskId} onOpenTask={onOpenTask} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <ChatFailureCard failure={sendError} taskId={taskId} onOpenTask={onOpenTask} onRetry={onRetry} retrying={retrying} />}{message.error && <ChatFailureCard failure={message} taskId={taskId} onOpenTask={onOpenTask} />}{message.cancelled && <small>本轮已停止</small>}{message.interrupted && <small>本轮执行中断；保留的活动仅供核对，未确认操作不会自动重放。</small>}</div></article>;
 }
 
-export function ChatComposer({ sessionId = '', busy, models, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop, context, turnUsage, sessionUsage, reasoning, onReasoningChange=()=>{}, onConfigureModels=()=>{}, configurationLocked=false }: {
-  busy: boolean; models: ChatModelProvider[];
+export function ChatComposer({ sessionId = '', busy, models, modelControl, modelAgent, onOpenTask, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop, context, turnUsage, sessionUsage, reasoning, onReasoningChange=()=>{}, onConfigureModels=()=>{}, configurationLocked=false }: {
+  busy: boolean; models: ChatModelProvider[]; modelControl?:AgentModelControl|null; modelAgent?:string|null; onOpenTask?():void;
   selectedModelKey: string; agentProviders: Agent[]; selectedAgent: string;
   workspaces: { id: string; name: string; status: string }[]; workspaceId: string; activeWorkspaceId: string | null;
   onWorkspaceChange(workspaceId: string): void; onModelChange(value: string): void; onAgentChange(provider: string): void;
@@ -832,7 +849,7 @@ export function ChatComposer({ sessionId = '', busy, models, selectedModelKey, a
           <MotionPopup open={contextOpen} id={contextMenuId} className="composer-context-options" role="group" aria-label="工作区和 Agent 设置"><div className="composer-setting"><span>工作区</span><Select label="任务工作区" disabled={busy||configurationLocked} value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</Select></div><div className="composer-setting"><span>Agent</span><Select label="选择 Agent" disabled={busy||configurationLocked} value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const disabled = !selectableAgent(agent); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{`${normalizeSelectOptionLabel(agent.name, agent.id)}${state ? ` · ${state}` : ''}`}</option>; })}{selectedAgent && !agentProviders.some(agent => agent.id === selectedAgent) && <option value={selectedAgent} disabled>{`${normalizeSelectOptionLabel(selectedAgent)} · 不可用`}</option>}</Select></div></MotionPopup>
         </div>
       </div>
-      <div className="composer-right"><ChatModelPicker models={models} selectedModelKey={selectedModelKey} selectedAgent={selectedAgent} agentLabel={agentLabel} selectedReasoning={reasoning} disabledReason={busy || configurationLocked ? '回合正在运行或结果尚未确认，请先结束或核验后再切换。' : null} onModelChange={onModelChange} onReasoningChange={onReasoningChange} onConfigure={onConfigureModels}/><ChatUsagePopover context={context} turnUsage={turnUsage} sessionUsage={sessionUsage}/>
+      <div className="composer-right"><ChatModelPicker models={models} modelControl={modelControl} onOpenTask={onOpenTask} selectedModelKey={selectedModelKey} selectedAgent={modelAgent??selectedAgent} agentLabel={modelAgent?agentProviders.find(item=>item.id===modelAgent)?.name||modelAgent:agentLabel} selectedReasoning={reasoning} disabledReason={busy || configurationLocked ? '回合正在运行或结果尚未确认，请先结束或核验后再切换。' : null} onModelChange={onModelChange} onReasoningChange={onReasoningChange} onConfigure={onConfigureModels}/><ChatUsagePopover context={context} turnUsage={turnUsage} sessionUsage={sessionUsage}/>
         <button type="button" className="composer-submit" aria-label={busy ? '停止生成' : '发送消息'} title={busy ? '停止生成' : '发送消息'} onClick={busy ? onStop : submit} disabled={!busy && ((!draft.trim()&&!attachments.length&&!attachmentDraft.files.length)||sending||attachmentDraft.pending||Boolean(workspaceWarning)||Boolean(agentWarning))}>{busy ? <Icon name="square" size={17} /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" /></svg>}</button>
       </div>
     </div>
@@ -862,7 +879,7 @@ export function managedWorkspacePreflight(provider: string, workspaceId: string,
 }
 
 export function agentModelSelection(config: { agentProvider?: string | null; modelProvider?: string | null; model?: string }, provider: string) {
-  return provider === 'codex' || config.agentProvider === 'codex' ? { modelProvider: null, model: '' } : { modelProvider: config.modelProvider ?? null, model: config.model ?? '' };
+  return usesAgentModelControls(provider) || usesAgentModelControls(config.agentProvider) ? { modelProvider: null, model: '', reasoning: '' } : { modelProvider: config.modelProvider ?? null, model: config.model ?? '' };
 }
 
 export function workspaceFailureReviewTaskId(routing: Record<string, unknown>, fallback: string): string {

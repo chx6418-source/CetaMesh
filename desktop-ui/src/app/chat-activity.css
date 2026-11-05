@@ -42,4 +42,9 @@
 .chat-tool-activity .tool-completed-list { min-width: 0; max-height: 280px; overflow-y: auto; padding: 0 var(--spacing-2) var(--spacing-2); border-top: 1px solid var(--border); }
 .chat-activity-pagination { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: var(--spacing-2); font-size: 11px; color: var(--text-muted); margin: var(--spacing-2) 0; }
 .chat-activity-pagination .cm-button { min-width: 0; }
+.chat-activity-timeline { margin: var(--spacing-3) 0; min-width: 0; font-size: 12px; overflow-wrap: anywhere; }
+.chat-activity-timeline ol { margin: var(--spacing-2) 0; padding-left: var(--spacing-4); }
+.chat-activity-timeline li { padding: var(--spacing-2) 0; border-bottom: 1px solid var(--border); }
+.chat-activity-timeline details { margin-top: var(--spacing-1); color: var(--text-muted); font-size: 11px; }
+.chat-activity-timeline summary { cursor: pointer; }
 @media (prefers-reduced-motion: reduce) { .chat-activity-summary > svg:last-child { transition: none; } }

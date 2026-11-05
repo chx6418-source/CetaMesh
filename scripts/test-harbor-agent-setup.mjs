@@ -74,7 +74,10 @@ try {
   const ui = await vite.ssrLoadModule('/src/app/HarborApp.tsx');
   assert.equal(ui.workspaceFailureReviewTaskId({blockingTaskId:'task-owner'},'task-new'),'task-owner');
   assert.equal(ui.workspaceFailureReviewTaskId({},'task-new'),'task-new');
-  assert.deepEqual(ui.agentModelSelection({modelProvider:'deepseek-official',model:'deepseek-flash'},'codex'),{modelProvider:null,model:''});
+  for(const provider of ['codex','opencode','qwen','gemini','claude','dsh']){
+    assert.deepEqual(ui.agentModelSelection({modelProvider:'deepseek-official',model:'deepseek-flash'},provider),{modelProvider:null,model:'',reasoning:''},'ordinary model settings never become native Agent authorization');
+    assert.deepEqual(ui.agentModelSelection({agentProvider:provider,modelProvider:'native',model:'native-only'},'none'),{modelProvider:null,model:'',reasoning:''},'leaving a native executor clears its provider-owned selection');
+  }
   const agentsMarkup = renderToStaticMarkup(React.createElement(ui.AgentsPage));
   assert.doesNotMatch(agentsMarkup, /聊天可用/); assert.match(agentsMarkup, /可用 Agent/);
   assert.equal(typeof ui.CodexSetupDiagnostic, 'function');

@@ -319,6 +319,12 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   let inspectedIdentity = JSON.stringify([cli.executable(), inspection.version]);
   const sessions = new Map();
   const providerConfig = { model: null, reasoningEffort: null };
+  // Exec has no session configuration ACK. These values are requests for a
+  // future process invocation; argv observation does not prove model access.
+  const modelControl = session => ({status:'unknown',source:'codex-exec',runtimeVersion:inspection.version,
+    application:'next-turn',selection:null,model:null,reasoning:null,
+    requested:{model:session.model,reasoningEffort:session.reasoningEffort,modelProvider:session.modelConfiguration?.modelProvider??null},
+    lastRequest:session.lastModelRequest?{...session.lastModelRequest}:null});
 
   function refreshInspection(force = false) {
     if (!force && Date.now() - lastProbeAt < HEALTH_TTL_MS) return;
@@ -754,6 +760,8 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
             authorizedEnvKeys,
             onStdout: (chunk) => parseOutput(session, run, chunk)
           });
+          session.lastModelRequest={source:'cli-argv',turnId,model:session.model,reasoningEffort:session.reasoningEffort,
+            modelProvider:session.modelConfiguration?.modelProvider??null};
         } catch (error) {
           lifecycle.unknown({sessionId:session.id,generation:run.generation,runId:run.lifecycleRunId});
           session.activeRun = null;
@@ -796,7 +804,15 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           return { cancelled: true, sessionId, approvalId, state: 'cancelled' };
         }
         if (!session.activeRun?.handle) return { cancelled: false, reason: 'not-running', sessionId };
-        return session.activeRun.handle.cancel();
+        const run = session.activeRun;
+        const requested = run.handle.cancel();
+        // The owned supervisor bounds this wait. A request ACK does not prove
+        // exit; the existing finalizer must first persist its exact stop receipt.
+        if (run.finalized) await run.finalized;
+        const stopped = session.activeRun !== run
+          && session.lastProcessProof?.runId === run.lifecycleRunId;
+        return { ...requested, sessionId, cancelRequested: true, cancelled: stopped,
+          state: stopped ? session.lastRunStatus : 'unknown' };
       },
 
       async status({ sessionId } = {}) {
@@ -807,6 +823,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           approvalId: session.waitingForApproval, lastRunStatus: session.lastRunStatus,
           errorCode: session.lastError?.code ?? null,
           readiness:session.readiness??null,
+          modelControl:modelControl(session),
           snapshotRead: session.lastError?.snapshotRead ? { ...session.lastError.snapshotRead } : null
         };
       },
@@ -860,9 +877,14 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
 
       async selectModel({ sessionId, model, reasoningEffort } = {}) {
         const session = requireSession(sessionId);
+        if(session.activeRun || session.waitingForApproval)throw agentProviderError('TURN_BUSY','Codex turn must finish before changing its next-turn model request');
+        for(const [name,value] of Object.entries({model,reasoningEffort})){
+          if(value!==undefined&&value!==null&&(typeof value!=='string'||value.length>256||/[\x00-\x1f\x7f]/.test(value)))
+            throw agentProviderError('INVALID_PARAMS',`Invalid Codex ${name} request`);
+        }
         if (model !== undefined) session.model = String(model || '') || null;
         if (reasoningEffort !== undefined) session.reasoningEffort = String(reasoningEffort || '') || null;
-        return { sessionId, provider: 'codex', selected: { model: session.model, reasoningEffort: session.reasoningEffort } };
+        return { sessionId, provider: 'codex', selected: true,confirmed:false,modelControl:modelControl(session) };
       },
 
       async health({ refresh = false } = {}) {
