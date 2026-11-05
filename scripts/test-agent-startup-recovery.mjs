@@ -29,7 +29,7 @@ async function fixture(name) {
   const state = { launches: 0, prompts: 0, validations: 0, validationError: null, failValidationAt: null, launchError: null };
   const descriptor = { id: 'fixture-acp', label: 'Controlled ACP', protocolVersion: 1, verifiedRuntime: true,
     security: { mode: 'native', verified: true, nativeSandboxSupported: true, nativeApprovalSupported: true } };
-  const acp = createAcpAgentProvider({ descriptor, stagingRoot: path.join(root, 'stages'),
+  const providerOptions = { descriptor, stagingRoot: path.join(root, 'stages'),
     resolveTaskWorkspace: async ({ taskId }) => ({ task: tasks.runtime.get({ id: taskId }).task, workspace }),
     validateRuntime: async () => { state.validations++; if (state.validationError
       && (!state.failValidationAt || state.validations === state.failValidationAt)) throw state.validationError; },
@@ -45,20 +45,25 @@ async function fixture(name) {
         if (frame.method === 'session/prompt') { state.prompts++; reply(frame.id, { stopReason: 'end_turn' }); }
       } });
       return { readable, writable, done: stopped, close: async () => done({ processTreeExitConfirmed: true }) };
-    } });
-  const provider = { ...acp, health: async () => ({ available: true, authenticated: true, sessionCapable: true }) };
-  const agents = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [provider] }), resolveWorkspaceIdentity: () => workspace.root });
-  const security = agents.describeExecutionSecurity(provider.id, workspace.id);
-  agents.authorizeExecution(provider.id, workspace.id, security.fingerprint);
+    } };
+  let acp, provider, agents;
+  function startAgents() {
+    acp = createAcpAgentProvider(providerOptions);
+    provider = { ...acp, health: async () => ({ available: true, authenticated: true, sessionCapable: true }) };
+    agents = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [provider] }), resolveWorkspaceIdentity: () => workspace.root });
+    const security = agents.describeExecutionSecurity(provider.id, workspace.id);
+    agents.authorizeExecution(provider.id, workspace.id, security.fingerprint);
+  }
+  startAgents();
   const build = () => createCapabilityService({ stateDir, workspaceService: workspaces, taskRuntime: tasks.runtime, agentBroker: agents });
   let capabilities = build();
   capabilities.grantTask(task.id, { capabilities: ['filesystem.read'], workspaceIds: [workspace.id] });
   const read = () => tasks.runtime.get({ id: task.id }).task;
   const run = requestId => capabilities.broker.execute({ capability: 'agent.run', requestId, taskId: task.id,
     workspaceId: workspace.id, actor: OWNER_ACTOR, approved: true, input: { provider: provider.id, content: 'Read isolated input' } });
-  return { state, stateDir, project, task, workspace, agents, provider, read, run,
+  return { state, stateDir, project, task, workspace, get agents() { return agents; }, get provider() { return provider; }, read, run,
     fences: () => capabilities.taskReviewState({ taskId: task.id, workspaceId: workspace.id }).workspaceFences,
-    async restart() { await capabilities.close(); tasks = createTaskService({ stateDir }); capabilities = build(); },
+    async restart() { await capabilities.close(); await acp.shutdown(); tasks = createTaskService({ stateDir }); startAgents(); capabilities = build(); },
     async close() { await capabilities.close(); await acp.shutdown(); } };
 }
 
@@ -134,6 +139,44 @@ test('F2 the same error code after launch retains ownership and rejects redispat
     await assert.rejects(f.run('unsafe-retry'), { code: 'TASK_RECOVERY_REVIEW_REQUIRED' });
     assert.equal(f.state.launches, 1); assert.equal(f.state.prompts, 0);
   } finally { await f.close(); }
+});
+
+test('F3 durable preflight failure remains retryable after reconstruction but never replays its request', async () => {
+  const f = await fixture('restart');
+  try {
+    const before = f.read(); f.state.validationError = fault('AGENT_RUNTIME_CHANGED');
+    await assert.rejects(f.run('original-request'), { code: 'AGENT_RUNTIME_CHANGED' });
+    const taskBytes = fs.readFileSync(path.join(f.stateDir, 'tasks', 'tasks.json'));
+    await f.restart(); f.state.validationError = null;
+    // Loading legacy-compatible optional fields adds defaults to the projection,
+    // without changing persisted Task data or any established evidence.
+    for (const key of Object.keys(before)) assert.deepEqual(f.read()[key], before[key], key);
+    assert.deepEqual(fs.readFileSync(path.join(f.stateDir, 'tasks', 'tasks.json')), taskBytes);
+    assert.deepEqual(f.fences(), []);
+    await assert.rejects(f.run('original-request'), { code: 'REQUEST_RECOVERY_REQUIRED' });
+    assert.equal(f.state.launches, 0);
+    const result = await f.run('new-owner-command');
+    assert.equal(result.result.taskId, f.task.id); assert.equal(f.state.prompts, 1);
+  } finally { await f.close(); }
+});
+
+test('F3 failed fence-release persistence retains ownership across reconstruction', async () => {
+  const f = await fixture('release-write-failure');
+  const rename = fs.renameSync; let writes = 0;
+  try {
+    f.state.validationError = fault('AGENT_RUNTIME_CHANGED');
+    fs.renameSync = (from, to) => {
+      if (path.resolve(String(to)) === path.join(f.stateDir, 'capability', 'requests.json') && ++writes === 3) throw fault('EIO');
+      return rename(from, to);
+    };
+    try { await assert.rejects(f.run('failed-release'), { code: 'AGENT_RUNTIME_CHANGED' }); }
+    finally { fs.renameSync = rename; }
+    assert.ok(writes >= 3); assert.equal(f.fences().length, 1); assert.equal(f.read().status, 'blocked');
+    await f.restart();
+    assert.equal(f.fences().length, 1); assert.equal(f.read().status, 'blocked');
+    await assert.rejects(f.run('must-not-guess'), { code: 'TASK_RECOVERY_REVIEW_REQUIRED' });
+    assert.equal(f.state.launches, 0);
+  } finally { fs.renameSync = rename; await f.close(); }
 });
 
 try {
