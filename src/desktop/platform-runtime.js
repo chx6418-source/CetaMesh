@@ -18,7 +18,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     }
   }
 
-  async function stopTask(taskRow, { cancelMissingManagedSession = false } = {}) {
+  async function stopTask(taskRow, { cancelMissingManagedSession = false, closeNativeSession = false } = {}) {
     // Repeat the same observation after awaited operation cancellation; a
     // preflight does not authorize stopping an assignment that changed later.
     assertTaskControlAvailable(taskRow);
@@ -28,6 +28,26 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       if (taskRow.currentAgent.provider === 'codex'
         && !(await inspectTaskSession(agentBroker, taskRow)).stopped) {
         throw capabilityError('SESSION_EXECUTION_UNCONFIRMED', '旧 Codex 执行尚未确认停止，请保留任务并核查恢复凭据');
+      }
+      if (closeNativeSession && !['cetamesh', 'dsh', 'codex'].includes(taskRow.currentAgent.provider)) {
+        // Native cancel is a request ACK, not an owned-process exit receipt.
+        // Existing Session cleanup cannot depend on current launch readiness:
+        // changed configuration may report unsupported while its process lives.
+        // Managed/DSH keep their existing cancellation contract; Codex has the
+        // durable stop proof above. Every other assigned external Session closes.
+        // Keep Task/Workspace ownership until the existing adapter confirms
+        // process close and approval/staging cleanup. A failed close is retryable.
+        const closed = await agentBroker.closeSession(taskRow.currentAgent);
+        if (closed?.closed !== true || closed.sessionId !== taskRow.currentAgent.sessionId) {
+          throw capabilityError('SESSION_EXECUTION_UNCONFIRMED', '原生 Agent 退出尚未确认，请保留任务和工作区占用后重试取消');
+        }
+        const latest = taskRuntime.get({ id: taskRow.id }).task;
+        assertTaskControlAvailable(latest);
+        if (latest.workspaceId !== taskRow.workspaceId
+          || latest.currentAgent?.provider !== taskRow.currentAgent.provider
+          || latest.currentAgent?.sessionId !== taskRow.currentAgent.sessionId) {
+          throw capabilityError('TASK_CONFLICT', '原生 Agent 关闭期间任务执行归属已变更');
+        }
       }
     } catch (error) {
       // Managed Sessions belong to this Core. A missing external Session or
@@ -52,6 +72,20 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     }
   }
 
+  function stoppedAssignment(taskRow) {
+    // Keep the final check and revision-checked mutation in one synchronous turn.
+    // A close receipt for an older Session/run cannot authorize its replacement.
+    const latest = taskRuntime.get({ id: taskRow.id }).task;
+    assertTaskControlAvailable(latest);
+    if (latest.workspaceId !== taskRow.workspaceId
+      || latest.currentAgent?.provider !== taskRow.currentAgent?.provider
+      || latest.currentAgent?.sessionId !== taskRow.currentAgent?.sessionId
+      || latest.executionObservation?.runId !== taskRow.executionObservation?.runId) {
+      throw capabilityError('TASK_CONFLICT', '执行归属已变更，请重新核对当前任务');
+    }
+    return latest;
+  }
+
   async function confirmStoppedReadChild(taskRow) {
     if (!taskRow.parentTaskId || taskRow.childContract?.mode !== 'read-only') return;
     if (taskRow.currentAgent) {
@@ -64,7 +98,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         if (!(taskRow.currentAgent.provider === 'cetamesh' && error?.code === 'SESSION_NOT_FOUND')) throw error;
       }
     }
-    let current = (await taskRuntime.get({ id: taskRow.id })).task;
+    let current = stoppedAssignment(taskRow);
     for (const attempt of current.attempts ?? []) {
       if (!['started', 'accepted'].includes(attempt.state)) continue;
       current = taskRuntime.settleAttempt({ id: current.id, expectedRev: current.rev,
@@ -104,7 +138,10 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     assertTaskControlAvailable(first);
     const children = !first.parentTaskId ? (await taskRuntime.listChildren({ parentTaskId: first.id })).children : [];
     if (children.some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
-      if (!['blocked', 'completed', 'failed', 'cancelled'].includes(first.status)) {
+      // Paused already prevents the parent writer from dispatching. Its domain
+      // state cannot transition to blocked; final Task.cancel still rejects any
+      // child created during this awaited cancellation.
+      if (!['blocked', 'paused', 'completed', 'failed', 'cancelled'].includes(first.status)) {
         await taskRuntime.block({ id: first.id, expectedRev: first.rev, reason: 'Owner cancelling child Tasks' });
       }
       for (const child of children) {
@@ -112,18 +149,18 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         const childOperations = await capabilityService?.cancelTaskOperations?.({ taskId: child.id });
         if (childOperations?.some(row => row.status === 'unknown')) throw capabilityError('INVOKE_CANCEL_UNCONFIRMED', 'Child effect requires review before parent cancellation');
         const currentChild = (await taskRuntime.get({ id: child.id })).task;
-        await stopTask(currentChild, { cancelMissingManagedSession: true });
+        await stopTask(currentChild, { cancelMissingManagedSession: true, closeNativeSession: true });
         await confirmStoppedReadChild(currentChild);
-        const settledChild = (await taskRuntime.get({ id: child.id })).task;
+        const settledChild = stoppedAssignment(currentChild);
         await taskRuntime.cancel({ id: settledChild.id, expectedRev: settledChild.rev, reason: 'Parent cancelled by Owner' });
       }
     }
     const stoppedOperations = await capabilityService?.cancelTaskOperations?.({ taskId: id });
     if (stoppedOperations?.some(row => row.status === 'unknown')) throw capabilityError('INVOKE_CANCEL_UNCONFIRMED', '操作结果未知，需核验后取消任务');
     const current = (await taskRuntime.get({ id })).task;
-    await stopTask(current, { cancelMissingManagedSession: true });
+    await stopTask(current, { cancelMissingManagedSession: true, closeNativeSession: true });
     await confirmStoppedReadChild(current);
-    const settled = (await taskRuntime.get({ id: current.id })).task;
+    const settled = stoppedAssignment(current);
     return taskRuntime.cancel({ id: settled.id, expectedRev: settled.rev, reason });
   }
 
