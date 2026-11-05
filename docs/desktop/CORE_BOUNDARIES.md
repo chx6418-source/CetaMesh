@@ -62,6 +62,17 @@ a process termination receipt. Failed cancellation retains evidence and the
 Workspace fence. A missing Managed Session can be resolved under the existing
 Core-local policy; an unknown external transport cannot.
 
+Known Handoff, unfinished Owner recovery and retained startup ownership are
+checked before Task mutation or operation cancellation. The same application
+predicate is checked again after awaited cancellation; an earlier observation
+does not authorize a later stop. A rejected control action must not manufacture
+a blocked Task or interfere with the operation that caused its refusal.
+
+One-shot approvals and finite grants share the existing approval store but are
+distinct record kinds. `approvals.list()` exposes actionable one-shot decisions;
+`listGrants()` exposes bounded authority separately. A pending grant activates
+only when its source approval is consumed and never becomes a second decision.
+
 ## Workspace proof contract
 
 `WorkspaceService.collectContentProof(id, { expectedRoot, relevantFiles })` is

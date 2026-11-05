@@ -27,6 +27,15 @@
 
 ## Workflow
 
+Build the minimum useful feature loop through the existing Core interfaces in an
+isolated environment first. Then validate Core integration, authorization,
+concurrency/recovery and release safety as separate tested commits (F0–F4; see
+CONTRIBUTING.md). New controls must preserve the working loop. For each refusal,
+identify the protected risk, state owner and evidence-based recovery path;
+duplicate checks or stricter behavior are not proof of correctness. Material
+permission expansion requires separate Owner approval. Unknown effects remain
+non-replayable, and existing user data and execution evidence must be retained.
+
 For protocol-sensitive work, read docs/protocol/README.md and the affected CP contract.
 Keep the producer/consumer conformance matrix, schemas, positive/negative fixtures and
 registered tests in sync. CP documents are PROPOSED: they do not replace current wire,

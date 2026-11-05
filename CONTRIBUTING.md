@@ -56,6 +56,46 @@ A pull request should state what changed, why it changed, relevant issue/task re
 
 Do not mark a device/native check as passed when it was not actually executed. Use clear status labels such as PASS, NOT_RUN_ENVIRONMENT, PENDING_NATIVE_VERIFICATION, or BLOCKED.
 
+## Functional development and security review
+
+First prove the minimum useful loop in an isolated environment using the existing
+Core interfaces. For an Agent, connect, create a Session, receive a Task, execute
+a real controlled tool, observe its result and finish correctly. Existing
+production authorization still applies at every stage. A deterministic model
+driver with a real Core/tool is useful source evidence and must be identified as
+such; it does not replace real provider or native acceptance.
+
+Keep these stages in separate tested commits:
+
+| Stage | Required evidence |
+| --- | --- |
+| F0 — Useful function | Minimum loop returns a verified result through existing Core interfaces |
+| F1 — Core integration | The ordinary application entry reaches the same loop and preserves authoritative identities |
+| F2 — Authorization | Exact approved scope works; changed identity, scope, revocation and unapproved actions are refused |
+| F3 — Concurrency and recovery | Both safe refusal and recovery after verified risk resolution work, with history and effects retained |
+| F4 — Release safety | Required real provider/native/package checks pass; holds and environment gaps remain explicit until resolved |
+
+If a stage breaks a previous working loop, locate that stage's first incorrect
+transition before adding compensating controls. Every new or changed check needs
+a concrete protected risk, one state owner, a reason it is not already covered,
+and a usable recovery path. Capability Broker is the primary authorization
+authority; Session lifecycle, Workspace file facts and Handoff ownership remain
+their respective domains' responsibilities. Preflight observations and fresh
+checks after asynchronous work protect different moments and may both be needed.
+
+Reuse existing finite grants for their exact approved scope. Broadening native,
+plugin or external access requires separate permission review and Owner approval.
+Do not infer stop or success from a lost Session, a blocked Task, a missing
+journal or an Owner's text alone. Unknown effects cannot be automatically retried
+or cleared to improve apparent availability.
+
+Compare success counts and sample size, extra Owner actions, approval decisions,
+status transitions, elapsed time and scoped complexity on the same scenarios.
+Keep real product results separate from deterministic fixtures and record missing
+measurements. Reduced line count alone is not reliability evidence. Register new
+Desktop suites in the root test runner; `test-core-functional-loop` is the
+production-Core baseline for Agent reads and Task control recovery.
+
 ## Architecture rules
 
 Preserve the current dependency direction: Feature -> Runtime -> Domain interface -> Provider/Repository -> Native/Infrastructure.
