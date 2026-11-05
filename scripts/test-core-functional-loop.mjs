@@ -110,6 +110,28 @@ try {
     assert.equal(f.sample.approvalDecisions, 0, 'existing read authorization must not create another approval');
     console.log('PASS F0 Agent Session -> Task -> actual Broker file read -> result -> reviewed completion');
   } finally { await f.close(); }
+
+  const integrated = await fixture('F1-desktop-pause-resume');
+  try {
+    const created = await integrated.ui('ui.task.create', { goal: 'Inspect proof.txt through the normal Task entry.',
+      workspaceId: integrated.workspace.id, agentProvider: 'cetamesh', modelProvider: 'functional-loop', model: 'fixture', requestId: 'integrated-create' });
+    const id = created.task.id, settled = await integrated.finished(id);
+    const checkpoint = integrated.rt.setCheckpoint({ id, expectedRev: settled.rev,
+      summary: 'The first actual file read returned.', nextAction: 'Read proof.txt again for the next explicit turn.' });
+    const priorHistory = structuredClone(checkpoint.agentHistory);
+    const paused = await integrated.ui('ui.task.pause', { id, expectedRev: checkpoint.rev });
+    assert.equal(paused.task.status, 'paused');
+    const resumed = await integrated.ui('ui.task.resume', { id, expectedRev: paused.task.rev, requestId: 'integrated-resume' });
+    assert.equal(resumed.task.id, id);
+    const ended = await integrated.complete(id);
+    assert.equal(ended.id, id);
+    const final = integrated.read(id);
+    assert.deepEqual(final.agentHistory.map(row => [row.provider, row.sessionId]), priorHistory.map(row => [row.provider, row.sessionId]));
+    assert.deepEqual(final.checkpoint, checkpoint.checkpoint);
+    assert.equal(final.executionEvidence.filter(row => row.capability === 'filesystem.read' && row.status === 'completed').length, 2);
+    assert.equal(integrated.sample.approvalDecisions, 0);
+    console.log('PASS F1 Desktop create -> actual read -> pause -> same-Task resume -> second actual read -> complete');
+  } finally { await integrated.close(); }
 } finally {
   if (process.env.CETAMESH_FUNCTIONAL_METRICS_FILE) fs.writeFileSync(process.env.CETAMESH_FUNCTIONAL_METRICS_FILE,
     JSON.stringify({ samples, externalModelCalls: 0, nativeAcceptance: false }, null, 2) + '\n');
