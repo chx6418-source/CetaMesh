@@ -1,7 +1,6 @@
 // Actual maintained Harbor components. These server-rendered checks supplement
 // browser/native interaction suites; they do not claim Core execution or E2E.
 import assert from 'node:assert/strict';
-import fs from 'node:fs';
 import path from 'node:path';
 import {createRequire} from 'node:module';
 import {pathToFileURL} from 'node:url';
@@ -16,13 +15,6 @@ const base={id:'task-owned',title:'Preserve all review safeguards',goal:'Review 
 const callbacks={onHandoff(){},onAction(){},onStart(){},onReconcile(){},onReview(){},onCreateChild(){},onComplete(){},onVerifyChild(){},onOpenChild(){}};
 const render=(component,props)=>renderToStaticMarkup(React.createElement(component,props));
 try{
- const ts=require('typescript'),source=fs.readFileSync(path.join(uiRoot,'src/app/WorkPage.tsx'),'utf8'),ast=ts.createSourceFile('WorkPage.tsx',source,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
- let inspectCode;function visit(node,owner=''){if(ts.isFunctionDeclaration(node)&&node.name?.text==='inspect'&&owner==='TaskRecoveryEvidence')inspectCode=node.getText(ast);if(ts.isFunctionDeclaration(node))owner=node.name?.text??owner;ts.forEachChild(node,child=>visit(child,owner));}visit(ast);assert.ok(inspectCode);
- let resolveInspection;const delayed=new Promise(resolve=>{resolveInspection=resolve;});let applied=0,errors=0;
- const inspectionEnv={identity:{current:'task-owned:8'},task:{id:'task-owned',rev:8},taskClient:{inspectRecovery:()=>delayed},setBusy(){},setInspection(){applied++;},setError(value){if(value)errors++;},onInspection(){},messageOf:error=>error.message};
- const inspect=new Function('env','with(env){return ('+inspectCode+')}')(inspectionEnv),pendingInspection=inspect();inspectionEnv.identity.current='task-owned:9';resolveInspection({taskRev:8,operations:[]});await pendingInspection;
- assert.equal(applied,0,'a late recovery inspection for an earlier Task revision cannot be shown as current proof');assert.equal(errors,0,'late revision inspection cannot overwrite current error state');
- console.log('PASS late read-only recovery proof is fenced by current Task revision');
  const ui=await vite.ssrLoadModule('/src/app/HarborApp.tsx');
  const createForm=render(ui.TaskCreateForm,{workspaces:[{id:'ws',name:'Synthetic project'}],activeWorkspaceId:'ws',providers:[
   {id:'codex',name:'Codex',eligible:true,reason:null},
@@ -73,7 +65,8 @@ try{
  const completed=render(ui.TaskDetails,{task:{...review,status:'completed',result:{summary:'VERIFIED_DELIVERY'}},providers:[],...callbacks});
  assert.ok(completed.indexOf('VERIFIED_DELIVERY')<completed.indexOf('任务累计用量'));assert.doesNotMatch(completed,/验收说明/);
  const recovery=render(ui.TaskDetails,{task:{...base,status:'blocked',currentAgent:null,progress:{percent:null,note:'needs-reconciliation: interrupted uncertain effect'}},providers:[{id:'codex',name:'Codex',eligible:true}],...callbacks});
- assert.match(recovery,/人工核对后恢复/);assert.match(recovery,/disabled=""[^>]*>确认核对并执行新指令/);
+ assert.match(recovery,/自动恢复/);assert.doesNotMatch(recovery,/核对结果|确认核对并|已人工核对/);
+ assert.match(recovery,/disabled=""[^>]*>继续任务/,'a normal continuation waits for current Core proof');
  assert.match(recovery,/不会重放中断前的工具调用/);
- console.log('PASS organized Task detail keeps result acceptance, explicit recovery and verified-result precedence safeguards');
+ console.log('PASS organized Task detail keeps result acceptance, automatic recovery and verified-result precedence safeguards');
 }finally{await vite.close();delete globalThis.window;}

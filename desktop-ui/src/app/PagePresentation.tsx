@@ -34,6 +34,11 @@ export function availabilityReasonLabel(reason: string | null) {
   if (!reason) return '';
   const labels: Record<string, string> = {
     check_failed: '连接检查失败，请检查连接后重试。',
+    needs_auth: 'Codex CLI 尚未登录，请在本机终端运行 codex login，完成后刷新连接。',
+    codex_auth_required: 'Codex CLI 尚未登录，请在本机终端运行 codex login，完成后刷新连接。',
+    claude_native_login_required: 'Claude Code 尚未登录，请在本机终端运行 claude auth login，完成后刷新连接。',
+    claude_native_auth_unverified: '无法验证 Claude Code 的本机登录状态，请核对 CLI 路径、版本和登录后重新检查连接。',
+    opencode_native_policy_override_unsupported: 'OpenCode 2.1.4 的原生账号配置可覆盖本地隔离策略并加载账号侧 MCP，当前不支持此账号接入。可使用现有隔离 API 配置，模型与凭据需单独填写。',
     provider_login_execution_unverified: '账号模式尚未通过原生执行验证；可切回 API 配置。',
     windows_auth_contract_unverified: '官方登录需先完成 Windows 原生验证。',
     agent_model_required: '尚未选择模型，请在连接设置中填写模型。',

@@ -24,9 +24,9 @@ try {
     import './src/theme/tokens.css';import './src/theme/global.css';import './src/app/harbor.css';import './src/app/chat-tasks.css';
     const wait=ms=>new Promise(resolve=>setTimeout(resolve,ms));
     const approval={id:'approval-a',taskId:'task-a',title:'Synthetic pending approval',summary:'Test only',capability:'filesystem.write',risk:'high',status:'pending',createdAt:1,expiresAt:null};
-    const state={status:'pending',holdNext:false,held:null,slowApprovalReads:2,slowReleases:[],failNextApprovalRead:false,failNextDecision:false,decisions:[],calls:[],holdNextOverview:false,holdAllOverviews:false,overviewReleases:[],holdNextGet:false,getRelease:null,holdNextCreate:false,createRelease:null};
+    const state={status:'pending',holdNext:false,held:null,slowApprovalReads:2,slowReleases:[],failNextApprovalRead:false,failNextDecision:false,decisions:[],calls:[],holdNextOverview:false,holdAllOverviews:false,overviewReleases:[],holdNextGet:false,getRelease:null,holdNextCreate:false,createRelease:null,recoveryReady:false,holdNextRelease:false,releaseReply:null,holdNextResume:false,resumeReply:null};
     const task=(id,workspaceId,title)=>({id,rev:1,title,goal:title,status:'queued',currentPhase:'',progress:{percent:0,note:''},workspaceId,agent:null,currentAgent:null,parentTaskId:null,verification:null,attemptCount:0,childOutputKind:null,attempts:[],children:[],createdAt:1,updatedAt:1,checkpoint:null,result:null,artifacts:[],executionEvidence:[],agentHistory:[],failure:null});
-    const recovery={...task('recover','a','Recovery parent'),rev:3,status:'blocked',currentAgent:{provider:'none',sessionId:'fixture'},progress:{percent:null,note:'needs-reconciliation: synthetic uncertain effect'},execution:{state:'needs-reconciliation',hadToolActivity:true,hasEvidence:true},recovery:{operations:[{operationId:'test-operation',capability:'filesystem.write',status:'UNKNOWN',executorId:'none',blocker:'needs-reconciliation'}],omitted:0},children:[{id:'child',title:'Child result',status:'completed',agent:'none',supersedesChildId:null,verification:'NEEDS_REVIEW',attemptCount:1,usage:null}]};
+    const recovery={...task('recover','a','Recovery parent'),rev:3,status:'blocked',currentAgent:{provider:'codex',sessionId:'fixture'},agentHistory:[{provider:'codex',sessionId:'fixture',attachedAt:1,detachedAt:null,note:''}],progress:{percent:null,note:'needs-reconciliation: synthetic uncertain effect'},execution:{state:'needs-reconciliation',hadToolActivity:true,hasEvidence:true},recovery:{operations:[{operationId:'test-operation',capability:'filesystem.write',status:'UNKNOWN',executorId:'codex',blocker:'needs-reconciliation'}],omitted:0},children:[{id:'child',title:'Child result',status:'completed',agent:'none',supersedesChildId:null,verification:'NEEDS_REVIEW',attemptCount:1,usage:null}]};
     const childTask={...task('child','a','Child result'),parentTaskId:'recover',status:'completed'};
     state.tasks=[recovery,...Array.from({length:55},(_,i)=>task('a-'+i,'a','Alpha task '+i)),task('b-1','b','Beta one'),task('b-2','b','Beta two')];
     window.confirm=message=>{if(!message.startsWith('取消任务'))throw Error('Unexpected confirmation');return true;};
@@ -56,10 +56,17 @@ try {
       }else if(request.method==='ui.task.cancel'){
         const row=state.tasks.find(item=>item.id===request.params.id);if(!row||row.rev!==request.params.expectedRev)throw Error('Synthetic revision mismatch');row.status='cancelled';row.rev++;result={task:structuredClone(row)};
       }else if(request.method==='ui.task.recovery.inspect'){
-        result={taskId:'recover',taskRev:3,operations:[{operationId:'test-operation',capability:'filesystem.write',status:'UNKNOWN',verified:false,code:'RECONCILIATION_REQUIRED'}],omitted:0};
+        const row=state.tasks.find(item=>item.id===request.params.id),ready=state.recoveryReady;
+        result={taskId:row.id,taskRev:row.rev,operations:[{operationId:'test-operation',capability:'filesystem.write',status:ready?'SUCCEEDED':'UNKNOWN',verified:ready,code:ready?null:'RECONCILIATION_REQUIRED'}],omitted:0,reviewToken:null,expiresAt:null,session:{state:'stopped',stopped:true,provider:'none',sessionId:'fixture',code:null},workspace:null,blockers:ready?[]:[{code:'TASK_RECOVERY_EFFECT_UNKNOWN',message:'Synthetic operation outcome is still unknown'}],reviewOperationIds:ready?[]:['test-operation'],canResume:ready,canRelease:ready,ownership:{taskId:row.id,provider:'none',taskStatus:row.status,reason:'interrupted',unconfirmedOperations:ready?0:1,safeActions:ready?['resume','release']:[]}};
       }else if(request.method==='ui.task.reconcile'){
-        const row=state.tasks.find(item=>item.id===request.params.id);if(!row||row.rev!==request.params.expectedRev||request.params.reviewed!==true)throw Error('Synthetic review mismatch');row.rev++;row.progress.note='Owner reviewed interrupted effect';result={task:structuredClone(row)};
-      }else if(request.method==='ui.agent.list')result={agents:[]};
+        const row=state.tasks.find(item=>item.id===request.params.id);if(!row||row.rev!==request.params.expectedRev||request.params.automatic!==true||request.params.action!=='release')throw Error('Synthetic automatic recovery mismatch');row.rev++;row.status='paused';row.currentAgent=null;row.execution=null;row.progress.note='Synthetic safe recovery restored readiness';result={task:structuredClone(row)};
+        if(state.holdNextRelease){state.holdNextRelease=false;await new Promise(resolve=>state.releaseReply=resolve);}
+      }else if(request.method==='ui.task.resume'){
+        const row=state.tasks.find(item=>item.id===request.params.id);if(!row||row.rev!==request.params.expectedRev)throw Error('Synthetic resume revision mismatch');
+        if(state.holdNextResume){state.holdNextResume=false;await new Promise(resolve=>state.resumeReply=resolve);}
+        row.rev++;row.status='running';row.currentAgent={provider:'codex',sessionId:'fresh-fixture'};result={task:structuredClone(row)};
+      }else if(request.method==='ui.agent.security')result={required:true,authorized:true,fingerprint:'fixture',disclosure:'Retained native authorization'};
+      else if(request.method==='ui.agent.list')result={agents:[]};
       else if(request.method==='ui.settings.get')result={settings:{agents:{defaultAgentProvider:'auto'}}};
       else if(request.method==='ui.workspace.version')result={isRepo:false,headSha:null,changes:[],total:0,truncated:false,branch:null};
       else if(request.method.startsWith('ui.workshop.'))result={proposals:[]};
@@ -121,12 +128,24 @@ try {
       await until(()=>button('取消任务'),'cancel control');click('取消任务');await until(()=>state.calls.some(row=>row.method==='ui.task.cancel'),'synthetic cancellation');
       result.cancelCall=state.calls.find(row=>row.method==='ui.task.cancel')?.params;await until(()=>document.querySelector('.cm-sheet .task-detail-overview')?.textContent.includes('已取消'),'cancelled state shown');await close();
       await until(()=>card('Recovery parent'),'recovery card');openCard('Recovery parent');await until(()=>document.querySelector('.cm-sheet h2')?.textContent==='Recovery parent','recovery detail');
-      result.recoveryRequiresReview=!!document.querySelector('textarea[aria-label="核对结果"]')&&button('确认核对并执行新指令')===undefined;
-      click('核对已记录结果（只读）');await until(()=>state.calls.some(row=>row.method==='ui.task.recovery.inspect'),'read-only inspection');
+      await until(()=>document.body.innerText.includes('Synthetic operation outcome is still unknown'),'automatic inspection blocker');
+      result.recoveryHasNoManualForm=!document.querySelector('textarea[aria-label="核对结果"]')&&!document.querySelector('textarea[aria-label="新的执行指令"]');
+      result.unknownEffectBlocked=!state.calls.some(row=>row.method==='ui.task.reconcile')&&!button('继续任务');
       click('Child result');await until(()=>document.querySelector('.cm-sheet h2')?.textContent==='Child result','child detail');click('返回父任务');await until(()=>document.querySelector('.cm-sheet h2')?.textContent==='Recovery parent','parent detail');
-      fill('核对结果','人工核对了合成证据');fill('新的执行指令','仅测试合成恢复请求');await until(()=>button('确认核对并执行新指令'),'review fields enable explicit recovery');click('确认核对并执行新指令');
+      await until(()=>document.body.innerText.includes('Synthetic operation outcome is still unknown'),'remounted automatic inspection');
+      result.remountInspectionCount=state.calls.filter(row=>row.method==='ui.task.recovery.inspect'&&row.params.id==='recover').length;
+      state.recoveryReady=true;state.holdNextRelease=true;click('重新自动检查');
       await until(()=>state.calls.some(row=>row.method==='ui.task.reconcile'),'synthetic reconciliation');result.reconcileCall=state.calls.find(row=>row.method==='ui.task.reconcile')?.params;
-      result.unexpectedExecutionCalls=state.calls.filter(row=>['ui.task.start','ui.task.resume','ui.chat.send'].includes(row.method)).length;root.unmount();
+      await until(()=>state.releaseReply,'release response held');await close();openCard('Recovery parent');await until(()=>document.querySelector('.cm-sheet h2')?.textContent==='Recovery parent','Task remounted before release response');
+      await wait(200);result.pendingReconcileCount=state.calls.filter(row=>row.method==='ui.task.reconcile').length;state.releaseReply();
+      await until(()=>document.querySelector('.cm-sheet .task-detail-overview')?.textContent.includes('已暂停')&&button('继续任务'),'recovered Task projection');
+      await close();openCard('Recovery parent');await until(()=>button('继续任务'),'recovered Task remount');
+      result.reconcileCount=state.calls.filter(row=>row.method==='ui.task.reconcile').length;
+      result.unexpectedExecutionCalls=state.calls.filter(row=>['ui.task.start','ui.task.resume','ui.chat.send'].includes(row.method)).length;
+      state.holdNextResume=true;const continueButton=button('继续任务');continueButton.click();continueButton.click();await until(()=>state.resumeReply,'ordinary continuation response held');await wait(100);
+      result.resumePendingDisabled=continueButton.disabled;result.resumeCallCount=state.calls.filter(row=>row.method==='ui.task.resume').length;state.resumeReply();
+      result.resumeCall=state.calls.find(row=>row.method==='ui.task.resume')?.params;result.resumeScope=state.calls.find(row=>row.method==='ui.agent.security')?.params;
+      result.scopeBeforeResume=state.calls.findIndex(row=>row.method==='ui.agent.security')>=0&&state.calls.findIndex(row=>row.method==='ui.agent.security')<state.calls.findIndex(row=>row.method==='ui.task.resume');root.unmount();
     }catch(error){result.error=String(error.message)}finally{document.getElementById('result').textContent=encodeURIComponent(JSON.stringify(result));}})();
   ` }, bundle: true, write: false, outdir:path.join(sandbox.root,'bundle'), minify: true, format: 'iife', platform: 'browser', jsx: 'automatic' });
   const file = path.join(sandbox.root, 'fixture.html');
@@ -135,7 +154,7 @@ try {
   fs.writeFileSync(file, '<!doctype html><meta charset="utf-8"><style>'+css+'</style><div id="root"></div><pre id="result"></pre><script>' + js + '</script>');
   const edge = path.join(process.env['ProgramFiles(x86)'] || 'C:/Program Files (x86)', 'Microsoft/Edge/Application/msedge.exe');
   const profile = path.join(sandbox.root, 'profile');
-  child = spawn(edge, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--user-data-dir=' + profile, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
+  child = spawn(edge, ['--headless', '--disable-gpu', '--no-first-run', '--no-default-browser-check', '--disable-background-networking', '--disable-component-update', '--remote-debugging-port=0', '--remote-debugging-address=127.0.0.1', '--user-data-dir=' + profile, 'about:blank'], { windowsHide: true, stdio: 'ignore' });
   const portFile = path.join(profile, 'DevToolsActivePort');
   for (let i = 0; !fs.existsSync(portFile) && i < 100; i++) await delay(100);
   assert.ok(fs.existsSync(portFile), 'Chromium debugging endpoint must start');
@@ -166,9 +185,18 @@ try {
   assert.equal(result.noticeNoOverflow, true, 'long created Task titles wrap within the narrow Workspace notice');
   assert.equal(result.createdVisibleWhileOverviewPending, true, 'created Task appears before a delayed overview');
   assert.deepEqual(result.cancelCall, { id: 'created', expectedRev: 1 }, 'cancellation carries the actual Task identity and revision');
-  assert.equal(result.recoveryRequiresReview, true, 'uncertain effects require explicit review and new instruction');
-  assert.equal(result.reconcileCall?.id, 'recover');assert.equal(result.reconcileCall?.expectedRev, 3);assert.equal(result.reconcileCall?.reviewed, true);
+  assert.equal(result.recoveryHasNoManualForm, true, 'automatic checks replace the mandatory review form');
+  assert.equal(result.unknownEffectBlocked, true, 'unknown effects remain blocked without an artificial confirmation bypass');
+  assert.equal(result.remountInspectionCount, 1, 'same-revision remount reuses the completed inspection');
+  assert.deepEqual(result.reconcileCall, {id:'recover',expectedRev:3,automatic:true,action:'release'});
+  assert.equal(result.pendingReconcileCount, 1, 'remount with a newer committed revision waits for the pending release response');
+  assert.equal(result.reconcileCount, 1, 'automatic release and remount do not reconcile the same safe recovery twice');
   assert.equal(result.unexpectedExecutionCalls, 0, 'fixture must not dispatch a model or silently resume');
+  assert.deepEqual(result.resumeCall, {id:'recover',expectedRev:4}, 'normal Continue uses the released Task revision');
+  assert.deepEqual(result.resumeScope, {provider:'codex',workspaceId:'a'}, 'normal Continue checks native scope for the retained executor after detachment');
+  assert.equal(result.scopeBeforeResume, true, 'native execution scope is checked before ordinary continuation');
+  assert.equal(result.resumeCallCount, 1, 'double-clicking Continue cannot create duplicate resume RPCs');
+  assert.equal(result.resumePendingDisabled, true, 'Continue stays disabled while its response is pending');
   failed = false;
   console.log('PASS Chromium refusal retains the newer approval state after a stale response');
 } finally {

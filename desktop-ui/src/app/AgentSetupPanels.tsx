@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { agentClient, openExternal, type Agent, type AgentRuntimeProvider, type AgentRuntimeConfiguration, type AgentRuntimeInput, type AgentAuthStatus, type AgentConnectionEvidence, type DshConfiguration, type DshSelection, type DshPresetCatalog } from '../bridge/typed-client';
 import { Button, Input, Select } from '../components/primitives/inputs';
 import { createAuthPanelController } from './AgentAuthController';
-import { ErrorNotice, messageOf, dateLabel, dshSetupReasonLabel } from './PagePresentation';
+import { ErrorNotice, messageOf, dateLabel, dshSetupReasonLabel, availabilityReasonLabel } from './PagePresentation';
 
 export function mergeAgentHealth(previous: Agent, health: Agent): Agent {
   return { ...previous, ...health };
@@ -113,7 +113,7 @@ export function agentNeedsSetup(agent: Pick<Agent, 'id' | 'status' | 'reason' | 
   return agent.status === 'needs-setup' || agent.status === 'connection-pending' || isRuntimeProvider(agent.id);
 }
 export function AgentRuntimeAuthenticationNotice({ agent }: { agent: Agent }) {
-  if (!isRuntimeProvider(agent.id) || agent.runtimeConfiguration?.authMode === 'provider-login' || agent.runtimeConfiguration?.credentialConfigured !== true || (agent.authVerified !== false && agent.authentication !== 'configured-unverified')) return null;
+  if (!isRuntimeProvider(agent.id) || ['provider-login', 'native-cli'].includes(agent.runtimeConfiguration?.authMode ?? '') || agent.runtimeConfiguration?.credentialConfigured !== true || (agent.authVerified !== false && agent.authentication !== 'configured-unverified')) return null;
   return <small role="status">运行时就绪后，API 认证将在实际任务中验证。</small>;
 }
 export function AgentRuntimeSetupGuide({ provider, onOpen }: { provider: AgentRuntimeProvider; onOpen(url: string): void }) {
@@ -132,10 +132,16 @@ function runtimeDraft(configuration: AgentRuntimeConfiguration): AgentRuntimeDra
 export function AgentConnectionSteps({ agent }: { agent: Agent }) {
   if (!isRuntimeProvider(agent.id)) return null;
   const evidence = agent.connection;
+  const authentication = evidence?.authentication;
+  const authenticationLabel = authentication?.mode === 'native-cli'
+    ? authentication.state === 'native-cli-authenticated' && authentication.verified ? 'Claude Code 登录状态已确认（未验证模型访问）'
+      : authentication.state === 'native-cli-not-authenticated' ? 'Claude Code 尚未登录' : 'Claude Code 登录状态尚未验证'
+    : authentication?.state === 'session-present' ? '已有专用登录会话（未验证模型访问）'
+      : authentication?.state === 'configured-unverified' ? 'API 凭据已保存，未验证' : '尚未配置 / 未验证';
   return <dl className="agent-connection-steps">
     <div><dt>安装</dt><dd>{agent.cliInstalled === true || evidence?.runtime.installed === true ? '编码 CLI 已发现' : agent.cliInstalled === false || evidence?.runtime.installed === false ? '未发现编码 CLI' : '编码 CLI 尚未检查'}</dd></div>
     <div><dt>协议</dt><dd>{evidence?.runtime.protocolVerified ? '协议已验证' : '尚未验证'}</dd></div>
-    <div><dt>认证</dt><dd>{evidence?.authentication.state === 'session-present' ? '已有专用登录会话（未验证模型访问）' : evidence?.authentication.state === 'configured-unverified' ? 'API 凭据已保存，未验证' : '尚未配置 / 未验证'}</dd></div>
+    <div><dt>认证</dt><dd>{authenticationLabel}</dd></div>
     <div><dt>任务执行</dt><dd>{evidence?.execution.eligible && agent.taskEligible === true && isAgentReady(agent) ? '需工作区授权及逐次工具审批' : '策略或连接条件尚未满足'}</dd></div>
   </dl>;
 }
@@ -145,22 +151,27 @@ export function AgentRuntimeSetupForm({ provider, configuration, draft, saving, 
   onDraftChange(value: AgentRuntimeDraft): void; onSave(): void; onRefresh(): void; onLogin?(methodId: string): void; onCancel?(): void;
 }) {
   const account = draft.authMode === 'provider-login';
-  const modelRequired = provider !== 'claude' || connection?.modelRequired !== false;
+  const native = provider === 'claude' && draft.authMode === 'native-cli';
+  const modelRequired = !native && (provider !== 'claude' || connection?.modelRequired !== false);
   const active = auth && ['starting', 'awaiting-user', 'exit-unconfirmed'].includes(auth.state);
   const locked = saving || Boolean(active);
+  const accountPolicyReason = provider === 'opencode' && connection?.accountReason === 'opencode_native_policy_override_unsupported' ? availabilityReasonLabel(connection.accountReason) : null;
   const field = (key: 'runtimePath' | 'nodePath' | 'model' | 'baseUrl', label: string, placeholder: string, maxLength: number) => <label>{label}<Input aria-label={label} value={draft[key]} placeholder={placeholder} maxLength={maxLength} required={key === 'model' && modelRequired && draft.enabled} disabled={locked} onChange={event => onDraftChange({ ...draft, [key]: event.target.value, ...(key === 'baseUrl' ? { servicePreset: 'custom', apiKey: '' } : {}) })} /></label>;
-  const supported = connection?.methods.find(method => method.id !== 'api-key' && method.supported && (provider !== 'opencode' || method.id === draft.methodId));
+  const supported = !accountPolicyReason && connection?.methods.find(method => method.id !== 'api-key' && method.supported && (provider !== 'opencode' || method.id === draft.methodId));
   return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!locked && !conflicted) onSave(); }}>
     <label><Input type="checkbox" checked={draft.enabled} disabled={locked} onChange={event => onDraftChange({ ...draft, enabled: event.target.checked })} /> 启用此连接</label>
-    {provider === 'qwen' ? <small>Qwen Code 仅支持 API；旧账号 OAuth 已停用。</small> : <label>认证方式<Select label="认证方式" value={draft.authMode ?? 'api-key'} disabled={locked} onChange={event => onDraftChange({ ...draft, authMode: event.target.value as 'api-key' | 'provider-login', apiKey: '', providerId: null, methodId: null })}><option value="api-key">API Key</option><option value="provider-login">服务商官方账号（待原生验证）</option></Select></label>}
-    {!account && Boolean(connection?.servicePresets?.length) && <label>API 服务<Select label="API 服务" value={draft.servicePreset ?? 'custom'} disabled={locked} onChange={event => { const preset = connection?.servicePresets?.find(item => item.id === event.target.value); if (preset) onDraftChange({ ...draft, servicePreset: preset.id, baseUrl: preset.baseUrl ?? draft.baseUrl, apiKey: '' }); }}>{connection?.servicePresets?.map(preset => <option key={preset.id} value={preset.id}>{preset.label}</option>)}</Select></label>}
+    {provider === 'qwen' ? <small>Qwen Code 仅支持 API；旧账号 OAuth 已停用。</small> : <label>认证方式<Select label="认证方式" value={draft.authMode ?? 'api-key'} disabled={locked} onChange={event => onDraftChange({ ...draft, authMode: event.target.value as AgentRuntimeConfiguration['authMode'], apiKey: '', providerId: null, methodId: null })}><option value="api-key">API Key</option><option value="provider-login">服务商官方账号（待原生验证）</option>{provider === 'claude' && <option value="native-cli" disabled={connection?.nativeCliSupported !== true}>使用已登录的 Claude Code</option>}</Select></label>}
+    {provider === 'claude' && !native && connection?.nativeCliSupported !== true && <small>本机 Claude Code 登录接入尚未通过运行时检查，请检查连接与安装版本。</small>}
+    {accountPolicyReason && <small role="status">{accountPolicyReason}</small>}
+    {!account && !native && Boolean(connection?.servicePresets?.length) && <label>API 服务<Select label="API 服务" value={draft.servicePreset ?? 'custom'} disabled={locked} onChange={event => { const preset = connection?.servicePresets?.find(item => item.id === event.target.value); if (preset) onDraftChange({ ...draft, servicePreset: preset.id, baseUrl: preset.baseUrl ?? draft.baseUrl, apiKey: '' }); }}>{connection?.servicePresets?.map(preset => <option key={preset.id} value={preset.id}>{preset.label}</option>)}</Select></label>}
     {account && provider === 'opencode' && <label>模型服务的官方登录<Select label="模型服务的官方登录" disabled={locked} value={draft.methodId ?? ''} onChange={event => { const item = connection?.providerSelections?.find(item => item.methodId === event.target.value); onDraftChange({ ...draft, providerId: item?.providerId ?? null, methodId: item?.methodId ?? null }); }}><option value="">选择服务及方式（均待验证）</option>{connection?.providerSelections?.map(item => <option key={item.methodId} value={item.methodId}>{item.label}</option>)}</Select></label>}
-    {(!account || provider === 'opencode') && field('model', modelRequired ? '模型（必填）' : '模型（可选）', modelRequired ? '填写服务支持的准确模型 ID' : '留空使用已验证的 Claude 默认模型', 256)}
-    {!account && <><label>API Key<Input aria-label="API Key" type="password" value={draft.apiKey} autoComplete="new-password" maxLength={512} placeholder={configuration.credentialConfigured ? '留空保留已保存凭据' : '输入此 Agent 使用的 API Key'} disabled={locked} onChange={event => onDraftChange({ ...draft, apiKey: event.target.value })} /></label><small>{configuration.credentialConfigured ? '凭据已保存；留空保留已保存凭据。' : '尚未保存此 Agent 的凭据。'} 更换服务或端点须重新输入 Key；保存后清空输入框。</small></>}
-    {account && <><small>在 CetaMesh 专用配置中使用服务商官方登录，不复制现有账号目录。服务商可能打开系统默认浏览器；这不是独立浏览器账号。不会自动调用付费模型。</small>{supported ? <Button type="button" disabled={locked || configuration.authMode !== 'provider-login' || draft.methodId !== configuration.methodId} onClick={() => onLogin?.(draft.methodId ?? supported.id)}>开始官方登录</Button> : <small role="status">官方登录暂未启用：需要 Windows 原生进程、私有存储与审批策略验证。可切回 API 配置。</small>}{provider === 'gemini' && <small>Gemini 0.65.0 没有可用于被动检查的账号状态接口，且缺少完整工具输入证明；登录也不会开放任务执行。</small>}{provider === 'claude' && <small>仅计划支持 Claude 订阅登录，不支持 Console 无 Key 登录；SDK 第三方使用资格文档存在差异，需发行前复核。</small>}</>}
+    {(!account || provider === 'opencode') && field('model', modelRequired ? '模型（必填）' : '模型（可选）', modelRequired ? '填写服务支持的准确模型 ID' : '留空使用 Claude Code 默认模型', 256)}
+    {!account && !native && <><label>API Key<Input aria-label="API Key" type="password" value={draft.apiKey} autoComplete="new-password" maxLength={512} placeholder={configuration.credentialConfigured ? '留空保留已保存凭据' : '输入此 Agent 使用的 API Key'} disabled={locked} onChange={event => onDraftChange({ ...draft, apiKey: event.target.value })} /></label><small>{configuration.credentialConfigured ? '凭据已保存；留空保留已保存凭据。' : '尚未保存此 Agent 的凭据。'} 更换服务或端点须重新输入 Key；保存后清空输入框。</small></>}
+    {native && <><small>使用当前 Windows 用户的 Claude Code 默认配置目录；凭据与历史由 Claude 管理。CetaMesh 不复制凭据，任务仍禁用 Claude 的设置、插件及 MCP 配置。</small><small role="status">尚未登录时，请在本机终端运行 <code>claude auth login</code>，完成后刷新连接。连接检查只读取登录状态；实际任务仍需工作区授权与逐次工具审批。</small></>}
+    {account && <><small>在 CetaMesh 专用配置中使用服务商官方登录，不复制现有账号目录。服务商可能打开系统默认浏览器；这不是独立浏览器账号。不会自动调用付费模型。</small>{supported ? <Button type="button" disabled={locked || configuration.authMode !== 'provider-login' || draft.methodId !== configuration.methodId} onClick={() => onLogin?.(draft.methodId ?? supported.id)}>开始官方登录</Button> : !accountPolicyReason && <small role="status">官方登录暂未启用：需要 Windows 原生进程、私有存储与审批策略验证。可切回 API 配置。</small>}{provider === 'gemini' && <small>Gemini 0.65.0 没有可用于被动检查的账号状态接口，且缺少完整工具输入证明；登录也不会开放任务执行。</small>}{provider === 'claude' && <small>仅计划支持 Claude 订阅登录，不支持 Console 无 Key 登录；SDK 第三方使用资格文档存在差异，需发行前复核。</small>}</>}
     {active && <div role="status">{auth.state === 'exit-unconfirmed' ? '进程退出尚未确认；连接仍被占用。' : '等待服务商完成登录。'}<Button type="button" variant="ghost" onClick={onCancel}>取消登录</Button></div>}
-    {auth && !active && <small role="status">{{'no-session':'尚无专用登录会话',unsupported:'此账号方式不受支持',starting:'正在启动', 'awaiting-user':'等待用户', 'session-present':'专用会话已保存；不代表模型访问已验证',cancelled:'登录已取消',failed:'登录失败；可重试',expired:'登录已超时；可重试','exit-unconfirmed':'退出未确认'}[auth.state]}</small>}
-    <details><summary>高级设置</summary>{field('runtimePath', '运行时路径', '留空自动发现；填写官方编码运行时的绝对路径', 4096)}{field('nodePath', '独立 Node 路径', 'npm 运行时可填写独立 node.exe 的绝对路径', 4096)}{!account && field('baseUrl', 'API 端点', 'https://…', 2048)}</details>
+    {!native && auth && !active && <small role="status">{{'no-session':'尚无专用登录会话',unsupported:'此账号方式不受支持',starting:'正在启动', 'awaiting-user':'等待用户', 'session-present':'专用会话已保存；不代表模型访问已验证',cancelled:'登录已取消',failed:'登录失败；可重试',expired:'登录已超时；可重试','exit-unconfirmed':'退出未确认'}[auth.state]}</small>}
+    <details><summary>高级设置</summary>{field('runtimePath', '运行时路径', '留空自动发现；填写官方编码运行时的绝对路径', 4096)}{field('nodePath', '独立 Node 路径', 'npm 运行时可填写独立 node.exe 的绝对路径', 4096)}{!account && !native && field('baseUrl', 'API 端点', 'https://…', 2048)}</details>
     <small>使用原生权限模式；工作区授权与逐次审批另行确认。保存配置不等于连接成功。</small>
     <div className="row"><Button compact type="submit" disabled={locked || conflicted}>{saving ? '保存中…' : '保存配置'}</Button><Button compact type="button" variant="ghost" disabled={saving} onClick={onRefresh}>刷新连接</Button></div>
   </form>;
@@ -178,9 +189,9 @@ function AgentRuntimeSetupPanel({ agent, onConfigured, onRefresh }: { agent: Age
   const currentConfiguration = useRef(configuration); currentConfiguration.current = configuration;
   useEffect(() => { ++mountedRevision.current; return () => { ++mountedRevision.current; }; }, [agent.id]);
   useEffect(() => {
-    if (!isRuntimeProvider(agent.id) || !configuration) return;
-    let updates = 0, active = true;
     setAuth(null);
+    if (!isRuntimeProvider(agent.id) || !configuration || configuration.authMode === 'native-cli') return;
+    let updates = 0, active = true;
     const controller = createAuthPanelController({ provider: agent.id, revision: configuration.revision, client: agentClient, onUpdate: value => { updates++; setAuth(value); } });
     authController.current = controller;
     void agentClient.authDescribe(agent.id).then(value => { if (active && updates === 0) controller.adopt(value); }).catch(() => {});
@@ -206,7 +217,7 @@ function AgentRuntimeSetupPanel({ agent, onConfigured, onRefresh }: { agent: Age
           setConflicted(true); setError('保存期间配置已变化，请核对最新配置。');
           onConfigured(current.revision > result.revision ? current : result);
         } else {
-          dirty.current = false; setConflicted(false); onConfigured(result); setNotice('配置已保存，请刷新连接查看验证结果。');
+          dirty.current = false; setConflicted(false); onConfigured(result); setNotice('配置已保存，连接检查结果显示在上方。'); onRefresh();
         }
       }
     }

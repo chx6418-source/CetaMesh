@@ -43,6 +43,7 @@ export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWo
   const taskRefreshRef = useRef(0);
   const taskQueryRef = useRef('');
   const taskSnapshotsRef = useRef(new Map<string, Task>());
+  const taskActionsRef = useRef(new Map<string, Promise<void>>());
   const rememberTask = useCallback((incoming: Task) => {
     const previous = taskSnapshotsRef.current.get(incoming.id);
     const newest = previous && (previous.rev ?? -1) > (incoming.rev ?? -1) ? previous : incoming;
@@ -149,7 +150,16 @@ export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWo
       if (request === taskNavigationRef.current) setTaskOperationError({ taskId: sourceId, message: taskOperationErrorMessage(cause) });
     }
   }
-  async function taskAction(task: Task, action: 'start' | 'pause' | 'resume' | 'cancel', agentProvider?: string) {
+  function taskAction(task: Task, action: 'start' | 'pause' | 'resume' | 'cancel', agentProvider?: string) {
+    const pending = taskActionsRef.current.get(task.id);
+    if (pending) return pending;
+    const request = runTaskAction(task, action, agentProvider).finally(() => {
+      if (taskActionsRef.current.get(task.id) === request) taskActionsRef.current.delete(task.id);
+    });
+    taskActionsRef.current.set(task.id, request);
+    return request;
+  }
+  async function runTaskAction(task: Task, action: 'start' | 'pause' | 'resume' | 'cancel', agentProvider?: string) {
     if (action === 'cancel' && !window.confirm(`取消任务“${task.title}”？`)) return;
     taskNavigationRef.current += 1;
     setSelectedTask(current => current?.id === task.id ? current : task);
@@ -163,7 +173,7 @@ export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWo
           return value;
         });
       }
-      if (action === 'start' || action === 'resume') await confirmAgentExecution(agentProvider || task.currentAgent?.provider || '', task.workspaceId || '');
+      if (action === 'start' || action === 'resume') await confirmAgentExecution(agentProvider || task.currentAgent?.provider || (action === 'resume' ? task.agentHistory.at(-1)?.provider : '') || '', task.workspaceId || '');
       const result = action === 'start' ? await taskClient.start(task.id, task.rev ?? undefined, agentProvider)
         : action === 'pause' ? await taskClient.pause(task.id, task.rev ?? undefined)
         : action === 'resume' ? await taskClient.resume(task.id, task.rev ?? undefined)
@@ -187,23 +197,23 @@ export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWo
     } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
   }
   async function reconcileTask(task: Task, submission: TaskRecoverySubmission) {
-    try {
-      const { preview, action, reviewSummary, nextInstruction, provider } = submission;
-      if (preview.taskId !== task.id || preview.taskRev !== task.rev || !preview.reviewToken || (preview.expiresAt ?? 0) <= Date.now()) {
-        throw new Error('恢复检查已过期或任务已变化，请重新读取恢复检查。');
-      }
-      if (action === 'resume') await confirmAgentExecution(provider || task.currentAgent?.provider || '', task.workspaceId || '');
-      const result = await taskClient.reconcile(task.id, {
-        expectedRev: preview.taskRev, reviewToken: preview.reviewToken, reviewedOperationIds: preview.reviewOperationIds,
-        reviewSummary, action, ...(provider ? { provider } : {}),
-        ...(action === 'resume' ? { nextInstruction, requestId: crypto.randomUUID() } : {})
-      });
-      const newest = rememberTask(result.task);
-      setTaskOperationError(null);
-      setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
-      setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
-      await refresh();
-    } catch (cause) { setTaskOperationError({ taskId: task.id, message: taskOperationErrorMessage(cause) }); }
+    const { preview, action, nextInstruction, provider } = submission;
+    if (preview.taskId !== task.id || preview.taskRev !== task.rev || !(action === 'release' ? preview.canRelease : preview.canResume)) {
+      throw new Error('任务已变化或暂不满足自动恢复条件，请重新自动检查。');
+    }
+    if (action === 'resume') await confirmAgentExecution(provider || task.currentAgent?.provider || task.agentHistory.at(-1)?.provider || '', task.workspaceId || '');
+    const result = await taskClient.reconcile(task.id, {
+      expectedRev: preview.taskRev, automatic: true, action, ...(provider ? { provider } : {}),
+      ...(action === 'resume' ? { ...(nextInstruction ? { nextInstruction } : {}), requestId: crypto.randomUUID() } : {})
+    });
+    if (result.task.id !== task.id || result.task.rev === null || result.task.rev < preview.taskRev) throw new Error('恢复回复不属于当前任务版本，请重新自动检查。');
+    if (action === 'release') rememberReleasedTask(result.task);
+    const newest = rememberTask(result.task);
+    setTaskOperationError(null);
+    setSelectedTask(current => current?.id === task.id && (current.rev ?? -1) <= (newest.rev ?? -1) ? newest : current);
+    setTasks(current => current.map(previous => previous.id === newest.id && (previous.rev ?? -1) <= (newest.rev ?? -1) ? newest : previous));
+    void refresh(true);
+    return result.task;
   }
   async function reviewAnalysisChild(task: Task, approve: boolean, summary: string, evidenceEventIds: string[]) {
     try {
@@ -288,7 +298,7 @@ export function WorkPage({ onExplain, workspaces, activeWorkspaceId, onRefreshWo
     </>}
     {workView === 'git' && <GitWorkspace onExplain={onExplain} call={productToolsClient.call} workspaces={workspaces} activeWorkspaceId={gitWorkspaceId} onWorkspaceChanged={onRefreshWorkspaces} onOpenTask={id => { setWorkView('tasks'); void openRelatedTask(id); }} />}
     <Sheet open={taskSheet} title="新建任务" onClose={() => {taskNavigationRef.current+=1;setTaskSheet(false);}}><TaskCreateForm key={taskCreateEpoch} activeWorkspaceId={taskWorkspaceId || activeWorkspaceId} workspaces={projectWorkspaces} providers={handoffProviders} onCreated={task=>showCreatedTask(task,taskCreateEpoch)} /></Sheet>
-    <Sheet open={Boolean(selectedTask)} title={selectedTask ? taskDialogTitle(selectedTask) : '任务详情'} onClose={() => { taskNavigationRef.current += 1; selectedTaskIdRef.current = ''; setSelectedTask(null); }}>{selectedTask && taskOperationError?.taskId === selectedTask.id && <ErrorNotice error={taskOperationError.message} />}{selectedTask && <TaskCollaborationStatus task={selectedTask} />}{selectedTask && <TaskApprovals key={"approvals:"+selectedTask.id} taskId={selectedTask.id} />}{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onOpenChild={id => void openRelatedTask(id)} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => void taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={submission => reconcileTask(selectedTask, submission)} onReview={(approve, summary, ids) => void reviewAnalysisChild(selectedTask, approve, summary, ids)} onCreateChild={(goal, scope, kind, replace) => void createReadChild(selectedTask, goal, scope, kind, replace)} onComplete={(summary, reportOnly) => void finishTask(selectedTask, summary, reportOnly)} onVerifyChild={() => void verifyCompletedChild(selectedTask)} />}</Sheet>
+    <Sheet open={Boolean(selectedTask)} title={selectedTask ? taskDialogTitle(selectedTask) : '任务详情'} onClose={() => { taskNavigationRef.current += 1; selectedTaskIdRef.current = ''; setSelectedTask(null); }}>{selectedTask && taskOperationError?.taskId === selectedTask.id && <ErrorNotice error={taskOperationError.message} />}{selectedTask && <TaskCollaborationStatus task={selectedTask} />}{selectedTask && <TaskApprovals key={"approvals:"+selectedTask.id} taskId={selectedTask.id} />}{selectedTask && <TaskDetails key={selectedTask.id} task={selectedTask} providers={handoffProviders} onOpenChild={id => void openRelatedTask(id)} onHandoff={provider => void handoffTask(selectedTask, provider)} onAction={action => taskAction(selectedTask, action)} onStart={provider => void taskAction(selectedTask, 'start', provider)} onReconcile={submission => reconcileTask(selectedTask, submission)} onReview={(approve, summary, ids) => void reviewAnalysisChild(selectedTask, approve, summary, ids)} onCreateChild={(goal, scope, kind, replace) => void createReadChild(selectedTask, goal, scope, kind, replace)} onComplete={(summary, reportOnly) => void finishTask(selectedTask, summary, reportOnly)} onVerifyChild={() => void verifyCompletedChild(selectedTask)} />}</Sheet>
   </div>;
 }
 
@@ -491,35 +501,106 @@ function WorkspaceVersion({id,executor,revision}: {id:string;executor:string|nul
  return <section aria-label="项目版本"><h3>项目版本</h3>{error?<p>{error}</p>:version?<><p>{version.isRepo?(version.headSha?'当前版本 '+version.headSha.slice(0,8):'尚未创建版本'):'普通目录 · 使用文件校验追踪'} · 当前执行者 {executor||'待分配'}</p><p>{version.total ?? version.changes.length} 个变更文件 · {version.changes.some(c=>c.conflict)?'存在版本冲突，需核对':version.truncated?'仅显示部分文件，其余变更仍需核对':'未发现 Git 索引冲突'}</p><details><summary>查看版本详情</summary><p>{version.branch||'未记录分支'} · {version.headSha||'无 Commit'}</p>{version.truncated&&<p>仅显示前 {version.changes.length} 个变更；完整修改可在下方工作区审阅入口或 Git 工作台查看。</p>}{version.changes.map(c=><p key={c.path}>{c.status} · {c.path}</p>)}<p>此处仅显示版本状态；文件导入仍逐项核对 Hash。提交和合并需要独立授权。</p></details></>:<p>正在读取项目版本…</p>}</section>;
 }
 
-function TaskRecoveryEvidence({task,onInspection}: {task:Task;onInspection?(preview:TaskRecoveryPreview|null):void}) {
-  const [inspection,setInspection]=useState<Awaited<ReturnType<typeof taskClient.inspectRecovery>>|null>(null);
-  const [error,setError]=useState(''),[busy,setBusy]=useState(false);
-  const identity=useRef('');identity.current=task.id+':'+task.rev;
-  useEffect(()=>{identity.current=task.id+':'+task.rev;setInspection(null);setError('');setBusy(false);return()=>{identity.current='';};},[task.id,task.rev]);
-  const rows=inspection?.operations??task.recovery?.operations??[];
-  async function inspect(){const current=identity.current;setBusy(true);setError('');onInspection?.(null);try{const result=await taskClient.inspectRecovery(task.id);if(identity.current!==current)return;if(result.taskRev===task.rev&&result.taskId===task.id){setInspection(result);onInspection?.(result);}else setError('任务已变化，请刷新后重新核对');}catch(e){if(identity.current===current)setError(messageOf(e));}finally{if(identity.current===current)setBusy(false);}}
-  return <section aria-label="操作核对证据"><h3>操作核对</h3><p>核对只读取操作回执和当前结果，不重新执行写入。无法证实的结果仍需人工核对。</p>
-    <div className="row"><Button disabled={busy} onClick={()=>void inspect()}>{busy?'正在核对…':'核对已记录结果（只读）'}</Button><DiagnosticsEntry label="诊断"/></div>{error&&<ErrorNotice error={error}/>}
-    {!inspection&&<p>尚未读取恢复检查。请先核对当前执行者、占用原因与工作区，再选择安全操作。</p>}
-    {inspection&&<section aria-label="占用与恢复状态"><p><strong>Task ID</strong> · <code>{inspection.ownership.taskId}</code></p><p><strong>当前执行者</strong> · {inspection.ownership.provider||'未附加'} · {inspection.ownership.taskStatus}</p><p><strong>占用原因</strong> · {inspection.ownership.reason||'未报告'}</p><p><strong>旧执行状态</strong> · {inspection.session.stopped?'Core 已确认旧执行停止':'尚未确认旧执行停止'} · {inspection.session.state}</p><p>{inspection.ownership.unconfirmedOperations} 项操作结果需要核对；{inspection.canResume?'允许提交新的执行指令':'暂不允许继续执行'}，{inspection.canRelease?'允许释放占用':'暂不允许释放占用'}。</p>{inspection.blockers.map((blocker,index)=><p key={blocker.code+index}><strong>{blocker.code}</strong> · {blocker.message}</p>)}<details><summary>恢复诊断详情</summary><p>Task rev {inspection.taskRev} · {inspection.session.code||'无会话错误代码'}</p>{inspection.session.sessionId&&<p>Session ID <code>{inspection.session.sessionId}</code></p>}{inspection.workspace&&<p>工作区快照 · {inspection.workspace.kind} · <code>{inspection.workspace.sha256}</code>{typeof inspection.workspace.fileCount==='number'?` · ${inspection.workspace.fileCount} 个文件`:''}</p>}</details></section>}
-    {rows.map(row=><div key={row.operationId}><p><strong>{row.capability}</strong> · {'verified' in row&&row.verified?'当前结果已核实':row.status}{'code' in row&&row.code?' · '+row.code:''}</p><details><summary>操作标识</summary><code>{row.operationId}</code></details></div>)}
-    {!rows.length&&<p>没有可关联的操作回执；请核对工作区差异、文件及外部操作记录后再恢复。</p>}
-    {(inspection?.omitted??task.recovery?.omitted??0)>0&&<p>仅展示最近 40 项；仍有历史操作未展示，不代表全部已核对。</p>}
+type TaskRecoveryAttempt = {
+  taskId: string;
+  inspection: Promise<TaskRecoveryPreview> | null;
+  release?: Promise<void>;
+  released: boolean;
+  pending: boolean;
+};
+// Share outcomes across detail remounts. Rejections are retained until the Task
+// revision changes or the user requests a fresh check; no timer retries effects.
+const taskRecoveryAttempts = new Map<string, TaskRecoveryAttempt>();
+function recoveryIdentity(task: Task) { return task.id + ':' + task.rev; }
+function retainRecoveryAttempt(key: string, attempt: TaskRecoveryAttempt) {
+  taskRecoveryAttempts.set(key, attempt);
+  for (const [oldKey, oldAttempt] of taskRecoveryAttempts) {
+    if (taskRecoveryAttempts.size <= 128) break;
+    if (oldKey !== key && !oldAttempt.pending) taskRecoveryAttempts.delete(oldKey);
+  }
+}
+function rememberReleasedTask(task: Task) {
+  const key = recoveryIdentity(task), existing = taskRecoveryAttempts.get(key);
+  if (existing) existing.released = true;
+  else retainRecoveryAttempt(key, { taskId: task.id, inspection: null, released: true, pending: false });
+}
+function recoveryAttempt(task: Task, retry: boolean) {
+  const key = recoveryIdentity(task), existing = taskRecoveryAttempts.get(key);
+  if (existing && (!retry || existing.pending)) return existing;
+  const attempt: TaskRecoveryAttempt = { taskId: task.id, inspection: null, released: false, pending: true };
+  attempt.inspection = taskClient.inspectRecovery(task.id, true).then(
+    result => { attempt.pending = false; return result; },
+    error => { attempt.pending = false; throw error; }
+  );
+  retainRecoveryAttempt(key, attempt);
+  return attempt;
+}
+
+function TaskRecoveryEvidence({ task, onReconcile, onReady }: { task: Task; onReconcile(submission: TaskRecoverySubmission): Promise<Task>; onReady(ready: boolean): void }) {
+  const [inspection, setInspection] = useState<TaskRecoveryPreview | null>(null);
+  const [error, setError] = useState(''), [busy, setBusy] = useState(true), [released, setReleased] = useState(false);
+  const identity = useRef(''), request = useRef(0);
+  identity.current = recoveryIdentity(task);
+  useEffect(() => {
+    identity.current = recoveryIdentity(task);
+    setInspection(null); setReleased(false);
+    void inspect();
+    return () => { identity.current = ''; request.current += 1; };
+  }, [task.id, task.rev]);
+  async function inspect(retry = false) {
+    const current = identity.current, sequence = ++request.current;
+    const isCurrent = () => identity.current === current && sequence === request.current;
+    setBusy(true); setError(''); setReleased(false); setInspection(null); onReady(false);
+    try {
+      // A refreshed detail can observe the committed revision before the first
+      // release reply arrives. Adopt that reply instead of submitting it again.
+      const pendingRelease = [...taskRecoveryAttempts.values()].find(attempt => attempt.taskId === task.id && attempt.pending && attempt.release)?.release;
+      if (pendingRelease) {
+        await pendingRelease.catch(() => undefined);
+        if (!isCurrent()) return;
+      }
+      const attempt = recoveryAttempt(task, retry);
+      if (attempt.released) { setReleased(true); onReady(true); return; }
+      const result = await attempt.inspection;
+      if (!isCurrent()) return;
+      if (!result || result.taskId !== task.id || result.taskRev !== task.rev) throw new Error('任务已变化，请刷新后重新自动检查。');
+      setInspection(result);
+      if (result.canRelease !== true) return;
+      if (!attempt.release) {
+        attempt.pending = true;
+        attempt.release = onReconcile({ preview: result, automatic: true, action: 'release' }).then(
+          recovered => { rememberReleasedTask(recovered); attempt.released = true; attempt.pending = false; },
+          cause => { attempt.pending = false; throw cause; }
+        );
+      }
+      await attempt.release;
+      if (isCurrent()) { setReleased(true); onReady(result.canResume === true); }
+    } catch (cause) { if (isCurrent()) setError(taskOperationErrorMessage(cause)); }
+    finally { if (isCurrent()) setBusy(false); }
+  }
+  const rows = inspection?.operations ?? task.recovery?.operations ?? [];
+  return <section aria-label="自动恢复状态"><h3>自动恢复</h3><p>系统自动检查旧执行、操作回执和当前工作区，安全时自动释放旧占用；不会重放中断前的工具调用。</p>
+    <p role="status">{released ? '已自动恢复可用状态。任务记录和执行证据保留；继续任务会开启新的执行。' : busy ? '正在自动检查并恢复…' : error ? '自动恢复暂未完成。可在问题解除后重新自动检查。' : '自动检查发现以下阻塞条件，当前任务保持原状。'}</p>
+    <p className="muted">恢复可用状态不表示任务完成，也不会自动启动模型；继续执行仍遵循原有授权与审批要求。</p>
+    <div className="row"><Button disabled={busy} onClick={() => void inspect(true)}>{busy ? '正在自动检查…' : '重新自动检查'}</Button><DiagnosticsEntry label="诊断" /></div>{error && <ErrorNotice error={error} />}
+    {inspection && !released && <section aria-label="占用与恢复状态"><p><strong>当前执行者</strong> · {inspection.ownership.provider || '未附加'} · {inspection.ownership.taskStatus}</p><p><strong>占用原因</strong> · {inspection.ownership.reason || '未报告'}</p><p><strong>旧执行状态</strong> · {inspection.session.stopped ? 'Core 已确认旧执行停止' : '尚未确认旧执行停止'} · {inspection.session.state}</p><p>{inspection.ownership.unconfirmedOperations} 项操作结果尚未确认。</p>{inspection.blockers.map((blocker, index) => <p key={blocker.code + index}><strong>{blocker.code}</strong> · {blocker.message}</p>)}<details><summary>恢复诊断详情</summary><p>Task ID <code>{inspection.taskId}</code> · rev {inspection.taskRev} · {inspection.session.code || '无会话错误代码'}</p>{inspection.session.sessionId && <p>Session ID <code>{inspection.session.sessionId}</code></p>}{inspection.workspace && <p>工作区快照 · {inspection.workspace.kind} · <code>{inspection.workspace.sha256}</code>{typeof inspection.workspace.fileCount === 'number' ? ` · ${inspection.workspace.fileCount} 个文件` : ''}</p>}</details></section>}
+    {rows.map(row => <div key={row.operationId}><p><strong>{row.capability}</strong> · {'verified' in row && row.verified ? '当前结果已核实' : row.status}{'code' in row && row.code ? ' · ' + row.code : ''}</p><details><summary>操作标识</summary><code>{row.operationId}</code></details></div>)}
+    {(inspection?.omitted ?? task.recovery?.omitted ?? 0) > 0 && <p>仅展示最近 40 项；完整操作记录仍由 Core 核验。</p>}
   </section>;
 }
 
-export function TaskDetails({ task, providers, onHandoff, onAction, onStart, onReconcile, onReview, onCreateChild, onComplete, onVerifyChild, onOpenChild }: { onOpenChild?(id: string): void; task: Task; providers: { id: string; name: string; eligible: boolean }[]; onHandoff(provider: string): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void; onStart(provider: string): void; onReconcile(submission: TaskRecoverySubmission): Promise<void>; onReview(approve: boolean, summary: string, evidenceEventIds: string[]): void; onCreateChild(goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string): void; onComplete(summary: string, reportOnly?: boolean): void; onVerifyChild(): void }) {
+export function TaskDetails({ task, providers, onHandoff, onAction, onStart, onReconcile, onReview, onCreateChild, onComplete, onVerifyChild, onOpenChild }: { onOpenChild?(id: string): void; task: Task; providers: { id: string; name: string; eligible: boolean }[]; onHandoff(provider: string): void; onAction(action: 'start' | 'pause' | 'resume' | 'cancel'): void | Promise<void>; onStart(provider: string): void; onReconcile(submission: TaskRecoverySubmission): Promise<Task>; onReview(approve: boolean, summary: string, evidenceEventIds: string[]): void; onCreateChild(goal: string, scope: string, outputKind: 'analysis' | 'tool', supersedesChildId?: string): void; onComplete(summary: string, reportOnly?: boolean): void; onVerifyChild(): void }) {
   const [handoffProvider, setHandoffProvider] = useState('');
   const [startProvider, setStartProvider] = useState('');
-  const [reviewSummary, setReviewSummary] = useState('');
-  const [nextInstruction, setNextInstruction] = useState('');
-  const [recoveryProvider, setRecoveryProvider] = useState('');
-  const [recoveryPreview, setRecoveryPreview] = useState<TaskRecoveryPreview | null>(null);
-  const [reviewedUnknown, setReviewedUnknown] = useState(false);
-  const [recovering, setRecovering] = useState(false);
-  const [recoveryInspectionEpoch, setRecoveryInspectionEpoch] = useState(0);
-  const recoverySubmissionRef = useRef(false);
-  useEffect(() => { setRecoveryPreview(null); setReviewedUnknown(false); }, [task.id, task.rev]);
+  const [recoveryReady, setRecoveryReady] = useState('');
+  const [continuing, setContinuing] = useState(false);
+  const continuingRef = useRef(false);
+  async function continueTask() {
+    if (continuingRef.current) return;
+    continuingRef.current = true; setContinuing(true);
+    try { await onAction('resume'); }
+    finally { continuingRef.current = false; setContinuing(false); }
+  }
   const [completionSummary, setCompletionSummary] = useState('');
   const [reviewedReport, setReviewedReport] = useState('');
   const reportKey = task.reviewReport ? task.reviewReport.eventId + ':' + task.reviewReport.sha256 : '';
@@ -532,14 +613,6 @@ export function TaskDetails({ task, providers, onHandoff, onAction, onStart, onR
       : task.execution?.hasEvidence || reportOnly);
 
   const recoveryRequired = ['blocked', 'paused', 'waiting'].includes(task.status) || task.execution?.state === 'needs-reconciliation' || task.execution?.state === 'failed';
-  const currentPreview = recoveryPreview?.taskId === task.id && recoveryPreview.taskRev === task.rev ? recoveryPreview : null;
-  const reviewReady = Boolean(currentPreview?.reviewToken && (currentPreview.expiresAt ?? 0) > Date.now() && reviewSummary.trim() && (!currentPreview.reviewOperationIds.length || reviewedUnknown) && !recovering);
-  async function submitRecovery(action: 'resume' | 'release') {
-    if (recoverySubmissionRef.current || !reviewReady || !currentPreview || !(action === 'resume' ? currentPreview.canResume : currentPreview.canRelease)) return;
-    recoverySubmissionRef.current = true; setRecovering(true); setRecoveryPreview(null); setReviewedUnknown(false); setRecoveryInspectionEpoch(value=>value+1);
-    try { await onReconcile({ preview: currentPreview, action, reviewSummary: reviewSummary.trim(), nextInstruction: nextInstruction.trim(), provider: task.currentAgent?.provider || recoveryProvider || undefined }); }
-    finally { recoverySubmissionRef.current = false; setRecovering(false); }
-  }
   return <div className="task-details task-product-details">
     {task.parentTaskId && onOpenChild && <Button compact variant="ghost" onClick={() => onOpenChild(task.parentTaskId!)}>返回父任务</Button>}
     <TaskDependencyNotice task={task} onOpenChild={onOpenChild} />
@@ -561,7 +634,7 @@ export function TaskDetails({ task, providers, onHandoff, onAction, onStart, onR
     </TaskDetailSection>
     <TaskDetailSection title="来源与项目版本">{task.workspaceId ? <WorkspaceVersion id={task.workspaceId} executor={task.currentAgent?.provider ?? null} revision={task.rev} /> : <p className="muted">未绑定项目工作区。</p>}<p className="muted">相关来源和文件由执行证据保留；工作区当前修改不等于本任务的全部成果。</p></TaskDetailSection>
     <TaskDetailSection title="执行证据"><p className="muted">记录是执行观察，是否通过验收仍以相应证据核验为准。</p>{task.executionEvidence.length ? task.executionEvidence.slice(-20).reverse().map(item => <article className="task-timeline-row" key={item.eventId}><div className="task-child-heading"><strong>{item.tool || item.capability}</strong><StatusBadge value={item.status} /></div>{item.filePath && <p>{item.filePath}</p>}{item.exitCode !== null && <small>退出码 {item.exitCode}</small>}<details className="task-advanced"><summary>证据详情</summary><p>{item.capability} · Task rev {item.taskRev}</p><code>{item.eventId}</code></details></article>) : <p className="muted">暂无工具或测试执行记录。</p>}</TaskDetailSection>
-    {!['completed','cancelled'].includes(task.status) && <TaskDetailSection title="人工核对后恢复" initialOpen={recoveryRequired}><TaskRecoveryEvidence key={recoveryInspectionEpoch} task={task} onInspection={preview=>{setRecoveryPreview(preview);setReviewedUnknown(false);}} /><div className="task-form-grid"><p>先核对工作区和上次操作的实际结果，再给出新的执行指令；不会重放中断前的工具调用。释放占用只结束旧执行归属，不启动新会话，也不表示任务成功。</p>{!task.currentAgent && <Select label="恢复执行者" value={recoveryProvider} onChange={event => setRecoveryProvider(event.target.value)}><option value="">选择恢复任务的 Agent</option>{providers.filter(item => item.eligible).map(item => <option key={item.id} value={item.id}>{item.name}</option>)}</Select>}<label>核对结果<Textarea aria-label="核对结果" value={reviewSummary} onChange={event => setReviewSummary(event.target.value)} rows={3} maxLength={1000} /></label>{Boolean(currentPreview?.reviewOperationIds.length)&&<label className="task-check"><Input type="checkbox" checked={reviewedUnknown} onChange={event=>setReviewedUnknown(event.target.checked)}/><span>已人工核对列出的 {currentPreview!.reviewOperationIds.length} 项结果不明操作；这不代表成功，也不会重新执行这些操作。</span></label>}<label>新的执行指令<Textarea aria-label="新的执行指令" value={nextInstruction} onChange={event => setNextInstruction(event.target.value)} rows={4} maxLength={32000} /></label><div className="row"><Button disabled={!reviewReady || !currentPreview?.canResume || !nextInstruction.trim() || (!task.currentAgent && !providers.some(item => item.id === recoveryProvider && item.eligible))} onClick={() => void submitRecovery('resume')}>确认核对并执行新指令</Button><Button disabled={!reviewReady || !currentPreview?.canRelease} onClick={()=>void submitRecovery('release')}>确认核对并释放占用</Button></div>{!currentPreview&&<small>提交前需读取当前恢复检查；每次提交后必须重新检查，旧凭据不会自动重试。</small>}</div></TaskDetailSection>}
+    {!['completed', 'cancelled'].includes(task.status) && recoveryRequired && <TaskDetailSection title="自动恢复" initialOpen><TaskRecoveryEvidence task={task} onReconcile={onReconcile} onReady={ready => setRecoveryReady(ready ? recoveryIdentity(task) : '')} /><Button disabled={continuing || recoveryReady !== recoveryIdentity(task) || activeTaskChildren(task).length > 0} onClick={() => void continueTask()}>继续任务</Button></TaskDetailSection>}
     <div className="row task-detail-actions">{['working', 'running'].includes(task.status) ? <Button onClick={() => onAction('pause')}>暂停任务</Button> : null}{!['completed', 'cancelled', 'failed'].includes(task.status) && <Button variant="danger" onClick={() => onAction('cancel')}>取消任务</Button>}</div>
   </div>;
 }

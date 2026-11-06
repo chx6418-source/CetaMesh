@@ -85,12 +85,12 @@ try {
     assert.equal(ui.chatFailureInHistory({ requestId: 'request-failure', error: 'Recovery required', errorCode: 'NEEDS_RECONCILIATION' }, [message]), false, 'authoritative recovery must not be hidden by an older request failure');
     assert.equal(ui.chatFailureInHistory({ requestId: null, error: message.error, errorCode: message.errorCode }, [message]), true);
   });
-  await check('paused Task recovery is reachable without parsing progress copy and cannot resume before inspection', () => {
+  await check('paused Task exposes automatic recovery without requiring a review form', () => {
     const task = { id: 'paused-task', title: 'Old Session', goal: 'Inspect first', status: 'paused', currentPhase: '', progress: { percent: null, note: '进度说明已经本地化' }, workspaceId: null, agent: 'codex', currentAgent: { provider: 'codex', sessionId: 'old-session' }, parentTaskId: null, verification: null, attemptCount: 0, childOutputKind: null, attempts: [], children: [], createdAt: 1, updatedAt: 1, rev: 2, checkpoint: null, result: null, artifacts: [], executionEvidence: [], agentHistory: [], failure: null };
     const html = renderToStaticMarkup(React.createElement(ui.TaskDetails, { task, providers: [], onHandoff() {}, onAction() {}, onStart() {}, onReconcile: async () => {}, onReview() {}, onCreateChild() {}, onComplete() {}, onVerifyChild() {} }));
-    assert.match(html, /核对已记录结果（只读）/);
-    assert.doesNotMatch(html, />继续任务</, 'recovery must require a current Core preview instead of calling resume blindly');
-    assert.match(html, /尚未读取恢复检查/);
+    assert.match(html, /自动恢复/);
+    assert.match(html, /disabled=""[^>]*>继续任务/, 'continuation waits for a current automatic Core check');
+    assert.doesNotMatch(html, /核对结果|确认核对并|已人工核对/);
   });
 } finally {
   await vite.close(); delete globalThis.window;

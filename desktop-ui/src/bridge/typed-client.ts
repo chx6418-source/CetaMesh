@@ -125,8 +125,11 @@ export interface TaskRecoveryPreview {
   ownership: { taskId: string; provider: string | null; taskStatus: string; reason: string; unconfirmedOperations: number; safeActions: string[] };
 }
 export interface TaskRecoverySubmission {
-  preview: TaskRecoveryPreview; action: 'resume' | 'release'; reviewSummary: string; nextInstruction: string; provider?: string;
+  preview: TaskRecoveryPreview; automatic: true; action: 'resume' | 'release'; nextInstruction?: string; provider?: string;
 }
+export type TaskRecoveryRequest = { expectedRev: number; action: 'resume' | 'release'; provider?: string; nextInstruction?: string; requestId?: string } & (
+  { automatic: true } | { automatic?: false; reviewToken: string; reviewedOperationIds: string[]; reviewSummary: string }
+);
 export interface Memory {
   provenance?: {status:'user-confirmed'|'agent-inference'|'historical-unverified';actor:string|null;at:string|number|null};
   validUntil?: number|null;
@@ -155,7 +158,8 @@ export interface Agent {
 export type AgentRuntimeProvider = 'gemini' | 'opencode' | 'qwen' | 'claude';
 export interface AgentConnectionEvidence {
   runtime: { installed: boolean; protocolVerified: boolean; version: string | null };
-  authentication: { mode: 'api-key' | 'provider-login'; state: string; verified: boolean };
+  authentication: { mode: 'api-key' | 'provider-login' | 'native-cli'; state: string; verified: boolean };
+  nativeCliSupported?: boolean;
   execution: { eligible: boolean; reason: string | null }; modelRequired: boolean;
   servicePresets?: { id: string; label: string; baseUrl: string | null }[];
   providerSelections?: { providerId: string; methodId: string; label: string }[];
@@ -168,11 +172,11 @@ export interface AgentAuthStatus {
 }
 export interface AgentRuntimeConfiguration {
   provider: AgentRuntimeProvider; enabled: boolean; runtimePath: string; nodePath: string; model: string; baseUrl: string;
-  authMode?: 'api-key' | 'provider-login'; servicePreset?: string; providerId?: string | null; methodId?: string | null; authorizationEpoch?: number;
+  authMode?: 'api-key' | 'provider-login' | 'native-cli'; servicePreset?: string; providerId?: string | null; methodId?: string | null; authorizationEpoch?: number;
   credentialConfigured: boolean; executionMode: 'native-permissions'; revision: number;
 }
 export interface AgentRuntimeInput {
-  authMode?: 'api-key' | 'provider-login'; servicePreset?: string; providerId?: string | null; methodId?: string | null;
+  authMode?: 'api-key' | 'provider-login' | 'native-cli'; servicePreset?: string; providerId?: string | null; methodId?: string | null;
   enabled?: boolean; runtimePath?: string; nodePath?: string; model?: string; baseUrl?: string; apiKey?: string; executionMode?: 'native-permissions';
 }
 export interface DshPresetCatalog { state: 'ready' | 'missing' | 'unreadable' | 'outside-root' | 'loading' | 'error'; truncated: boolean; presets: { id: string; compatible: boolean; reason: string | null }[] }
@@ -468,7 +472,7 @@ export const chatClient = {
   setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config })
 };
 export const taskClient = {
-  inspectRecovery: (id:string) => uiCall<TaskRecoveryPreview>('ui.task.recovery.inspect',{id}),
+  inspectRecovery: (id:string, automatic = false) => uiCall<TaskRecoveryPreview>('ui.task.recovery.inspect',{id,...(automatic ? {automatic:true} : {})}),
   overview: (query = '', status = '', page: { workspaceId?: string; offset?: number; limit?: number } = {}) => uiCall<{ tasks: Task[]; total: number; offset: number; limit: number; nextOffset: number | null; counts: Record<string, number>; needsAttention: string[] }>('ui.task.overview', { query, status, limit: 100, ...page }),
   get: (id: string) => uiCall<{ task: Task }>('ui.task.get', { id }),
     createChild: (input: { parentTaskId: string; expectedParentRev: number; goal: string; requestId: string;
@@ -488,8 +492,8 @@ export const taskClient = {
   start: (id: string, expectedRev?: number, agentProvider?: string, reasoningEffort?:string) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev, agentProvider, reasoningEffort }),
   pause: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.pause', { id, expectedRev }),
   resume: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.resume', { id, expectedRev }),
-  reconcile: (id: string, input: { expectedRev: number; reviewToken: string; reviewedOperationIds: string[]; reviewSummary: string; action: 'resume' | 'release'; provider?: string; nextInstruction?: string; requestId?: string }) =>
-    uiCall<{ task: Task }>('ui.task.reconcile', { id, ...input, reviewed: true }),
+  reconcile: (id: string, input: TaskRecoveryRequest) =>
+    uiCall<{ task: Task }>('ui.task.reconcile', { id, ...input, ...(input.automatic ? {} : { reviewed: true }) }),
   cancel: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.cancel', { id, expectedRev }),
   handoff: (id: string, targetProvider: string, expectedRev?: number) => uiCall<{ task: Task; handoff: { success: boolean; from: unknown; to: unknown } }>('ui.task.handoff', { id, targetProvider, expectedRev })
 };

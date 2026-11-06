@@ -54,7 +54,7 @@ const scenarios = [
   { width: 1280, height: 800, zoom: 1, dpr: 1.5, theme: 'dark' }
 ];
 const measurements = [], captures = [], checks = [], baselineIssues = [];
-let browser, socket, server, rpc, failed = true;
+let browser, browserClosed, socket, server, rpc, failed = true;
 
 async function bundle(directory) {
   const result = await build({
@@ -104,7 +104,7 @@ async function bundle(directory) {
         if(method==='ui.memory.overview')return{memories:memories.filter(row=>!params.types||params.types.includes(row.type)),total:memories.length,candidates:[candidate],candidateMeta:{pending:1,capacity:100,remaining:99},recovery:{failed:[]}};
         if(method==='ui.memory.get')return memories.find(row=>row.id===params.id)||memories[0];
         if(method==='ui.memory.update'){if(window.fixtureState.failMemory)throw new Error('Synthetic memory save failed; draft must remain');return{...memories.find(row=>row.id===params.id),...params,rev:3};}
-        if(method==='ui.agent.list'){if(window.fixtureState.failNextAgentList){window.fixtureState.failNextAgentList=false;throw new Error('Synthetic Agent list failed');}const snapshot=structuredClone(agents.map(row=>({...row,...window.fixtureAgentOverrides[row.id]})));if(window.fixtureState.holdNextAgentList){window.fixtureState.holdNextAgentList=false;await new Promise(resolve=>window.fixtureAgentListReleases.push(resolve));}return{agents:snapshot};}
+        if(method==='ui.agent.list'){if(window.fixtureState.failNextAgentList){window.fixtureState.failNextAgentList=false;throw new Error('Synthetic Agent list failed');}const snapshot=structuredClone(agents.map(row=>({...row,...(window.fixtureState.coldAgentDirectory&&row.id==='codex'&&params.refresh!==true?{status:'not-checked',available:null,eligible:null,taskEligible:null,authenticated:null,compatible:null,reason:'not-checked'}:{}),...window.fixtureAgentOverrides[row.id]})));if(window.fixtureState.holdNextAgentList){window.fixtureState.holdNextAgentList=false;await new Promise(resolve=>window.fixtureAgentListReleases.push(resolve));}return{agents:snapshot};}
         if(method==='ui.agent.health'){if(window.fixtureState.failNextAgentHealth){window.fixtureState.failNextAgentHealth=false;throw new Error('Synthetic Agent health failed');}const row=agents.find(item=>item.id===params.provider)||agents[0];const snapshot=structuredClone({...row,...window.fixtureAgentOverrides[row.id]});if(window.fixtureState.holdNextAgentHealth){window.fixtureState.holdNextAgentHealth=false;await new Promise(resolve=>window.fixtureAgentHealthReleases.push(resolve));}return snapshot;}
         if(method==='ui.agent.configure'){if(window.fixtureState.failNextAgentConfigure){window.fixtureState.failNextAgentConfigure=false;throw new Error('Synthetic Agent save failed');}const row=agents.find(item=>item.id===params.agentId);if(row?.id==='dsh'){row.configuration={...row.configuration,revision:row.configuration.revision+1,pending:params.config};return{provider:'dsh',supported:true,applied:false,restartRequired:true,configuration:row.configuration};}if(!row?.runtimeConfiguration)throw new Error('Unsupported fixture configuration');if(window.fixtureState.holdNextAgentConfigure){window.fixtureState.holdNextAgentConfigure=false;await new Promise(resolve=>window.fixtureAgentConfigureReleases.push(resolve));}const {apiKey,...safeConfig}=params.config;row.runtimeConfiguration={...row.runtimeConfiguration,...safeConfig,credentialConfigured:!!apiKey||row.runtimeConfiguration.credentialConfigured,revision:row.runtimeConfiguration.revision+1};return{provider:row.id,supported:true,applied:true,configuration:row.runtimeConfiguration};}
         if(method==='ui.agent.presets')return{state:'missing',truncated:false,presets:[]};
@@ -159,7 +159,8 @@ try {
   const edge=path.join(process.env['ProgramFiles(x86)']||'C:/Program Files (x86)','Microsoft/Edge/Application/msedge.exe');
   if(!fs.existsSync(edge)){console.log('NOT_RUN_ENVIRONMENT: real Edge is required');process.exitCode=77;failed=false;}
   else {
-    const profile=path.join(sandbox.root,'profile');browser=spawn(edge,['--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--remote-debugging-port=0','--remote-debugging-address=127.0.0.1','--user-data-dir='+profile,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    const profile=path.join(sandbox.root,'profile');browser=spawn(edge,['--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--disable-background-networking','--disable-component-update','--remote-debugging-port=0','--remote-debugging-address=127.0.0.1','--user-data-dir='+profile,'about:blank'],{windowsHide:true,stdio:'ignore'});
+    browserClosed=new Promise(resolve=>browser.once('close',resolve));
     let launchError;browser.on('error',e=>launchError=e);const activePort=path.join(profile,'DevToolsActivePort');for(let i=0;!fs.existsSync(activePort)&&!launchError&&i<100;i++)await delay(100);assert.equal(launchError,undefined);assert.ok(fs.existsSync(activePort),'owned browser endpoint');
     const[port,browserPath]=fs.readFileSync(activePort,'utf8').trim().split(/\r?\n/);socket=new WebSocket('ws://127.0.0.1:'+port+browserPath);await new Promise((resolve,reject)=>{socket.once('open',resolve);socket.once('error',reject);});
     let sequence=0;const pending=new Map();socket.on('message',bytes=>{const value=JSON.parse(String(bytes)),entry=pending.get(value.id);if(!entry)return;pending.delete(value.id);clearTimeout(entry.timer);value.error?entry.reject(new Error(value.error.message)):entry.resolve(value.result);});
@@ -230,12 +231,22 @@ try {
       await rpc('Page.navigate',{url:'http://127.0.0.1:'+server.address().port+'/'+version},sessionId);await until('!!window.fixture&&!!document.querySelector(".harbor-shell")','Harbor '+version+' boot');
       if(agentRaceOnly){
         assert.equal(version,'after');
-        await show('agents');await until('document.querySelectorAll(".agent-card").length===4','Agent list');
+        await evaluate('window.fixtureState.coldAgentDirectory=true;window.fixtureState.holdNextAgentList=true');
+        const coldCallIndex=await evaluate('window.fixtureCalls.length');
+        await show('agents');await until('window.fixtureAgentListReleases.length===1','initial Agent check held');
+        assert.equal(await evaluate('!!document.querySelector(".agent-card")'),false,'an unresolved initial check cannot present cached readiness');
+        await evaluate('window.fixtureAgentListReleases.shift()()');
+        await until('document.querySelectorAll(".agent-card").length===4','Agent list');
+        const codex='[...document.querySelectorAll(".agent-card")].find(n=>n.querySelector("h3")?.textContent==="Codex")';
+        assert.equal(await evaluate(codex+'?.innerText.includes("已就绪")'),true,'first visit must perform local connection checks without a manual refresh');
+        const initialAgentCalls=await evaluate('window.fixtureCalls.slice('+coldCallIndex+').filter(row=>row.method.startsWith("ui.agent."))');
+        assert.deepEqual(initialAgentCalls,[{method:'ui.agent.list',params:{refresh:true}}],'initial checks are one bounded Core health request without login, configuration or model execution');
+        checks.push({kind:'agent-first-visit-local-check-without-model-execution',pass:true});
+        await evaluate('window.fixtureState.coldAgentDirectory=false');
         await evaluate('window.fixtureState.holdNextAgentList=true');await textClick('刷新状态');
         await until('window.fixtureAgentListReleases.length===1','first Agent list held');
         await evaluate('window.fixtureAgentOverrides.codex={status:"unavailable",available:false,eligible:false,taskEligible:false,reason:"runtime_detection_failed"}');
         await textClick('刷新状态');
-        const codex='[...document.querySelectorAll(".agent-card")].find(n=>n.querySelector("h3")?.textContent==="Codex")';
         await until(codex+'?.innerText.includes("暂不可用")','newer Agent list is visible');
         await evaluate('window.fixtureAgentListReleases.shift()()');await delay(300);
         assert.ok(await evaluate(codex+'?.innerText.includes("暂不可用")'),'late Agent list must not replace a newer result');
@@ -318,6 +329,39 @@ try {
         await pointerClick(dsh+'?.querySelector(".agent-setup-disclosure [role=status] button")','reload DSH configuration');
         assert.equal(await evaluate('document.querySelector("input[aria-label=\\"DSH 服务地址\\"]")?.value'),'http://127.0.0.1:3083','DSH reload adopts latest configuration');
         checks.push({kind:'agent-out-of-order-list-and-health',pass:true});
+        await evaluate('(()=>{const template=window.fixture.agents.find(a=>a.id==="gemini");window.fixture.agents.push({...template,id:"claude",name:"Claude",reason:"agent_credential_required",lastError:null,runtimeConfiguration:{...template.runtimeConfiguration,provider:"claude",model:"",baseUrl:"https://api.anthropic.com",credentialConfigured:false,authMode:"api-key"},connection:{...template.connection,nativeCliSupported:true,runtime:{installed:true,protocolVerified:true,version:"fixture"}}})})()');
+        await textClick('刷新状态');await until('document.querySelectorAll(".agent-card").length===5','Claude native setup fixture');
+        const claude='[...document.querySelectorAll(".agent-card")].find(n=>n.querySelector("h3")?.textContent==="Claude")';
+        await pointerClick(claude+'?.querySelector(".agent-setup-disclosure summary")','Claude setup');
+        await until('!!('+claude+'?.querySelector("button[aria-label=\\"认证方式\\"]"))','Claude auth options');
+        await evaluate(claude+'?.querySelector("button[aria-label=\\"认证方式\\"]").scrollIntoView({block:"center",behavior:"instant"})');await delay(150);
+        await evaluate(claude+'?.querySelector("button[aria-label=\\"认证方式\\"]").focus()');await key('Enter');
+        await until('[...document.querySelectorAll("[role=option]")].some(n=>n.checkVisibility()&&n.textContent.includes("使用已登录的 Claude Code"))','native Claude auth option becomes visible');
+        await pointerClick('[...document.querySelectorAll("[role=option]")].find(n=>n.textContent.includes("使用已登录的 Claude Code"))','explicit native Claude login');
+        assert.equal(await evaluate(claude+'?.querySelector("input[aria-label=\\"API Key\\"]")!==null'),false,'native choice does not request an API key');
+        await evaluate('window.fixtureAgentOverrides.claude={reason:"claude_native_login_required"}');
+        const nativeSaveCallIndex=await evaluate('window.fixtureCalls.length');
+        await pointerClick(claude+'?.querySelector("form button[type=submit]")','save native Claude connection');
+        await until(claude+'?.querySelector(".agent-unavailable-reason")?.innerText.includes("claude auth login")','saved native connection automatically reports missing CLI login');
+        assert.equal(await evaluate(claude+'?.querySelector(".cm-badge")?.innerText'), '需要设置','saved native mode is not ready without authentication');
+        const nativeSaveCalls=await evaluate('window.fixtureCalls.slice('+nativeSaveCallIndex+').filter(row=>row.method.startsWith("ui.agent."))');
+        assert.deepEqual(nativeSaveCalls.map(row=>row.method),['ui.agent.configure','ui.agent.health'],'saving native mode performs one local check without starting a login or model session');
+        assert.equal(nativeSaveCalls[0].params.config.authMode,'native-cli');
+        assert.deepEqual(nativeSaveCalls[1].params,{provider:'claude',refresh:true});
+        checks.push({kind:'agent-explicit-native-config-and-passive-health',pass:true});
+        await evaluate('(()=>{const template=window.fixture.agents.find(a=>a.id==="gemini");window.fixture.agents.push({...template,id:"opencode",name:"OpenCode",reason:"agent_model_required",lastError:null,runtimeConfiguration:{...template.runtimeConfiguration,provider:"opencode",model:"",baseUrl:"https://api.openai.com/v1",credentialConfigured:false,authMode:"api-key"},connection:{...template.connection,nativeCliSupported:false,accountReason:"opencode_native_policy_override_unsupported",runtime:{installed:true,protocolVerified:true,version:"opencode v2.1.4"}}})})()');
+        await textClick('刷新状态');await until('document.querySelectorAll(".agent-card").length===6','OpenCode account boundary fixture');
+        const openCode='[...document.querySelectorAll(".agent-card")].find(n=>n.querySelector("h3")?.textContent==="OpenCode")';
+        const openCodeCalls=await evaluate('window.fixtureCalls.length');
+        await pointerClick(openCode+'?.querySelector(".agent-setup-disclosure summary")','OpenCode setup');
+        await until(openCode+'?.querySelector("form")?.innerText.includes("OpenCode 2.1.4")','verified OpenCode policy incompatibility is visible');
+        assert.ok(await evaluate(openCode+'?.querySelector(".agent-unavailable-reason")?.innerText.includes("尚未选择模型")'),'missing API model stays distinct from native-account incompatibility');
+        assert.equal(await evaluate(openCode+'?.querySelector("input[aria-label=\\"模型（必填）\\"]")?.value'),'','native account unavailability never invents an API model');
+        assert.ok(await evaluate(openCode+'?.querySelector("input[aria-label=\\"API Key\\"]")?.checkVisibility()'),'the isolated API credential path stays available');
+        assert.equal(await evaluate(openCode+'?.querySelector("button[aria-label=\\"认证方式\\"]")?.innerText'),'API Key','native account incompatibility does not change the saved API mode');
+        assert.deepEqual(await evaluate('window.fixtureCalls.slice('+openCodeCalls+').filter(row=>row.method.startsWith("ui.agent.")).map(row=>row.method)'),['ui.agent.auth.describe'],'inspecting unsupported account setup uses only passive auth metadata');
+        assert.equal(await evaluate('window.fixtureCalls.slice('+openCodeCalls+').some(row=>["ui.task.start","ui.task.resume","ui.chat.send"].includes(row.method))'),false,'inspecting unsupported account setup causes no task or model request');
+        checks.push({kind:'opencode-verified-account-block-keeps-explicit-api-setup',pass:true});
         continue;
       }
       if(pluginRaceOnly){
@@ -551,6 +595,7 @@ try {
   try {
     if(rpc&&socket?.readyState===WebSocket.OPEN){try{await rpc('Browser.close');}catch{} }
     if(socket&&socket.readyState!==WebSocket.CLOSED)socket.terminate();
+    if(browserClosed)await Promise.race([browserClosed,delay(3000)]);
     // Browser.close can acknowledge before Edge's Windows process tree exits.
     // Give that owned browser time to close instead of racing taskkill against
     // already-exiting descendants and misclassifying successful cleanup.

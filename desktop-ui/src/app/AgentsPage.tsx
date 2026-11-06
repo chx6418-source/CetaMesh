@@ -43,7 +43,7 @@ export function AgentsPage() {
     }
     finally { if (epoch === lifetime.current && request === latestRefresh.current) setLoading(false); }
   }, []);
-  useEffect(() => { ++lifetime.current; void refresh(); return () => { ++lifetime.current; }; }, [refresh]);
+  useEffect(() => { ++lifetime.current; void refresh(true); return () => { ++lifetime.current; }; }, [refresh]);
   const ready = agents.filter(isAgentReady).length;
   const taskReady = agents.filter(agent => agent.taskEligible === true && isAgentReady(agent)).length;
   const needsSetup = agents.filter(agentNeedsSetup).length;
