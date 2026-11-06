@@ -23,7 +23,8 @@ try {
   assert.match(markup, /NexBox-main/);
   assert.match(markup, /aria-label="添加附件"/);
   assert.match(markup, /class="composer-submit"[^>]*aria-label="发送消息"[^>]*disabled/);
-  assert.match(markup, /Codex 本机配置/);
+  assert.match(markup, /Codex · 待确认/, 'a selected provider without a runtime acknowledgement must not claim an effective model');
+  assert.doesNotMatch(markup, /Codex 本机配置/);
   assert.match(markup, /aria-label="选择模型与推理"/);
   assert.match(markup, /aria-label="上下文与用量"/);
   assert.doesNotMatch(markup, /class="composer-footnote"|>发送<|麦克风|语音/);

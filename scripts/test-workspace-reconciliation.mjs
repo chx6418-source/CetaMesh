@@ -26,7 +26,9 @@ import { gitDiff, gitHead, gitStatus } from '../src/workspace/tools.js';
 import { workspaceContentProof } from '../src/workspace/handoff-facts.js';
 
 const root = path.resolve(import.meta.dirname, '..');
-const temp = fs.mkdtempSync(path.join(os.tmpdir(), 'ws-reconcile-test-'));
+// Windows CI may supply an 8.3 TEMP alias. Production Workspace registration
+// canonicalizes roots before content proof; this fixture must use that identity.
+const temp = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'ws-reconcile-test-')));
 
 let step = 0;
 function ok(label) { step += 1; console.log(`✅ [${step}] ${label}`); }
