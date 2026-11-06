@@ -297,6 +297,18 @@ try {
   check('IPC task.get 返回同一任务', Boolean(getFrame && getFrame.ok && getFrame.result && getFrame.result.task && getFrame.result.task.id === created.id), JSON.stringify(getFrame && getFrame.error));
   check('IPC task.overview 往返成功', Boolean(ovFrame && ovFrame.ok === true), JSON.stringify(ovFrame && ovFrame.error));
   fs.rmSync(svcDir, { recursive: true, force: true });
+
+  const identityRuntime = createTaskRuntime({ stateDir: path.join(root, 'creation-identity'), now });
+  const oldGoal = identityRuntime.create({ goal: '你好', workspaceId: 'ws-chat-identity', requestId: 'work-identity' });
+  equal('默认创建仍按目标兼容去重', identityRuntime.create({ goal: '你好', workspaceId: 'ws-chat-identity' }).id, oldGoal.id);
+  const freshGoal = identityRuntime.create({ goal: '你好', workspaceId: 'ws-chat-identity', requestId: 'chat-identity', deduplicateGoal: false });
+  check('正式 Chat 可创建独立同名任务', freshGoal.id !== oldGoal.id);
+  equal('独立同名任务仍按精确创建请求幂等', identityRuntime.create({ goal: '你好', workspaceId: 'ws-chat-identity', requestId: 'chat-identity', deduplicateGoal: false }).id, freshGoal.id);
+  const reloadedIdentity = createTaskRuntime({ stateDir: path.join(root, 'creation-identity'), now });
+  equal('重载后精确创建请求仍关联原任务', reloadedIdentity.create({ goal: '你好', workspaceId: 'ws-chat-identity', requestId: 'chat-identity', deduplicateGoal: false }).id, freshGoal.id);
+  const changedIdentity = capture(() => identityRuntime.create({ goal: 'Changed request', workspaceId: 'ws-chat-identity', requestId: 'chat-identity', deduplicateGoal: false }));
+  check('精确请求不能换目标', changedIdentity.code === 'REQUEST_ID_CONFLICT');
+  check('内部去重选项不写入产品结构', !Object.hasOwn(freshGoal, 'deduplicateGoal'));
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

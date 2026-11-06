@@ -237,6 +237,23 @@ export function isAgentReady(agent: Pick<Agent, 'eligible' | 'taskEligible'> & P
   return !failedCheck && (!agent.status || agent.status === 'ready') && (agent.eligible === true || agent.taskEligible === true);
 }
 
+export function isAgentTaskCheckPending(agent: Agent) {
+  return agent.id === 'codex' && agent.status === 'task-check-pending' && agent.available === true && agent.installed === true
+    && agent.compatible === true && agent.authenticated === true && agent.sessionCapable === true && agent.taskEligible === true && agent.sandboxCapable === null
+    && ![agent.reason, agent.probeCode, agent.diagnostic?.code].some(value => value?.trim().toUpperCase() === 'CHECK_FAILED');
+}
+
+export function agentAvailabilityReasonLabel(agent: Agent): string {
+  if (isAgentTaskCheckPending(agent)) return '连接检查已通过。请在工作区任务中明确选择 Codex 并完成范围授权；隔离与工具能力将在首次任务执行时验证。';
+  if (agent.id === 'claude' && agent.connection?.nativeCliSupported === true
+    && (agent.runtimeConfiguration?.authMode ?? 'api-key') === 'api-key' && agent.runtimeConfiguration?.credentialConfigured === false
+    && ['agent_credential_required', 'credential_missing'].includes(agent.reason?.trim().toLowerCase() ?? '')) {
+    return '当前为 API 连接，尚未配置 API Key。可在连接设置中选择“使用已登录的 Claude Code”，或保存 API 凭据。';
+  }
+  if (agent.reason === 'task-required') return isAgentReady(agent) ? '此能力需要先分配工作区任务。' : '请先检查连接与任务执行条件。';
+  return agent.id === 'dsh' ? dshSetupReasonLabel(agent.reason) : availabilityReasonLabel(agent.reason);
+}
+
 export function CodexSetupDiagnostic({ agent }: { agent: Agent }) {
   const code = agent.probeCode;
   const action = code === 'NODE_RUNTIME_UNAVAILABLE' ? 'npm CLI 需要独立 Node；可改用原生 Codex CLI。'
@@ -247,6 +264,7 @@ export function CodexSetupDiagnostic({ agent }: { agent: Agent }) {
     : agent.compatible === false ? '已检测到 CLI，但版本或 exec 协议不兼容；请检查 CLI 版本。'
     : agent.authenticated === false ? 'Codex CLI 已安装，请在 CLI 完成登录后检查连接。'
     : agent.sandboxCapable === false ? 'Windows Sandbox 无法执行所需隔离；任务已阻止，不会无沙箱运行。'
+    : isAgentTaskCheckPending(agent) ? agentAvailabilityReasonLabel(agent)
     : agent.taskEligible && isAgentReady(agent) ? 'Codex CLI 已就绪 · 仅工作区任务。' : '请检查 CLI 的连接与任务条件。';
   return <div className="agent-setup-diagnostic"><strong>Codex CLI</strong><p>{action}</p><small>安装：{agent.installed === true ? '已检测' : agent.installed === false ? '未检测' : '未知'} · 协议：{agent.compatible ? '兼容' : '未验证或不兼容'} · 登录：{agent.authenticated ? '已认证' : '未验证或未登录'} · Sandbox：{agent.sandboxCapable === true ? '已验证' : agent.sandboxCapable === false ? '不可用' : '待首次明确选择的任务验证'}</small>{code && <small role="status">{agent.probePhase} · {code}</small>}</div>;
 }
@@ -255,5 +273,5 @@ export function AgentInstallationDiagnostic({ agent }: { agent: Agent }) {
   if (!agent.desktopApp) return null;
   if (agent.id === 'dsh') return <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed === true ? '已安装' : agent.desktopApp.installed === false ? '未检测到' : '安装状态未知'} · {agent.desktopApp.running === true ? '运行中' : agent.desktopApp.running === false ? '未运行' : '运行状态未知'}</span><span>DSH Agent Provider：{agent.available === true && agent.reason !== 'CHECK_FAILED' ? '已连接' : agent.available === false ? '未连接' : '连接状态未知'}</span></div>;
   const installed = agent.desktopApp.installed;
-  return <div className="agent-desktop-state"><strong>{agent.desktopApp.displayName || agent.name} 桌面客户端</strong><span>桌面客户端：{installed === true ? '已安装' : installed === false ? '未检测到' : '检测结果未知'}{agent.desktopApp.version ? ' · ' + agent.desktopApp.version : ''}</span><span>CLI：{agent.cliInstalled === true ? '已检测到' : agent.cliInstalled === false ? '未检测到' : '检测结果未知'} · Agent 连接：{isAgentReady(agent) ? '已就绪' : '待验证'}</span></div>;
+  return <div className="agent-desktop-state"><strong>{agent.desktopApp.displayName || agent.name} 桌面客户端</strong><span>桌面客户端：{installed === true ? '已安装' : installed === false ? '未检测到' : '检测结果未知'}{agent.desktopApp.version ? ' · ' + agent.desktopApp.version : ''}</span><span>CLI：{agent.cliInstalled === true ? '已检测到' : agent.cliInstalled === false ? '未检测到' : '检测结果未知'} · Agent 连接：{isAgentReady(agent) ? '已就绪' : isAgentTaskCheckPending(agent) ? '已通过 · 任务待验证' : '待验证'}</span></div>;
 }

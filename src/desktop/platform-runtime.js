@@ -1,10 +1,11 @@
-import { explicitDelegationTarget } from './explicit-delegation.js';
+import { explicitCollaborationIntent, explicitDelegationTarget } from './explicit-delegation.js';
 import { OWNER_ACTOR, capabilityError } from '../capability/types.js';
 import crypto from 'node:crypto';
 import { rankTaskAgents } from '../router/agent-assignment.js';
 import { isSafeAgentDispatchPreflight } from '../capability/service.js';
 import { inspectTaskSession } from '../agent/session-recovery.js';
 import { createTaskRecovery, taskRecoveryInstruction } from './task-recovery.js';
+import { configureTaskCollaboration } from './task-launch.js';
 
 /** Owner application operations reuse the existing Task and execution authorities. */
 export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, toolExecutionCoordinator, modelRuntime, legacyModel, prepareTaskContext = null }) {
@@ -173,7 +174,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     return taskRuntime.cancel({ id: settled.id, expectedRev: settled.rev, reason });
   }
 
-  async function selectProviders(record, task, decision, requested = null) {
+  async function selectProviders(record, task, decision, requested = null, collaborationRequested = false) {
     const selected = record.config.agentProvider;
     if (selected === 'none' || decision.agentEnabled === false) {
       throw capabilityError('AGENT_DISABLED', 'Agent execution is disabled for this Chat');
@@ -215,6 +216,15 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       throw capabilityError('AGENT_PROVIDER_SELECTION_REQUIRED',
         'Automatic Agent assignment needs a concrete selected Model identity and verified cost');
     }
+    if (collaborationRequested) {
+      // This is the Chat's already selected Model running under Managed's Core
+      // tools. Additional executors still need the separate delegation policy,
+      // price evidence and native consent; there is no automatic native fallback.
+      if (!managedReady) throw capabilityError('AGENT_PROVIDER_SELECTION_REQUIRED',
+        'Collaboration needs a configured tool-capable Chat model or an explicitly selected Agent');
+      return rankTaskAgents({ agentBroker, workspaceId: task?.workspaceId || record.config.workspaceId,
+        explicitProvider: 'cetamesh' });
+    }
     const eligibleBroker = { ...agentBroker, ids: () => agentBroker.ids().filter(id => id !== 'cetamesh' || managedReady) };
     const candidates = await rankTaskAgents({ agentBroker: eligibleBroker,
       workspaceId: task?.workspaceId || record.config.workspaceId, taskKind: 'code', requiredTools, difficulty,
@@ -230,18 +240,54 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     }
   }
 
-  async function route({ decision, record, text, sourceText, requestId, signal,attachmentManifest=[] }) {
+  // Hold the actual dispatch receipt through duplicate Chat entry. Rebuilding a
+  // completed request from a now-attached Task would change its context and the
+  // Broker fingerprint. This cache adds no execution or persistent authority.
+  const routedRequests = new Map();
+  async function route(request) {
+    if (!request.decision.agentIntent || !request.requestId) return routeOnce(request);
+    const { requestId, record } = request;
+    const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
+      chatId: record.id ?? null, config: record.config, decision: request.decision,
+      text: request.text, sourceText: request.sourceText, attachmentManifest: request.attachmentManifest ?? []
+    })).digest('hex');
+    let entry = routedRequests.get(requestId);
+    if (entry && (entry.fingerprint !== fingerprint
+      || (record.taskId && record.taskId !== entry.initialTaskId && record.taskId !== entry.taskId))) {
+      throw Object.assign(capabilityError('REQUEST_ID_CONFLICT', 'Chat request ID reused with different data'), { failureStage: 'pre-dispatch' });
+    }
+    if (!entry) {
+      entry = { fingerprint, initialTaskId: record.taskId, settled: false };
+      entry.promise = Promise.resolve().then(() => routeOnce(request, taskId => { entry.taskId = taskId; }));
+      routedRequests.set(requestId, entry);
+      entry.promise.then(() => {
+        entry.settled = true;
+        for (const [id, previous] of routedRequests) {
+          if (routedRequests.size <= 128) break;
+          if (previous.settled) routedRequests.delete(id);
+        }
+      }, () => { routedRequests.delete(requestId); });
+    }
+    const result = await entry.promise;
+    if (result?.taskId) record.taskId = result.taskId;
+    return structuredClone(result);
+  }
+
+  async function routeOnce({ decision, record, text, sourceText, requestId, signal,attachmentManifest=[] }, onTaskLinked = () => {}) {
     // This observation describes this request only. It never grants retry or
     // releases an earlier Task's execution/unknown-effect fence.
     let executionEntered = false;
     let handoffEntered = false;
     try {
     const requested = explicitDelegationTarget(sourceText ?? text);
+    const collaborationRequested = explicitCollaborationIntent(sourceText ?? text);
     if (decision.agentIntent) {
       if (signal?.aborted) throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
       const workspaceId = record.config.workspaceId || (await workspaceService.execute({ method: 'workspace.list' })).activeId;
       if (!workspaceId) throw capabilityError('WORKSPACE_REQUIRED', '请先在 Workspaces 选择工作区，再启动项目任务');
       if (signal?.aborted) throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
+      const creation = { requestId, goal: text.slice(0, 2000), workspaceId,
+        requestedAgentProvider: requested || record.config.agentProvider || null };
       let task = null;
       if (record.taskId) {
         try { task = taskRuntime.get({ id: record.taskId }).task; }
@@ -251,30 +297,37 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       }
       if (task && task.workspaceId !== workspaceId) task = null;
       if (task && ['completed', 'cancelled', 'failed'].includes(task.status)) task = null;
-      if (!task) task = taskRuntime.findByGoalWorkspace({ goal: text.slice(0, 2000), workspaceId });
+      // A repeated goal is not a Chat identity. Only this Chat's explicit Task
+      // binding or the exact persisted creation request can continue a Task.
+      if (!task) task = taskRuntime.findByCreateRequestId(creation);
       if (task?.status === 'queued' && !task.currentAgent) {
         throw capabilityError('TASK_DISPATCH_INCOMPLETE',
           'An existing queued Task has no confirmed Agent; review its original Owner selection before dispatch');
       }
-      const candidates = await selectProviders(record, task, decision, requested);
+      const candidates = await selectProviders(record, task, decision, requested, collaborationRequested);
       const provider = candidates[0].provider;
       // Only the local Chat service supplies this normalized manifest. It contains
       // references, never file bytes; the reader rechecks the committed Session/Task.
       const attachedText=attachmentManifest.some(r=>r.kind==='text'&&r.scope?.sessionId===record.id&&r.scope?.workspaceId===workspaceId);
       if(attachmentManifest.length&&provider!=='cetamesh')throw capabilityError('ATTACHMENT_AGENT_UNSUPPORTED','当前外部 Agent 没有受控附件读取桥；请先申请将项目ZIP导入Workspace，或使用CetaMesh分析附件');
       await taskRecovery.releaseWorkspace({ workspaceId, exceptTaskId: task?.id });
+      const owner = taskRuntime.activeWorkspaceOwner?.({ workspaceId, exceptTaskId: task?.id });
+      if (owner) throw Object.assign(capabilityError('TASK_WORKSPACE_BUSY',
+        `工作区仍由任务 ${owner.id} 占用，请查看该任务的执行状态。`), { blockingTaskId: owner.id });
       let createdTask = false;
       if (!task) {
-        const concurrent = taskRuntime.findByGoalWorkspace({ goal: text.slice(0, 2000), workspaceId });
+        const concurrent = taskRuntime.findByCreateRequestId(creation);
         if (concurrent?.status === 'queued' && !concurrent.currentAgent) {
           throw capabilityError('TASK_DISPATCH_INCOMPLETE', 'Concurrent queued Task requires Owner review before dispatch');
         }
-        task = concurrent ?? taskRuntime.create({ goal: text.slice(0, 2000), workspaceId,
-          note: 'Smart Chat project task', requestId, requestedAgentProvider: requested || record.config.agentProvider || null });
+        task = concurrent ?? taskRuntime.create({ ...creation,
+          note: 'Smart Chat project task', deduplicateGoal: false });
         record.taskId = task.id;
+        onTaskLinked(task.id);
         createdTask = !concurrent;
       } else {
         record.taskId = task.id;
+        onTaskLinked(task.id);
         if (['paused', 'blocked', 'waiting'].includes(task.status)) task = (await recoverTask({ id: task.id, expectedRev: task.rev })).task;
       }
       if (signal?.aborted) {
@@ -282,6 +335,24 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
           taskRuntime.cancel({ id: task.id, expectedRev: task.rev, reason: 'Chat request was deleted before Agent startup' });
         }
         throw Object.assign(new Error('Chat operation cancelled'), { code: 'ABORTED' });
+      }
+      let collaborationGrants = null;
+      if (collaborationRequested && provider === 'cetamesh') {
+        if (createdTask) {
+          // A direct analysis request authorizes only this new Task's Workspace
+          // reads and one bounded proposal. Issuing the policy after this grant
+          // avoids the general Task-launch default write capabilities.
+          capabilityService.grantTask(task.id, { capabilities: ['filesystem.read', 'filesystem.search',
+            'git.status', 'git.diff', 'memory.read', 'operation.read', ...(attachedText ? ['attachment.read'] : [])] });
+          task = await configureTaskCollaboration({ taskService: { runtime: taskRuntime }, capabilityService }, task, {
+            collaboration: { enabled: true, allowUnknownCost: false, prepareNative: true },
+            modelProvider: record.config.modelProvider, model: record.config.model,
+            reasoningEffort: record.config.reasoning
+          });
+        }
+        // Existing policy, expiry, revocation and usage remain authoritative;
+        // another Chat instruction never silently renews the Task's grant.
+        collaborationGrants = capabilityService.principalForTask(task.id).grants;
       }
       const inheritedContext = typeof prepareTaskContext === 'function'
         ? await prepareTaskContext({ record, taskId: task.id,
@@ -342,7 +413,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
             if (!requested && !record.config.agentProvider && !task.currentAgent) {
               // An automatic selection remains automatic at the dispatch boundary:
               // never apply the weaker explicit Owner-selection exception here.
-              const currentCandidates = await selectProviders(record, task, decision);
+              const currentCandidates = await selectProviders(record, task, decision, null, collaborationRequested);
               if (!currentCandidates.some(candidate => candidate.provider === choice.provider)) {
                 throw capabilityError('AGENT_PROVIDER_SELECTION_REQUIRED', 'Automatic Agent eligibility changed before dispatch');
               }
@@ -359,7 +430,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
                 ...(choice.provider === 'cetamesh' || record.config.agentProvider === choice.provider ? { modelProvider: record.config.modelProvider,
                   model: record.config.model !== legacyModel ? record.config.model : undefined,
                   reasoningEffort: record.config.reasoning } : {}),
-                grants: { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search',
+                grants: collaborationGrants ?? { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search',
                   'git.status', 'git.diff', 'memory.read', 'test.run', 'operation.read', 'operation.continue',...(attachedText?['attachment.read']:[])] } },
               reason: index ? 'Smart project task safe reassignment after verified preflight failure' : 'Smart project task'
             }, { signal });

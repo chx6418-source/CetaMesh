@@ -1,5 +1,6 @@
 import {projectChatContext,projectAgentModelControl} from './chat-telemetry.js';
-import { explicitDelegationTarget } from './explicit-delegation.js';
+import { projectChatFailureDetails, projectChatFailureMessage } from './chat-failure-details.js';
+import { explicitCollaborationIntent, explicitDelegationTarget } from './explicit-delegation.js';
 import { canDispatchTaskAgent, taskAgentUnavailableReason } from '../agent/execution-security.js';
 import { aggregateModelUsage, normalizeModelUsage } from '../model/usage.js';
 // CetaMesh Desktop 产品级 Chat 运行时（阶段 03；会话 1 改造为双通道）。
@@ -1304,14 +1305,16 @@ export function createChatService({
         ...activityProjection(turn),
         ...(turn.agentActivity ? { agentActivity: { ...turn.agentActivity } } : {}),
         ...(turn.routing ? { routing: turn.routing } : {}),
-        ...(turn.state === 'error' ? { error: turn.error ?? '回合异常', errorCode: turn.errorCode ?? 'PROVIDER_ERROR', failureStage: turn.failureStage } : {}),
+        ...(turn.state === 'error' ? { error: turn.error ?? '回合异常', errorCode: turn.errorCode ?? 'PROVIDER_ERROR', failureStage: turn.failureStage,
+          errorDetails: projectChatFailureDetails(turn.errorDetails) } : {}),
         ...(turn.state === 'cancelled' ? { cancelled: true } : {})
       });
       onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, turnId: turn.id,
         requestId: turn.requestId, messageId, historyRevision, status: turn.state } });
       if (turn.state === 'error') {
         try { onFailure?.({ code: turn.errorCode, taskId: turn.routing?.taskId ?? turn.accountingTaskId ?? record.taskId,
-          blockingTaskId: turn.routing?.blockingTaskId, requestId: turn.requestId, failureStage: turn.failureStage }); }
+          blockingTaskId: turn.routing?.blockingTaskId, requestId: turn.requestId, failureStage: turn.failureStage,
+          recoveryCode: projectChatFailureDetails(turn.errorDetails)?.recoveryCode ?? null }); }
         catch { /* Diagnostic failure never changes a settled Chat or its execution evidence. */ }
       }
     }
@@ -1857,7 +1860,8 @@ export function createChatService({
           if (error?.code === 'TASK_WORKSPACE_BUSY' && typeof error.blockingTaskId === 'string') {
             turn.routing = { ...turn.routing, blockingTaskId: error.blockingTaskId.slice(0, 128) };
           }
-          turn.error = cancelled ? null : String(error?.message ?? 'Authorized Agent operation failed').slice(0, 1000);
+          turn.errorDetails = cancelled ? null : projectChatFailureDetails(error);
+          turn.error = cancelled ? null : projectChatFailureMessage(String(error?.message ?? 'Authorized Agent operation failed'), turn.errorCode);
           finalizeTurn(record, state);
           onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: turn.state, requestId: operation.requestId } });
         }
@@ -2261,7 +2265,7 @@ export function createChatService({
       if(current?.attachmentRefs?.some(r=>r.kind==='image')) {
         validateImageRoute(record,current.attachmentRefs);
         await startModelOrDshTurn(record,state,promptText,{attachments,sourceText,retryMessageId,skipPlatformRoute:true,routingOverride:{class:'image-analysis',route:'model',agentIntent:false,capabilityIntent:false}});
-      } else if ((record.taskId || explicitDelegationTarget(sourceText ?? promptText)) && platformRoute && agentProviderId !== AGENT_PROVIDER_DISABLED) {
+      } else if ((record.taskId || explicitDelegationTarget(sourceText ?? promptText) || explicitCollaborationIntent(sourceText ?? promptText)) && platformRoute && agentProviderId !== AGENT_PROVIDER_DISABLED) {
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
       } else if (agentProviderId === 'cetamesh' && platformRoute) {
         await startModelOrDshTurn(record, state, promptText, { attachments, sourceText, forceProject: true, retryMessageId });
@@ -2312,6 +2316,7 @@ export function createChatService({
           : ['assistant', 'system'].includes(last?.role) && typeof last.error === 'string' ? last.error : null,
         lastErrorCode: recovery ? recovery.state.toUpperCase().replace(/-/g, '_')
           : ['assistant', 'system'].includes(last?.role) && typeof last.errorCode === 'string' ? last.errorCode : null,
+        lastErrorDetails: recovery ? null : projectChatFailureDetails(last?.errorDetails),
         dshSessionAlive: Boolean(record.dshSessionId),
         followState: runtimeOf(record.id).follow?.status ?? (record.followError ? 'error' : 'idle'),
         followError: record.followError?.code ?? null,
@@ -2331,6 +2336,7 @@ export function createChatService({
         displayText: turn.displayText,
         error: turn.error,
         errorCode: turn.errorCode ?? null,
+        errorDetails: projectChatFailureDetails(turn.errorDetails),
         failureStage: turn.failureStage ?? null,
         usage: turn.usage,
         context: displayedContext(record,turn.context,'active-request'),

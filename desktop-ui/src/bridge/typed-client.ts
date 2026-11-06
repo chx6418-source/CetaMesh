@@ -64,10 +64,14 @@ export interface ChatActivityTimeline {
 export interface ChatActivityObservation {
   activityTimeline?: ChatActivityTimeline | null; activityOmitted?: number; activityState?: string | null;
 }
+export interface ChatFailureDetails {
+  recoveryCode: 'CODEX_HOST_RESTART_REQUIRED' | 'CODEX_LEGACY_STOP_EVIDENCE_MISSING' | 'CODEX_HOST_RESTART_UNVERIFIED';
+}
 export interface ChatMessage extends ChatActivityObservation {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
   requestId?: string | null;
   errorCode?: string | null;
+  errorDetails?: ChatFailureDetails | null;
   failureStage?: 'pre-dispatch' | 'execution' | 'unknown' | null;
   routing?: Record<string, unknown>;
   usage?: ModelUsage | null;
@@ -141,7 +145,7 @@ export interface MemoryCandidate {
   proposedAt: string | number | null; memoryId: string | null;
   review?: {status:'needs-review';method:'deterministic-text-v1';hints:{kind:'possible-duplicate'|'possible-conflict';code:'normalized-text-match'|'same-subject-different-value';memoryId:string;revision:number}[];truncated:boolean};
 }
-export type AgentStatus = 'ready' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked' | 'connection-pending';
+export type AgentStatus = 'ready' | 'task-check-pending' | 'needs-setup' | 'descriptor-incomplete' | 'not-installed' | 'unavailable' | 'not-supported' | 'not-checked' | 'connection-pending';
 export interface Agent {
   id: string; name: string; role: string; description: string; available: boolean | null; installed: boolean | null; authenticated: boolean | null; compatible: boolean | null; status: AgentStatus;
   eligible: boolean | null; taskEligible: boolean | null; configured: boolean | null; reason: string | null; lastError: string | null; workspaceBoundary: string | null;
@@ -455,7 +459,7 @@ export const chatClient = {
   history: (id: string, limit = 100, beforeMessageId: string | null = null, afterMessageId: string | null = null) => uiCall<{
     id: string; total: number; messages: ChatMessage[]; sessionUsage?: ModelUsage | null; nextBeforeMessageId: string | null; hasMore: boolean; nextAfterMessageId: string | null; hasMoreAfter: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
-  status: (id: string) => uiCall<ChatActivityObservation & { id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; context?: ChatContextObservation | null; turnUsage?: ModelUsage | null; quota?: { status: 'unknown'; reason: string }; error: string | null; errorCode: string | null; failureStage?: ChatMessage['failureStage']; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
+  status: (id: string) => uiCall<ChatActivityObservation & { id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; context?: ChatContextObservation | null; turnUsage?: ModelUsage | null; quota?: { status: 'unknown'; reason: string }; error: string | null; errorCode: string | null; errorDetails?: ChatFailureDetails | null; failureStage?: ChatMessage['failureStage']; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
   send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => {
     const params = { id, text, attachments:attachments.map(a=>a.ref?{ref:a.ref}:a), ...(clientMessageId ? { clientMessageId } : {}) };
     return uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', params).catch(error => {

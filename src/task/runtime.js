@@ -272,7 +272,8 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
   // ── 创建 / 读取 / 修改 ─────────────────────────────────────────────────
   function create({
-    goal, requirements, workspaceId, currentPhase, acceptanceCriteria, status, note, requestId, requestedAgentProvider, launchFingerprint
+    goal, requirements, workspaceId, currentPhase, acceptanceCriteria, status, note, requestId, requestedAgentProvider, launchFingerprint,
+    deduplicateGoal = true
   } = {}) {
     const initialStatus = status === undefined || status === null ? 'queued' : normalizeStatus(status);
     const timestamp = now();
@@ -282,7 +283,8 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     const priorRequest = findByCreateRequestId({ requestId, goal: normalizedGoal,
       requirements: normalizedRequirements, workspaceId: normalizedWorkspace, requestedAgentProvider, launchFingerprint });
     if (priorRequest) return priorRequest;
-    if (normalizedWorkspace) {
+    // Formal Chat owns its Task identity. Other callers retain goal-based reuse.
+    if (normalizedWorkspace && deduplicateGoal !== false) {
       const existing = findByGoalWorkspace({ goal: normalizedGoal, workspaceId: normalizedWorkspace });
       if (existing) {
         if (normalizedRequirements.length && JSON.stringify(normalizedRequirements) !== JSON.stringify(existing.requirements)) {

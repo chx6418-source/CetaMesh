@@ -93,6 +93,24 @@ try {
   assert.equal(ui.isAgentReady({ eligible: true, taskEligible: true, status: 'ready', reason: 'CHECK_FAILED' }), false, 'a failed check cannot be reported ready from stale eligibility');
   assert.equal(ui.isAgentReady({ eligible: true, taskEligible: true, status: 'not-checked' }), false, 'unverified health is not readiness');
   assert.equal(ui.isAgentReady({ eligible: null, taskEligible: null, status: 'ready' }), false, 'unknown eligibility is not readiness');
+  const pendingCodexHealth={id:'codex',available:true,installed:true,compatible:true,authenticated:true,sessionCapable:true,taskEligible:true,sandboxCapable:null,toolsAvailable:null,readyForTask:false,status:'ready',reason:null,probePhase:'ready',probeCode:null,workspaceBoundary:'staged-capability-broker'};
+  let observedCodex=pendingCodexHealth;
+  const codexUi=createDesktopUiService({services:{agentService:{execute:async()=>observedCodex}}});
+  const checkedCodex=await codexUi.execute({method:'ui.agent.health',params:{provider:'codex',refresh:true}});
+  assert.equal(checkedCodex.status,'task-check-pending','successful CLI connection and authentication are distinct from a first Task sandbox check');
+  assert.equal(checkedCodex.taskEligible,true,'the existing explicit first-task path remains selectable');
+  assert.equal(checkedCodex.sandboxCapable,null);assert.equal(checkedCodex.readyForTask,false,'connection checking does not fabricate a sandbox or complete Task readiness');
+  assert.equal(ui.isAgentReady(checkedCodex),false,'connection verification alone is not full readiness');
+  const checkedCodexMarkup=renderToStaticMarkup(React.createElement(ui.CodexSetupDiagnostic,{agent:checkedCodex}));
+  assert.match(checkedCodexMarkup,/连接检查已通过/);assert.match(checkedCodexMarkup,/首次.*任务/);
+  assert.doesNotMatch(checkedCodexMarkup,/Sandbox：已验证|请检查 CLI 的连接与任务条件/,'a checked connection must give the task-specific next step');
+  for(const patch of [{available:false},{installed:null},{compatible:null},{authenticated:null},{sessionCapable:null},{sandboxCapable:false},{sandboxCapable:undefined},{reason:'CHECK_FAILED'},{probeCode:'CHECK_FAILED'},{diagnostic:{code:'CHECK_FAILED'}},{taskEligible:false}]){
+    observedCodex={...pendingCodexHealth,...patch};
+    const unverified=await codexUi.execute({method:'ui.agent.health',params:{provider:'codex'}});
+    assert.ok(!['ready','task-check-pending'].includes(unverified.status),'unknown or failed evidence cannot become a checked connection: '+JSON.stringify(patch));
+  }
+  observedCodex={...pendingCodexHealth,sandboxCapable:true,toolsAvailable:true,readyForTask:true};
+  assert.equal((await codexUi.execute({method:'ui.agent.health',params:{provider:'codex'}})).status,'ready','actual Task verification retains the normal ready state');
   const codexMarkup = renderToStaticMarkup(React.createElement(ui.CodexSetupDiagnostic, { agent: { installed: false, compatible: false, authenticated: false, taskEligible: false, sandboxCapable: null, probeCode: 'CLI_NOT_FOUND', probePhase: 'discovery' } }));
   assert.match(codexMarkup, /Codex CLI/); assert.match(codexMarkup, /Desktop/); assert.match(codexMarkup, /CLI_NOT_FOUND/);
   const shimMarkup = renderToStaticMarkup(React.createElement(ui.CodexSetupDiagnostic, { agent: { installed: true, compatible: false, probeCode: 'NODE_RUNTIME_UNAVAILABLE' } }));
@@ -117,6 +135,14 @@ try {
   const runtimePublic={provider:'gemini',enabled:true,runtimePath:'',nodePath:'',model:'gemini-fixture',baseUrl:'https://generativelanguage.googleapis.com',credentialConfigured:true,executionMode:'native-permissions',revision:4};
   const runtimeDraft={enabled:true,runtimePath:'',nodePath:'',model:'gemini-fixture',baseUrl:runtimePublic.baseUrl,apiKey:''};
   const runtimeProps={provider:'gemini',configuration:runtimePublic,draft:runtimeDraft,saving:false,onDraftChange(){},onSave(){},onRefresh(){}};
+  const agentPanels=await vite.ssrLoadModule('/src/app/AgentSetupPanels.tsx');
+  assert.equal(agentPanels.isAgentTaskCheckPending(checkedCodex),true);
+  assert.equal(agentPanels.isAgentTaskCheckPending({...checkedCodex,sessionCapable:null}),false,'renderer cannot preserve connection verification if Session capability becomes unknown');
+  const missingClaudeKey={id:'claude',reason:'agent_credential_required',runtimeConfiguration:{...runtimePublic,provider:'claude',authMode:'api-key',credentialConfigured:false},connection:{nativeCliSupported:true}};
+  assert.match(agentPanels.agentAvailabilityReasonLabel(missingClaudeKey),/当前为 API 连接.*连接设置.*已登录的 Claude Code/);
+  for(const patch of [{connection:{nativeCliSupported:false}},{connection:{nativeCliSupported:undefined}},{runtimeConfiguration:{...missingClaudeKey.runtimeConfiguration,authMode:'native-cli'}},{runtimeConfiguration:{...missingClaudeKey.runtimeConfiguration,authMode:'provider-login'}},{runtimeConfiguration:{...missingClaudeKey.runtimeConfiguration,credentialConfigured:true}},{id:'gemini'}]){
+    assert.doesNotMatch(agentPanels.agentAvailabilityReasonLabel({...missingClaudeKey,...patch}),/当前为 API 连接|已登录的 Claude Code/,'native CLI hint requires the actual missing-key API mode and supported Claude evidence');
+  }
   const runtimeMarkup=renderToStaticMarkup(React.createElement(ui.AgentRuntimeSetupForm,runtimeProps));
   assert.match(runtimeMarkup,/高级设置/);assert.match(runtimeMarkup,/模型（必填）/);assert.doesNotMatch(runtimeMarkup,/留空使用运行时默认模型/);
   assert.match(runtimeMarkup,/运行时路径/);assert.match(runtimeMarkup,/独立 Node 路径/);assert.match(runtimeMarkup,/API Key/);assert.match(runtimeMarkup,/type="password"/);assert.match(runtimeMarkup,/留空保留已保存凭据/);

@@ -35,10 +35,10 @@ export async function snapshotTaskVerification(services,workspaceId,collaboratio
   return {path,sha256:crypto.createHash('sha256').update(fs.readFileSync(file.real)).digest('hex')};});
  return {allowedPaths:collaboration.verification.editablePaths,unchangedFiles};
 }
-export async function configureTaskCollaboration(services,task,{collaboration,verification,modelProvider,model}={}) {
+export async function configureTaskCollaboration(services,task,{collaboration,verification,modelProvider,model,reasoningEffort}={}) {
  if(!collaboration?.enabled)return task;
  const rt=services.taskService.runtime;
- task=rt.setModelConfig({id:task.id,expectedRev:task.rev,modelProvider,model});
+ task=rt.setModelConfig({id:task.id,expectedRev:task.rev,modelProvider,model,reasoningEffort});
  let contract=null;
  if(verification){
   const operationId='verify:'+crypto.createHash('sha256').update(task.id).digest('hex').slice(0,40);

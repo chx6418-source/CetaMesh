@@ -1,4 +1,5 @@
 import {projectChatContext,projectModelCapabilities,projectAgentModelControl} from './chat-telemetry.js';
+import { projectChatFailureDetails, projectChatFailureMessage } from './chat-failure-details.js';
 import { explicitDelegationTarget } from './explicit-delegation.js';
 import {SIMULATION_UI_METHODS} from '../simulation/ui-methods.js';
 import {OWNER_ACTOR} from '../capability/types.js';
@@ -160,13 +161,14 @@ function projectMessage(value) {
     id: string(row.id, 128), role, text: string(row.text, MAX_TEXT), at: scalar(row.at),
     requestId: string(row.requestId, 200) || null,
     errorCode: /^[A-Z][A-Z0-9_]{0,99}$/.test(row.errorCode ?? '') ? row.errorCode : null,
+    errorDetails: projectChatFailureDetails(row.errorDetails),
     failureStage: ['pre-dispatch', 'execution', 'unknown'].includes(row.failureStage) ? row.failureStage : null,
     routing: selected(row.routing, ['taskId', 'blockingTaskId']),
     activityTimeline: projectChatActivityTimeline(row.activityTimeline),
     activityOmitted: Number.isSafeInteger(row.activityOmitted) && row.activityOmitted >= 0 ? row.activityOmitted : 0,
     activityState: string(row.activityState, 40) || null,
     interrupted: row.interrupted === true,
-    attachments, attachmentRefs:(Array.isArray(row.attachmentRefs)?row.attachmentRefs:[]).slice(0,50).map(r=>({ref:string(r.ref,32),name:string(r.name,200),kind:string(r.kind,20),size:Number(r.size)||0,mimeType:string(r.mimeType,80),modelRef:string(r.modelRef,32)||null,quality:r.quality?{width:Number(r.quality.width),height:Number(r.quality.height),processed:true}:null})), toolActivity, agentActivity, usage: projectUsage(row.usage), error: row.error ? string(row.error, 1000) : null,
+    attachments, attachmentRefs:(Array.isArray(row.attachmentRefs)?row.attachmentRefs:[]).slice(0,50).map(r=>({ref:string(r.ref,32),name:string(r.name,200),kind:string(r.kind,20),size:Number(r.size)||0,mimeType:string(r.mimeType,80),modelRef:string(r.modelRef,32)||null,quality:r.quality?{width:Number(r.quality.width),height:Number(r.quality.height),processed:true}:null})), toolActivity, agentActivity, usage: projectUsage(row.usage), error: projectChatFailureMessage(row.error, row.errorCode),
     cancelled: row.cancelled === true
   };
 }
@@ -403,10 +405,15 @@ function projectAgent(value) {
   const taskEligible = available === null ? null : available && requiresTask && canDispatchTaskAgent(health, execution);
   const reason = requiresTask && taskEligible === false && (!reportedReason || ['task-required', 'workspace-required'].includes(reportedReason))
     ? taskAgentUnavailableReason(health, execution) : reportedReason;
+  const checkFailed = [reportedReason, health.probeCode, record(health.diagnostic).code].some(value => string(value, 160).trim().toUpperCase() === 'CHECK_FAILED');
+  const codexTaskCheckPending = id === 'codex' && health.installed === true && available === true && compatible === true
+    && authenticated === true && health.sessionCapable === true && taskEligible === true && health.sandboxCapable === null
+    && !checkFailed && (!reason || ['task-required', 'workspace-required'].includes(reason));
   const connectionPending = ['claude', 'gemini', 'opencode', 'qwen'].includes(id) && desktop.installed === true && available === false;
   const status = connectionPending ? 'connection-pending' : installed === false ? 'not-installed'
     : compatible === false || (id === 'codex' && health.sandboxCapable === false) ? 'not-supported'
-    : id === 'codex' && health.sandboxCapable === null ? 'not-checked'
+    : codexTaskCheckPending ? 'task-check-pending'
+    : id === 'codex' && (typeof health.sandboxCapable !== 'boolean' || checkFailed) ? 'not-checked'
     : authenticated === false ? 'needs-setup'
     : boundaryUnverified && available ? 'descriptor-incomplete'
     : /unsupported|not[_-]supported/i.test(readiness) ? 'not-supported'
@@ -1024,8 +1031,9 @@ export function createDesktopUiService({ services = {}, system = services.system
         followState: string(result.followState, 40) || 'idle', followError: string(result.followError, 100) || null,
         retryCount: Number.isFinite(turn.retryCount) ? Math.max(0, turn.retryCount) : 0,
         statusMessage: string(turn.statusMessage, 300) || null,
-        displayText: string(turn.displayText, MAX_TEXT), error: string(turn.error ?? result.lastError, 1000) || null,
+        displayText: string(turn.displayText, MAX_TEXT), error: projectChatFailureMessage(turn.error ?? result.lastError, turn.errorCode ?? result.lastErrorCode),
         errorCode: string(turn.errorCode ?? result.lastErrorCode, 100) || null,
+        errorDetails: projectChatFailureDetails(turn.errorDetails ?? result.lastErrorDetails),
         agentActivity: turn.agentActivity && typeof turn.agentActivity === 'object' ? {
           providerId: string(turn.agentActivity.providerId, 80), label: string(turn.agentActivity.label, 180),
           status: ['running', 'completed', 'cancelled', 'failed', 'unknown'].includes(turn.agentActivity.status) ? turn.agentActivity.status : 'unknown'

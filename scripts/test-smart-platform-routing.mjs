@@ -108,12 +108,112 @@ try {
   assert.deepEqual(agentCalls.filter(call => call.kind === 'send').map(call => call.content), ['fix a bug in this project']);
   assert.equal(modelRequests.length, 2, 'Project intent runs through Task and Agent, not the Model turn');
 
-  const linkedRecord = { taskId: null, config: { workspaceId, agentProvider: 'cetamesh' } };
+  const linkedRecord = { taskId: tasks[0].id, config: { workspaceId, agentProvider: 'cetamesh' } };
   const linked = await platformRuntime.route({ decision: { agentIntent: true }, record: linkedRecord,
     text: 'fix a bug in this project' });
-  assert.equal(linked.taskId, tasks[0].id, 'Work and Chat must refer to the same existing Task for an exact goal');
+  assert.equal(linked.taskId, tasks[0].id, 'Chat continues the existing Task only through its explicit binding');
   assert.equal(linkedRecord.taskId, tasks[0].id);
-  assert.equal(taskRuntime.list().total, 1, 'the same Workspace goal must not create a duplicate Task');
+  assert.equal(taskRuntime.list().total, 1, 'explicit Task continuation must not create a duplicate');
+
+  // Production Chat, Task, Workspace and Capability services with controlled
+  // provider receipts. Repeated greeting text must not inherit an old Task.
+  {
+    const identityDir = path.join(dir, 'chat-task-identity');
+    const identityWorkspaces = createWorkspaceService({ stateDir: identityDir });
+    const { workspace: identityWorkspace } = await identityWorkspaces.execute({ method: 'workspace.create',
+      params: { name: 'Chat identity isolation', root: path.join(dir, 'identity-workspace'), createIfMissing: true } });
+    const identityTasks = createTaskRuntime({ stateDir: identityDir });
+    let oldTask = identityTasks.create({ goal: '你好', workspaceId: identityWorkspace.id,
+      requirements: ['OLD_TASK_CONSTRAINT_MUST_NOT_LEAK'], requestId: 'old-work-request' });
+    oldTask = identityTasks.start({ id: oldTask.id, expectedRev: oldTask.rev, provider: 'codex', sessionId: 'legacy-old-session' }).task;
+    oldTask = identityTasks.setCheckpoint({ id: oldTask.id, expectedRev: oldTask.rev,
+      summary: 'OLD_TASK_HISTORY_MUST_NOT_LEAK', nextAction: 'Retained old work' });
+    oldTask = identityTasks.block({ id: oldTask.id, expectedRev: oldTask.rev, reason: 'Legacy session stop is unknown' }).task;
+    const beforeOld = structuredClone(oldTask), identityCalls = [], contextTasks = [], routeRequests = [];
+    let stopConfirmed = false, releaseSend;
+    const identityBroker = { ...agentBroker, ids: () => ['cetamesh', 'codex'],
+      require: provider => provider === 'codex' ? {
+        verifyTaskQuiescence: async () => ({ stopped: stopConfirmed }),
+        verifyStoppedTask: async scope => ({ ...scope, provider, stopped: stopConfirmed,
+          receiptId: 'controlled-stop-receipt', evidence: 'process-tree-exit', generation: 1 })
+      } : {},
+      async createSession(provider, options) { const sessionId = 'identity-session-' + identityCalls.length;
+        identityCalls.push({ kind: 'create', provider, sessionId, options }); return { sessionId }; },
+      async send(request) { identityCalls.push({ kind: 'send', ...request });
+        if (!releaseSend) await new Promise(resolve => { releaseSend = resolve; }); return { accepted: true }; }
+    };
+    const identityCapabilities = createCapabilityService({ stateDir: identityDir, workspaceService: identityWorkspaces,
+      taskRuntime: identityTasks, memoryService: createMemoryService({ stateDir: identityDir }), agentBroker: identityBroker });
+    const identityPlatform = createDesktopPlatformRuntime({ capabilityService: identityCapabilities,
+      workspaceService: identityWorkspaces, taskRuntime: identityTasks, agentBroker: identityBroker,
+      prepareTaskContext: async ({ taskId }) => { contextTasks.push(taskId); const current = identityTasks.get({ id: taskId }).task;
+        return JSON.stringify({ taskId, requirements: current.requirements, checkpoint: current.checkpoint }); } });
+    const identityChat = createChatService({ stateDir: identityDir, router: createRouterService({ stateDir: identityDir }),
+      agentProviders: [{ id: 'cetamesh', eventProtocol: 'agent-turn-events-v1' }],
+      platformRoute: request => { routeRequests.push(request); return identityPlatform.route(request); },
+      resolveWorkspace: id => identityWorkspaces.describeWorkspace(id), resolveTask: id => identityTasks.get({ id }).task,
+      agentFollow: async function* ({ signal }) { if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true })); } });
+    try {
+      const newChat = await identityChat.execute({ method: 'chat.sessions.create', params: {} });
+      await identityChat.execute({ method: 'chat.config.set', params: { id: newChat.id,
+        config: { mode: 'chat', workspaceId: identityWorkspace.id, agentProvider: 'cetamesh' } } });
+      await identityChat.execute({ method: 'chat.send', params: { id: newChat.id, text: '你好', clientMessageId: 'identity-first-hello' } });
+      const blocked = await waitFor(() => identityChat.execute({ method: 'chat.status', params: { id: newChat.id } }),
+        status => status.turn === null, 'unrelated legacy Workspace owner refusal');
+      assert.equal(blocked.lastErrorCode, 'TASK_WORKSPACE_BUSY', 'same goal is not authority to recover an unrelated old Task');
+      assert.equal(blocked.lastRouting.blockingTaskId, oldTask.id);
+      assert.equal(blocked.taskId, null, 'the blocking Task must not become the new Chat Task');
+      assert.equal((await identityChat.execute({ method: 'chat.sessions.list' })).sessions.find(row => row.id === newChat.id).taskId, null);
+      assert.deepEqual(identityTasks.get({ id: oldTask.id }).task, beforeOld, 'unknown owner history and execution evidence remain intact');
+      assert.equal(identityTasks.countAll(), 1); assert.equal(identityCalls.length, 0); assert.equal(contextTasks.length, 0);
+
+      stopConfirmed = true;
+      await identityChat.execute({ method: 'chat.send', params: { id: newChat.id, text: '你好', clientMessageId: 'identity-second-hello' } });
+      await waitFor(() => releaseSend, Boolean, 'fresh independent Chat dispatch');
+      const currentRequest = routeRequests.at(-1), newTaskId = currentRequest.record.taskId;
+      assert.notEqual(newTaskId, oldTask.id, 'proved release permits a fresh Task instead of adopting the old goal');
+      assert.equal(identityTasks.countAll(), 2);
+      const newTask = identityTasks.get({ id: newTaskId }).task;
+      assert.equal(newTask.goal, '你好'); assert.deepEqual(newTask.requirements, []); assert.equal(newTask.checkpoint, null);
+      assert.deepEqual(contextTasks, [newTaskId], 'only the new Task is used to build inherited context');
+      assert.doesNotMatch(identityCalls.find(row => row.kind === 'send').content, /OLD_TASK_CONSTRAINT|OLD_TASK_HISTORY/);
+      await identityChat.execute({ method: 'chat.send', params: { id: newChat.id, text: '你好', clientMessageId: 'identity-second-hello' } });
+      assert.equal(routeRequests.length, 2, 'the same Chat message must not create a second platform operation');
+      const repeated = identityPlatform.route(currentRequest); releaseSend();
+      const repeatResult = await repeated;
+      const replayResult = await identityPlatform.route({ ...currentRequest, record: { ...currentRequest.record, taskId: null } });
+      assert.equal(repeatResult.taskId, newTaskId); assert.equal(replayResult.taskId, newTaskId);
+      assert.equal(identityTasks.countAll(), 2); assert.equal(identityCalls.filter(row => row.kind === 'send').length, 1,
+        'same exact request, including concurrent entry, must not dispatch twice');
+      await assert.rejects(identityPlatform.route({ ...currentRequest, text: 'changed request payload' }),
+        error => error.code === 'REQUEST_ID_CONFLICT', 'a cached request cannot authorize different content');
+      await assert.rejects(identityPlatform.route({ ...currentRequest, record: { ...currentRequest.record, taskId: oldTask.id } }),
+        error => error.code === 'REQUEST_ID_CONFLICT', 'a cached request cannot attach another Task');
+      assert.equal(identityCalls.filter(row => row.kind === 'send').length, 1);
+      assert.equal(identityTasks.get({ id: oldTask.id }).task.currentAgent, null);
+      assert.equal(identityTasks.get({ id: oldTask.id }).task.checkpoint.summary, 'OLD_TASK_HISTORY_MUST_NOT_LEAK');
+      const continued = await identityPlatform.route({ decision: { agentIntent: true }, record: currentRequest.record,
+        text: 'Continue only this Chat Task', requestId: 'identity-next-request' });
+      assert.equal(continued.taskId, newTaskId);
+      assert.equal(identityCalls.filter(row => row.kind === 'create').length, 1, 'the explicitly bound existing Chat keeps its Session');
+      assert.equal(identityCalls.filter(row => row.kind === 'send').length, 2);
+      const otherChat = await identityChat.execute({ method: 'chat.sessions.create', params: {} });
+      await identityChat.execute({ method: 'chat.config.set', params: { id: otherChat.id,
+        config: { mode: 'chat', workspaceId: identityWorkspace.id, agentProvider: 'cetamesh' } } });
+      await identityChat.execute({ method: 'chat.send', params: { id: otherChat.id, text: '你好', clientMessageId: 'other-chat-hello' } });
+      const busy = await waitFor(() => identityChat.execute({ method: 'chat.status', params: { id: otherChat.id } }),
+        status => status.turn === null, 'live unrelated Workspace owner refusal');
+      assert.equal(busy.lastErrorCode, 'TASK_WORKSPACE_BUSY'); assert.equal(busy.lastRouting.blockingTaskId, newTaskId);
+      assert.equal(busy.taskId, null); assert.equal(identityTasks.countAll(), 2);
+      assert.equal(identityCalls.filter(row => row.kind === 'send').length, 2, 'another Chat cannot borrow the live same-goal Task');
+      const visibleHistory = await identityChat.execute({ method: 'chat.history', params: { id: newChat.id } });
+      assert.doesNotMatch(JSON.stringify(visibleHistory), /OLD_TASK_CONSTRAINT|OLD_TASK_HISTORY/);
+      console.log('PASS fresh Chat Task identity, unknown Workspace owner refusal, independent release and exact-request continuation');
+    } finally { releaseSend?.(); identityChat.close(); await identityCapabilities.close(); }
+  }
+
+  taskRuntime.cancel({ id: tasks[0].id, expectedRev: taskRuntime.get({ id: tasks[0].id }).task.rev,
+    reason: 'Synthetic initial routing fixture finished' });
 
   const taskLookupFailureRuntime = new Proxy(taskRuntime, {
     get(target, property) {
@@ -219,7 +319,7 @@ try {
   const queuedWork = taskRuntime.create({ goal: 'fix queued Work task', workspaceId,
     requestId: 'queued-work-choice', requestedAgentProvider: 'codex' });
   await assert.rejects(routingRuntime.route({ decision: { agentIntent: true, class: 'project' },
-    record: { config: { workspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } }, text: queuedWork.goal }),
+    record: { taskId: queuedWork.id, config: { workspaceId, modelProvider: 'fixture-model', model: 'fixture-model-id' } }, text: queuedWork.goal }),
   error => error.code === 'TASK_DISPATCH_INCOMPLETE', 'Chat must not override an unconfirmed Work Agent selection');
   assert.equal(taskRuntime.get({ id: queuedWork.id }).task.currentAgent, null);
   const unknownCostRuntime = createDesktopPlatformRuntime({ workspaceService, taskRuntime,
@@ -270,6 +370,8 @@ try {
   assert.notEqual(assignmentAudit[0].requestId, assignmentAudit[1].requestId,
     'retry uses a distinct original Journal request ID');
   assert.equal(recovered.taskId, taskRuntime.findByGoalWorkspace({ goal: 'fix safe retry fixture', workspaceId: retryWorkspaceId }).id);
+  taskRuntime.cancel({ id: recovered.taskId, expectedRev: taskRuntime.get({ id: recovered.taskId }).task.rev,
+    reason: 'Synthetic safe reassignment fixture finished' });
 
   // Direct Broker use is also a dispatch boundary and must honor fresh
   // negative readiness evidence, even after selection already succeeded.

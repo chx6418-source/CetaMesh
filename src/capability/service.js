@@ -928,10 +928,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     requiresTask:true,workspace:true,effect:'read-only',
     description:'Discover external executors for exact task needs. preparationRequired candidates are NOT task eligible: Core must obtain Owner native consent and verify actual tools before formal work. Call this before proposing. Native development tasks normally use requiredTools: []; native tools are not CetaMesh Broker tools. Results confer no execution permission.',
     inputSchema:delegationNeedsSchema,validate:r=>validateSchema(delegationNeedsSchema,r.input),
-    async execute(request) {const candidates=(await delegationCandidates(request)).map(row=>({...row,
+    async execute(request) {const candidates=(await delegationCandidates(request)).map(row=>({
+      provider:row.provider,cost:row.cost,latencyMs:row.latencyMs,
       proposalEligible:true,taskEligible:row.preparationRequired!==true,
+      preparationRequired:row.preparationRequired===true,consentRequired:row.consentRequired===true,
       workspaceBoundary:agentBroker.capabilities(row.provider).workspaceBoundary,
-      taskFit:agentBroker.capabilities(row.provider).assignment}));
+      // These needs already passed ranking. Repeating the full nested assignment
+      // descriptor makes an otherwise complete model result exceed its depth
+      // bound; expose only the checked needs and the ranked cost evidence.
+      taskKind:request.input.taskKind,difficulty:request.input.difficulty,requiredTools:[...request.input.requiredTools]}));
       return {candidates,canPropose:candidates.length>0,nextAction:candidates.length?'propose-matching-needs':'no-authorized-executor',
         guidance:'proposalEligible permits only a proposal. A preparationRequired candidate is not yet executable: Core will request Owner native consent and verify tools after your turn ends. If external work is needed and canPropose is true, call agent.delegate.propose with these same generic requirements, then end your turn. Do not prepare or dispatch it yourself.'};}
   });

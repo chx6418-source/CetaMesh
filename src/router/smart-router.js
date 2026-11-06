@@ -7,7 +7,7 @@
 //   - 需要能力工具但不改工程的任务（搜索/天气/计算/时间/发送）→ tool。
 //   - Cost Policy 只调阈值与 route，不改变信号本身（TASK-S1-006）。
 
-import { explicitDelegationTarget } from '../desktop/explicit-delegation.js';
+import { collaborationIntentExcluded, explicitCollaborationIntent, explicitDelegationTarget } from '../desktop/explicit-delegation.js';
 import { COST_POLICIES, DEFAULT_COST_POLICY, normalizeCostPolicy } from './types.js';
 
 // ── 工程信号（Tier A：命中即算直接工程动作）──────────────────────────────────
@@ -84,12 +84,19 @@ export function classifyTask({
     throw error;
   }
   const policy = normalizeCostPolicy(costPolicy);
+  if (collaborationIntentExcluded(text)) return {
+    class: 'simple', route: 'model', agentIntent: false, capabilityIntent: false,
+    costPolicy: policy, agentEnabled: agentEnabled === true,
+    signals: { project: [], tool: [] }, reasons: ['协作指令处于引用或明确否定范围，保持普通对话']
+  };
   const reasons = [];
   const projectHits = matchSignals(text, PROJECT_SIGNALS);
   const nounHits = matchSignals(text, PROJECT_NOUNS);
   const toolHits = matchSignals(text, TOOL_SIGNALS);
   const verbHit = ACTION_VERB.test(text);
   const codeContext = hasWorkspaceContext === true || hasCodeAttachments(attachments);
+  const collaborationIntent = explicitCollaborationIntent(text);
+  if (collaborationIntent) reasons.push('用户明确要求协作分析 → 通过现有 Task 执行入口');
   if (projectHits.length) reasons.push(`工程信号：${projectHits.join('、')}`);
   if (nounHits.length) reasons.push(`工程对象：${nounHits.join('、')}${verbHit ? '（含动作动词）' : ''}`);
   if (codeContext) reasons.push('工程上下文：代码附件/工作区');
@@ -107,7 +114,7 @@ export function classifyTask({
       || (weakHits >= 1 && (verbHit || codeContext))
       || (codeContext && verbHit);
   }
-  if (isProject || explicitDelegationTarget(text)) {
+  if (isProject || collaborationIntent || explicitDelegationTarget(text)) {
     const route = agentEnabled ? 'agent' : 'model';
     if (!agentEnabled) reasons.push('用户已禁用 Agent → 保持 Model');
     return {
@@ -117,7 +124,7 @@ export function classifyTask({
       capabilityIntent: false,
       costPolicy: policy,
       agentEnabled: agentEnabled === true,
-      signals: { project: [...projectHits, ...nounHits], tool: toolHits },
+      signals: { project: [...projectHits, ...nounHits, ...(collaborationIntent ? ['explicit-collaboration'] : [])], tool: toolHits },
       reasons
     };
   }

@@ -88,7 +88,7 @@ async function bundle(directory) {
       const catalog={models:[],modelProviders:[{id:'fixture-provider',label:'Synthetic vision provider',configured:true,catalogState:'ready',reachable:true,authenticated:true,inferencing:null,toolCalling:true,error:null,settingsFields:[],models:[{id:'fixture-vision',name:'Synthetic vision model',label:'Synthetic vision model',toolCalling:'supported',streaming:'supported',reasoning:'unknown'}]}],agentProviders:agents,modes:['chat'],defaultModelProvider:'fixture-provider',available:true,reason:null};
       const onboarding={complete:true,currentStep:'provider',steps:[{id:'welcome',title:'欢迎',description:'了解本地协作方式',status:'completed',optional:false},{id:'provider',title:'连接模型',description:'保存在本机凭据库',status:'pending',optional:false},{id:'model',title:'选择模型',description:'选择默认模型',status:'pending',optional:false},{id:'agent',title:'Agent',description:'可稍后配置',status:'pending',optional:true}]};
       window.fixtureCalls=[];window.fixtureErrors=[];window.fixtureState={largeTasks:false,failSettings:false,failWindowSync:false,failMemory:false,failMcp:false,mcpSaveDelay:0,settings,sessions:[session]};window.fixtureAgentOverrides={};window.fixtureAgentListReleases=[];window.fixtureAgentHealthReleases=[];window.fixtureAgentConfigureReleases=[];window.fixturePluginOverrides={};window.fixtureIntegrationOverrides={};window.fixturePluginListReleases=[];window.fixtureConnectionReleases=[];window.fixtureToggleReleases=[];window.fixtureMcpToolsReleases=[];window.fixtureMcpOverride={};window.fixtureExtensionSaveReleases=[];window.fixtureExtensionValues={message:'initial fixture'};
-      window.addEventListener('error',event=>window.fixtureErrors.push(event.message));window.addEventListener('unhandledrejection',event=>window.fixtureErrors.push(String(event.reason)));
+      window.addEventListener('error',event=>window.fixtureErrors.push(event.error?.stack||event.message));window.addEventListener('unhandledrejection',event=>window.fixtureErrors.push(event.reason?.stack||String(event.reason)));
       async function call(method,params={}){if(method!=='ui.events.next')window.fixtureCalls.push({method,params});
         if(method==='ui.events.next'){await new Promise(resolve=>setTimeout(resolve,150));return{instanceId:'synthetic-ui-fixture',cursor:0,events:[]};}
         if(method==='app.diagnostics.status')return{coreAvailable:true,report:{schemaVersion:1,id:'00000000-0000-4000-8000-000000000001',generatedAt:'2026-10-31T00:00:00Z',trigger:'startup',status:'PASS',checks:[{id:'core',stage:'core',status:'PASS',code:'CHECK_OK',reason:'Synthetic host fixture',remediation:'No actual Core claim',timedOut:false,durationMs:1}],unconfirmedEffects:false,feedback:{url:null,configured:false},product:{},retention:{maxReports:20,maxAgeDays:14,maxBytes:65536},persisted:false}};
@@ -100,7 +100,7 @@ async function bundle(directory) {
         if(method==='ui.chat.status')return{id:params.id,taskId:params.id===session.id?session.taskId:null,state:'idle',requestId:null,statusMessage:null,retryCount:0,followState:'idle',followError:null,displayText:'',toolActivity:[],agentActivity:null,error:null,errorCode:null,approvalId:null,routing:{}};
         if(method==='ui.task.overview'){const tasks=Array.from({length:window.fixtureState.largeTasks?1000:18},(_,index)=>task(index)).filter(row=>(!params.query||(row.title+' '+row.goal).toLowerCase().includes(params.query.toLowerCase()))&&(!params.status||row.status===params.status));if(window.fixtureState.holdTaskOverview)await new Promise(resolve=>(window.fixtureTaskListReleases??=[]).push(resolve));window.fixtureTaskOverviewSettled=(window.fixtureTaskOverviewSettled||0)+1;return{tasks,total:tasks.length,counts:{},needsAttention:['global-task-0']};}
         if(method==='ui.task.get')return{task:task(Number(params.id.split('-').at(-1))||0)};
-        if(method==='ui.task.recovery.inspect')return{taskId:params.id,taskRev:3,operations:[{operationId:'synthetic-operation',capability:'filesystem.write',status:'UNKNOWN',verified:false,code:'RECONCILIATION_REQUIRED'}],omitted:0};
+        if(method==='ui.task.recovery.inspect'){const current=task(Number(params.id.split('-').at(-1))||0);return{taskId:params.id,taskRev:current.rev,operations:[{operationId:'synthetic-operation',capability:'filesystem.write',status:'UNKNOWN',verified:false,code:'RECONCILIATION_REQUIRED'}],omitted:0,reviewToken:null,expiresAt:null,session:{state:'unknown',stopped:false,provider:current.currentAgent?.provider??null,sessionId:current.currentAgent?.sessionId??null,code:'SESSION_EXECUTION_UNCONFIRMED'},workspace:null,blockers:[{code:'TASK_EFFECT_UNCONFIRMED',message:'自动核验尚无法确认旧操作结果；已保留执行记录，不会重复执行。'}],reviewOperationIds:['synthetic-operation'],canResume:false,canRelease:false,ownership:{taskId:params.id,provider:current.currentAgent?.provider??null,taskStatus:current.status,reason:'needs-reconciliation',unconfirmedOperations:1,safeActions:['inspect-task','inspect-workspace','review-recovery']}};}
         if(method==='ui.memory.overview')return{memories:memories.filter(row=>!params.types||params.types.includes(row.type)),total:memories.length,candidates:[candidate],candidateMeta:{pending:1,capacity:100,remaining:99},recovery:{failed:[]}};
         if(method==='ui.memory.get')return memories.find(row=>row.id===params.id)||memories[0];
         if(method==='ui.memory.update'){if(window.fixtureState.failMemory)throw new Error('Synthetic memory save failed; draft must remain');return{...memories.find(row=>row.id===params.id),...params,rev:3};}
@@ -243,6 +243,22 @@ try {
         assert.deepEqual(initialAgentCalls,[{method:'ui.agent.list',params:{refresh:true}}],'initial checks are one bounded Core health request without login, configuration or model execution');
         checks.push({kind:'agent-first-visit-local-check-without-model-execution',pass:true});
         await evaluate('window.fixtureState.coldAgentDirectory=false');
+        await evaluate('window.fixtureAgentOverrides.codex={status:"task-check-pending",available:true,installed:true,compatible:true,authenticated:true,sessionCapable:true,taskEligible:true,sandboxCapable:null,readyForTask:false,reason:"task-required",probeCode:null}');
+        await textClick('刷新状态');
+        await until(codex+'?.querySelector(".cm-badge")?.innerText.includes("连接已通过")','Codex checked connection is distinct from first Task verification');
+        assert.equal(await evaluate(codex+'?.querySelector(".cm-badge")?.innerText'),'连接已通过 · 任务待验证');
+        assert.match(await evaluate(codex+'?.querySelector(".agent-unavailable-reason")?.innerText'),/首次.*任务/);
+        assert.match(await evaluate(codex+'?.querySelector(".agent-unavailable-reason")?.innerText'),/授权/);
+        assert.equal(await evaluate(codex+'?.querySelector("button")?.innerText.trim()'),'重新检查连接','completed connection checking remains optional to repeat');
+        assert.equal(await evaluate('[...document.querySelectorAll(".agent-summary-row > *")].find(n=>n.querySelector("span")?.textContent==="可分配任务")?.querySelector("strong")?.textContent'),'2','first-task eligible Codex remains assignable without inflating fully-ready evidence');
+        await pointerClick(codex+'?.querySelector(".agent-capability-details summary")','Codex first-task evidence');
+        assert.match(await evaluate(codex+'?.innerText'),/Sandbox：待首次明确选择的任务验证/);
+        assert.doesNotMatch(await evaluate(codex+'?.innerText'),/Sandbox：已验证/);
+        await pointerClick(codex+'?.querySelector(".agent-capability-details summary")','close Codex evidence');
+        await evaluate('window.fixtureAgentOverrides.codex={status:"task-check-pending",available:true,installed:true,compatible:true,authenticated:true,taskEligible:true,sandboxCapable:null,reason:"CHECK_FAILED",probeCode:"CHECK_FAILED"}');
+        await textClick('刷新状态');await until(codex+'?.querySelector(".cm-badge")?.innerText==="未检查"','failed health invalidates connection-verified display');
+        await evaluate('window.fixtureAgentOverrides.codex={}');await textClick('刷新状态');await until(codex+'?.querySelector(".cm-badge")?.innerText==="已就绪"','fully verified fixture restored');
+        checks.push({kind:'codex-connection-verified-before-first-authorized-task',pass:true});
         await evaluate('window.fixtureState.holdNextAgentList=true');await textClick('刷新状态');
         await until('window.fixtureAgentListReleases.length===1','first Agent list held');
         await evaluate('window.fixtureAgentOverrides.codex={status:"unavailable",available:false,eligible:false,taskEligible:false,reason:"runtime_detection_failed"}');
@@ -332,6 +348,8 @@ try {
         await evaluate('(()=>{const template=window.fixture.agents.find(a=>a.id==="gemini");window.fixture.agents.push({...template,id:"claude",name:"Claude",reason:"agent_credential_required",lastError:null,runtimeConfiguration:{...template.runtimeConfiguration,provider:"claude",model:"",baseUrl:"https://api.anthropic.com",credentialConfigured:false,authMode:"api-key"},connection:{...template.connection,nativeCliSupported:true,runtime:{installed:true,protocolVerified:true,version:"fixture"}}})})()');
         await textClick('刷新状态');await until('document.querySelectorAll(".agent-card").length===5','Claude native setup fixture');
         const claude='[...document.querySelectorAll(".agent-card")].find(n=>n.querySelector("h3")?.textContent==="Claude")';
+        assert.match(await evaluate(claude+'?.querySelector(".agent-unavailable-reason")?.innerText'),/当前为 API 连接/,'missing API key identifies the selected authentication mode');
+        assert.match(await evaluate(claude+'?.querySelector(".agent-unavailable-reason")?.innerText'),/连接设置.*已登录的 Claude Code/,'a verified native CLI route is explained without switching to it');
         await pointerClick(claude+'?.querySelector(".agent-setup-disclosure summary")','Claude setup');
         await until('!!('+claude+'?.querySelector("button[aria-label=\\"认证方式\\"]"))','Claude auth options');
         await evaluate(claude+'?.querySelector("button[aria-label=\\"认证方式\\"]").scrollIntoView({block:"center",behavior:"instant"})');await delay(150);
@@ -496,7 +514,13 @@ try {
         await evaluate('(()=>{const root=document.getElementById("root");root.style.zoom='+scenario.zoom+';root.style.width='+JSON.stringify(100/scenario.zoom+'vw')+';root.style.height='+JSON.stringify(100/scenario.zoom+'vh')+';window.fixture.setTheme('+JSON.stringify(scenario.theme)+');})()');
         if(taskOnly){
           await show('work');await until('!!document.querySelector(".task-card")','Task data');await measure(version,scenario,'tasks');
-          await textClick('详情');await until('!!document.querySelector(".cm-sheet .task-details")','Task detail');await measure(version,scenario,'task-detail');
+          await textClick('详情');await until('!!document.querySelector(".cm-sheet .task-details")','Task detail');
+          if(version==='after'){
+            await until('document.querySelector(".cm-sheet [aria-label=占用与恢复状态]")?.textContent.includes("TASK_EFFECT_UNCONFIRMED")','unknown effect remains blocked after automatic inspection');
+            assert.equal(await evaluate('[...document.querySelectorAll(".cm-sheet button")].find(row=>row.textContent.trim()==="继续任务")?.disabled'),true,'unknown operation never enables continuation');
+            assert.equal(await evaluate('window.fixtureCalls.some(row=>["ui.task.reconcile","ui.task.resume"].includes(row.method))'),false,'rendering unknown recovery never releases or resumes the Task');
+          }
+          await measure(version,scenario,'task-detail');
           const drawer=await evaluate('(()=>{const n=document.querySelector(".cm-sheet"),r=n.getBoundingClientRect();return{left:r.left,right:r.right,top:r.top,bottom:r.bottom,viewport:innerWidth,height:innerHeight,scrollHeight:n.scrollHeight,clientHeight:n.clientHeight}})()');
           if(version==='after')assert.ok(drawer.left>=-1&&drawer.right<=drawer.viewport+1&&drawer.top>=-1&&drawer.bottom<=drawer.height+1,'Task detail drawer remains inside the viewport '+JSON.stringify(drawer));
           await key('Tab');if(version==='after')assert.equal(await evaluate('!!document.activeElement?.closest(".cm-sheet")'),true,'Task drawer keeps keyboard focus');

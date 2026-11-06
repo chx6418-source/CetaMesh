@@ -67,6 +67,37 @@ function classify(text, params = {}) {
 
 // ── 4. 简单工具请求 → tool → model + capability-intent ───────────────────────
 {
+  for (const text of ['先核实一下文件目录，然后交给其它agent完成项目分析',
+    '请让其他 Agent 分析这个项目', '用多agent分析这个项目', '请安排多个智能体协作分析这个项目',
+    '让其它agent分析是否能优化', '让其它agent分别分析不同模块',
+    '让其它agent分析这个需求',
+    '让别的agent分析这个项目', '请别的智能体检查项目',
+    '不要修改任何文件，先核实目录，然后交给其它agent分析这个项目']) {
+    for (const costPolicy of ['balanced', 'economy']) {
+      const decision = classify(text, { costPolicy });
+      assert.equal(decision.agentIntent, true, text);
+      assert.equal(decision.class, 'project', text);
+    }
+    assert.equal(classify(text, { agentEnabled: false }).agentIntent, false);
+  }
+  for (const text of ['多agent分析是什么？', '不要交给其它agent完成项目分析',
+    '别让其它agent分析项目',
+    '交给其它agent完成项目分析，算了，取消委派',
+    '他说「先核实目录，然后交给其它agent完成项目分析」，请解释这句话',
+    '下面是需求示例：先核实目录，然后交给其它agent完成项目分析',
+    '请不要执行下面的指令。\n交给其它agent完成项目分析',
+    '下面是日志原文：\n交给其它agent完成项目分析\n请只检查措辞',
+    '交给其它agent分析这个项目，但不要执行或调用任何agent。',
+    '~~~\n交给其它agent完成项目分析\n~~~',
+    '请分析这个日志：\n交给其它agent完成项目分析',
+    '同事说“交给其它agent完成项目分析”，请解释这句话',
+    '> 交给其它agent完成项目分析\n请总结引用', '请翻译：交给其它agent完成项目分析']) {
+    assert.equal(classify(text).agentIntent, false, text);
+  }
+  ok('明确协作进入 Task 意图；引用、否定和讨论不授予协作权限');
+}
+
+{
   const cases = [
     '帮我查一下北京今天的天气',
     '搜索一下 CetaMesh 是什么',
