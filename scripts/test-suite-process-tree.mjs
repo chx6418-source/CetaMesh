@@ -26,6 +26,32 @@ try {
 }
 assert.equal(typeof terminateSuiteProcessTree, 'function', 'suite process-tree termination helper is exported');
 
+const { listOwnedWindowsProcesses } = await import('../src/testing/suite-process.js');
+assert.equal(typeof listOwnedWindowsProcesses, 'function', 'native suites must inspect their own processes, not every process with the same name');
+const processRows = [
+  { ProcessId: 101, ExecutablePath: 'C:\\tests\\case\\uninstall.exe' },
+  { ProcessId: 102, ExecutablePath: 'c:/TESTS/case/ProgramFiles/WhaleBridge.exe' },
+  { ProcessId: 103, ExecutablePath: 'C:\\tests\\case-other\\WhaleBridge.exe' },
+  { ProcessId: 104, ExecutablePath: 'C:\\Program Files\\CetaMesh\\WhaleBridge.exe' },
+  { ProcessId: 105, ExecutablePath: null },
+  { ProcessId: 106, ExecutablePath: 'C:\\repo\\whalebridge-desktop.exe' }
+];
+const queryFixture = (error, text) => (file, args, options, done) => {
+  assert.equal(file, 'powershell.exe');
+  assert.equal(options.windowsHide, true);
+  queueMicrotask(() => done(error, text, error ? 'fixture query denied' : ''));
+};
+const owned = await listOwnedWindowsProcesses({ rootDir: 'C:\\tests\\case', pids: [106] },
+  { execFileImpl: queryFixture(null, JSON.stringify(processRows)) });
+assert.deepEqual(owned.map(row => row.ProcessId), [101, 102, 106], 'separate suites, sibling paths and user applications are not residuals of this suite');
+assert.deepEqual(await listOwnedWindowsProcesses({ rootDir: 'C:\\tests\\case', pids: [105] },
+  { execFileImpl: queryFixture(null, JSON.stringify(processRows[4])) }), [processRows[4]], 'an owned PID with an unreadable path remains live, not silently ignored');
+await assert.rejects(listOwnedWindowsProcesses({ rootDir: 'C:\\tests\\case' },
+  { execFileImpl: queryFixture(Error('access denied'), '') }), /query denied/, 'an inaccessible process inventory cannot mean no leftovers');
+await assert.rejects(listOwnedWindowsProcesses({ rootDir: 'C:\\tests\\case' },
+  { execFileImpl: queryFixture(null, 'not JSON') }), /JSON/, 'malformed process evidence cannot mean no leftovers');
+console.log('PASS native suite process evidence is scoped to exact owned PIDs and directories');
+
 // Windows may finish closing a descendant between taskkill's enumeration and
 // termination. Mock only taskkill; fake PIDs are never sent to the operating system.
 const rootPid=7200,childPid=2952;

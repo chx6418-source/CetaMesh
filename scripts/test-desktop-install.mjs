@@ -22,6 +22,7 @@ import path from 'node:path';
 import { createHash, randomUUID } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { listOwnedWindowsProcesses } from '../src/testing/suite-process.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SHELL = path.join(ROOT, 'desktop-shell', 'target', 'debug', 'whalebridge-desktop.exe');
@@ -77,6 +78,7 @@ assert.ok(fs.existsSync(CORE_DIST), '未找到 dist/core，请先执行 npm run 
 step('✅ 前置：桌面壳（含安装器）与 dist/core 就绪');
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-install-'));
+const installerEnv = { ...process.env, TEMP: tempRoot, TMP: tempRoot, TMPDIR: tempRoot };
 const sandbox = {
   installDir: path.join(tempRoot, 'ProgramFiles', 'WhaleBridge'),
   dataDir: path.join(tempRoot, 'LocalAppData', 'WhaleBridge'),
@@ -108,7 +110,7 @@ function sandboxArgs() {
 function runInstaller(args, extraEnv = {}) {
   const result = spawnSync(installer, [...args, ...sandboxArgs()], {
     encoding: 'utf8',
-    env: { ...process.env, ...extraEnv },
+    env: { ...installerEnv, ...extraEnv },
     timeout: 300000
   });
   return { status: result.status, stdout: result.stdout ?? '', stderr: result.stderr ?? '', output: `${result.stdout ?? ''}${result.stderr ?? ''}` };
@@ -199,7 +201,7 @@ try {
     const upgraded = spawnSync(
       path.join(tempRoot, 'staging-v2', 'WhaleBridge.exe'),
       ['--install', '--payload-core', payloadV2, ...argsWithoutPayload],
-      { encoding: 'utf8', env: process.env, timeout: 300000 }
+      { encoding: 'utf8', env: installerEnv, timeout: 300000 }
     );
     assert.equal(upgraded.status, 0, `${upgraded.stdout ?? ''}${upgraded.stderr ?? ''}`);
     assert.match(upgraded.stdout ?? '', /已检测到已安装版本/, '升级应识别已安装版本');
@@ -326,7 +328,7 @@ try {
       ['--uninstall', '--install-dir', sandbox.installDir, '--data-dir', sandbox.dataDir,
        '--start-menu-dir', sandbox.startMenuDir, '--desktop-dir', sandbox.desktopDir,
        '--registry-key', sandbox.registryKey, '--no-dsh-integration'],
-      { encoding: 'utf8', env: process.env, timeout: 300000 }
+      { encoding: 'utf8', env: installerEnv, timeout: 300000 }
     );
     assert.equal(result.status, 0, `${result.stdout ?? ''}${result.stderr ?? ''}`);
     assert.match(result.stdout ?? '', /卸载助手/, '应从安装目录内改用临时副本完成卸载');
@@ -373,18 +375,12 @@ try {
 
   // ------------------------------------------------------------- 9. 残留检查
   {
-    const leftovers = spawnSync(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command',
-       `@(Get-CimInstance Win32_Process -Filter "Name='whalebridge-uninstall-*.exe' or Name='whalebridge-desktop.exe'").Count`],
-      { encoding: 'utf8', timeout: 60000 }
-    );
-    const count = Number.parseInt((leftovers.stdout ?? '0').trim(), 10) || 0;
-    assert.equal(count, 0, `卸载助手/桌面壳有残留进程：${count}`);
+    const leftovers = await listOwnedWindowsProcesses({ rootDir: tempRoot });
+    assert.deepEqual(leftovers, [], `本次安装测试有残留进程：${JSON.stringify(leftovers)}`);
     assert.equal(registryExists(sandbox.registryKey), false, '测试结束后不得残留注册表项');
     // 卸载助手是复制到 %TEMP% 的副本，必须自己删掉自己（否则每卸载一次留一个 ~10MB 的文件）
     const helperLeftovers = fs
-      .readdirSync(os.tmpdir())
+      .readdirSync(tempRoot)
       .filter((name) => name.startsWith('whalebridge-uninstall-') && name.endsWith('.exe'));
     assert.deepEqual(helperLeftovers, [], `%TEMP% 里残留了卸载助手副本：${helperLeftovers.join(', ')}`);
     step('✅ 无残留：没有卸载助手/桌面壳进程、没有残留注册表项、%TEMP% 里没有助手副本');

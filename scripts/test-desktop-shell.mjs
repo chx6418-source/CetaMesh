@@ -20,12 +20,21 @@ import path from 'node:path';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { loadReleaseVersion, releaseArtifactDirectory } from '../src/release/version.js';
+import { listOwnedWindowsProcesses } from '../src/testing/suite-process.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const SHELL = process.env.WHALEBRIDGE_TEST_SHELL
   ? path.resolve(process.env.WHALEBRIDGE_TEST_SHELL)
   : path.join(ROOT, 'desktop-shell', 'target', 'debug', 'whalebridge-desktop.exe');
 const CONSOLE_TOKEN = 'desktop-shell-test-token-0123456789';
+const ownedShellPids = new Set();
+function trackShell(child) {
+  if (child.pid && typeof child.once === 'function') {
+    ownedShellPids.add(child.pid);
+    child.once('exit', () => ownedShellPids.delete(child.pid));
+  }
+  return child;
+}
 // A disappeared output from an assembled candidate is a safety block, not an
 // initial developer checkout with no release build. Check before native dispatch.
 const releaseShellPath = path.join(ROOT, 'desktop-shell', 'target', 'release', 'whalebridge-desktop.exe');
@@ -89,7 +98,7 @@ function shellEnv(tempRoot, dataDir) {
 }
 
 function runShell(args, env, timeoutMs = 120000) {
-  const result = spawnSync(SHELL, args, { encoding: 'utf8', env, timeout: timeoutMs, cwd: ROOT });
+  const result = trackShell(spawnSync(SHELL, args, { encoding: 'utf8', env, timeout: timeoutMs, cwd: ROOT }));
   return {
     status: result.status,
     stdout: result.stdout ?? '',
@@ -100,7 +109,7 @@ function runShell(args, env, timeoutMs = 120000) {
 
 /** 后台启动壳，按行收集 stdout，便于边跑边断言。 */
 function startShell(args, env) {
-  const child = spawn(SHELL, args, { env, cwd: ROOT, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] });
+  const child = trackShell(spawn(SHELL, args, { env, cwd: ROOT, windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }));
   const lines = [];
   let buffer = '';
   child.stdout.on('data', (chunk) => {
@@ -197,6 +206,7 @@ assert.match(supervisorSource, /core\.ready[\s\S]*fn wait_for_ipc[\s\S]*probe_ip
 step('✅ 桌面架构：WebView2 默认承载 Harbor，egui 是显式 fallback，UI 与 Supervisor 均使用 IPC');
 
 const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-desktop-test-'));
+let suitePassed = false;
 
 try {
   // ---------------------------------------- 1. --print-core-command：选路与端口解析
@@ -371,7 +381,7 @@ try {
       writeConfig(dataDir, port);
       const env = shellEnv(tempRoot, dataDir);
 
-      const child = spawn(SHELL, [], {
+      const child = trackShell(spawn(SHELL, [], {
         env: {
           ...env,
           WHALEBRIDGE_CORE_MODE: 'development',
@@ -381,7 +391,7 @@ try {
         cwd: ROOT,
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'pipe']
-      });
+      }));
       let stderr = '';
       child.stderr.on('data', (chunk) => {
         stderr += String(chunk);
@@ -525,7 +535,7 @@ try {
       throw new Error(`等待超时：${label}`);
     };
 
-    const first = spawn(SHELL, [], { env, cwd: ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+    const first = trackShell(spawn(SHELL, [], { env, cwd: ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
     let stderr = '';
     first.stderr.on('data', (chunk) => {
       stderr += String(chunk);
@@ -592,7 +602,7 @@ try {
       storedPrefs.zoom = 1.1;
       storedPrefs.closeBehavior = 'hide-to-tray';
       fs.writeFileSync(prefsFile, JSON.stringify(storedPrefs, null, 2));
-      const relaunched = spawn(SHELL, [], { env, cwd: ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] });
+      const relaunched = trackShell(spawn(SHELL, [], { env, cwd: ROOT, windowsHide: true, stdio: ['ignore', 'ignore', 'pipe'] }));
       try {
         await waitFor(async () => /CetaMesh/.test(titleOf(relaunched.pid) || ''), 40000, '重启后窗口');
         await waitFor(
@@ -644,12 +654,12 @@ try {
       const dataDir = path.join(tempRoot, 'release', 'data');
       const port = await freePort();
       writeConfig(dataDir, port);
-      const child = spawn(releaseShell, ['--smoke-test'], {
+      const child = trackShell(spawn(releaseShell, ['--smoke-test'], {
         cwd: ROOT,
         windowsHide: true,
         stdio: ['ignore', 'ignore', 'pipe'],
         env: { ...shellEnv(tempRoot, dataDir), WHALEBRIDGE_CORE_MODE: 'development', WHALEBRIDGE_REPO_ROOT: ROOT }
-      });
+      }));
       let stderr = '';
       child.stderr.on('data', (chunk) => {
         stderr += String(chunk);
@@ -708,17 +718,17 @@ try {
 
   // -------------------------------------------------------- 5. 无残留进程检查
   {
-    const listed = spawnSync(
-      'powershell.exe',
-      ['-NoProfile', '-NonInteractive', '-Command', `@(Get-CimInstance Win32_Process -Filter "Name='whalebridge-desktop.exe'").Count`],
-      { encoding: 'utf8', timeout: 60000 }
-    );
-    const count = Number.parseInt((listed.stdout ?? '0').trim(), 10) || 0;
-    assert.equal(count, 0, `测试结束后仍有 ${count} 个桌面壳进程残留`);
+    const leftovers = await listOwnedWindowsProcesses({ rootDir: tempRoot, pids: [...ownedShellPids] });
+    assert.deepEqual(leftovers, [], `本次桌面测试仍有进程残留：${JSON.stringify(leftovers)}`);
     step('✅ 无残留：测试结束后没有 whalebridge-desktop.exe 进程');
   }
+  suitePassed = true;
 } finally {
-  fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
+  // Preserve the first failure and its profile; a locked WebView directory must
+  // not replace the actual assertion with a secondary cleanup error.
+  if (!suitePassed || process.env.WHALEBRIDGE_TEST_KEEP_TEMP === '1') {
+    step(`TEST_TEMP_ROOT=${tempRoot}`);
+  } else fs.rmSync(tempRoot, { recursive: true, force: true, maxRetries: 10, retryDelay: 300 });
 }
 
 step('🎉 桌面启动器进程监管契约全部通过（原生窗口交互与 Windows 视觉验收仍需人工确认）');

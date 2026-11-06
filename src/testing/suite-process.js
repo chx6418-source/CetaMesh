@@ -1,4 +1,29 @@
 import { execFile } from 'node:child_process';
+import path from 'node:path';
+
+// Read-only inventory: native tests may coexist with another test or a user's
+// desktop. A shared executable name does not establish process ownership.
+export function listOwnedWindowsProcesses({ rootDir, pids = [] }, { execFileImpl = execFile } = {}) {
+  if (!path.win32.isAbsolute(rootDir)) throw new Error('process inventory requires an absolute suite directory');
+  const prefix = path.win32.normalize(rootDir).replace(/\\+$/, '').toLowerCase() + '\\';
+  const ownedPids = new Set(pids);
+  return new Promise((resolve, reject) => {
+    execFileImpl('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command',
+      "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[System.Text.Encoding]::UTF8; @(Get-CimInstance Win32_Process | Select-Object ProcessId,ExecutablePath) | ConvertTo-Json -Compress"],
+    { windowsHide: true, encoding: 'utf8', timeout: 60_000, maxBuffer: 4 * 1024 * 1024 }, (error, stdout, stderr) => {
+      if (error) { reject(new Error(`process inventory failed: ${stderr || error.message}`)); return; }
+      try {
+        const text = String(stdout ?? '').trim();
+        const rows = text ? [].concat(JSON.parse(text)) : [];
+        if (rows.some(row => !row || !Number.isSafeInteger(row.ProcessId)
+          || row.ExecutablePath != null && typeof row.ExecutablePath !== 'string')) throw new Error('invalid process inventory JSON');
+        resolve(rows.filter(row => ownedPids.has(row.ProcessId)
+          || typeof row.ExecutablePath === 'string'
+            && path.win32.normalize(row.ExecutablePath).toLowerCase().startsWith(prefix)));
+      } catch (failure) { reject(failure); }
+    });
+  });
+}
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
