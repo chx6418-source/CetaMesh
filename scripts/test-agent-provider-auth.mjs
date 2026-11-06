@@ -10,8 +10,69 @@ import {createOpenCodeAuthAdapter,openCodeAuthStatus} from '../src/agent/auth/op
 import {createClaudeAuthAdapter,claudeAuthStatus} from '../src/agent/auth/claude.js';
 import {openCodeNativePolicy} from '../src/agent/native-acp-runtime.js';
 import {describeRuntimeAuth,runtimeConnectionEvidence} from '../src/agent/runtime-auth-capabilities.js';
+import * as claudeRuntime from '../src/agent/claude-runtime.js';
+import {createAgentRuntimeConfiguration} from '../src/agent/runtime-configuration.js';
+import {createDesktopUiService} from '../src/desktop/ui-service.js';
+import {canDispatchTaskAgent} from '../src/agent/execution-security.js';
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-provider-auth-'));
 try {
+ // Native CLI reuse is an explicit mode, not an API-key fallback. Probe only
+ // the pinned CLI's metadata and never export its account fields or credentials.
+ assert.equal(typeof claudeRuntime.createClaudeNativeAuthInspector,'function','native CLI authentication must be checked instead of requiring a second API key');
+ const nativeHome=path.join(root,'native-home'),nativeDirectory=path.join(nativeHome,'.claude');
+ fs.mkdirSync(nativeDirectory,{recursive:true});
+ const state=path.join(root,'native-state');fs.mkdirSync(state);
+ const nativeConfiguration=createAgentRuntimeConfiguration({stateDir:state,providerSecrets:{list:()=>[]}});
+ assert.equal(nativeConfiguration.get('claude').authMode,'api-key','existing default is unchanged');
+ nativeConfiguration.configure('claude',{authMode:'native-cli'});
+ assert.equal(nativeConfiguration.get('claude').authMode,'native-cli');
+ assert.throws(()=>nativeConfiguration.configure('gemini',{authMode:'native-cli'}),{code:'AGENT_RUNTIME_CONFIG_INVALID'});
+ assert.throws(()=>nativeConfiguration.configure('claude',{authMode:'native-cli',apiKey:'must-not-save-a-key'}),{code:'AGENT_RUNTIME_CONFIG_INVALID'});
+ let nativeCalls=0,nativeStatus={loggedIn:true,authMethod:'claude.ai',configDirectory:nativeDirectory,email:'private-account@example.test'};
+ const nativeInspector=claudeRuntime.createClaudeNativeAuthInspector({envSource:{...process.env,HOME:nativeHome,USERPROFILE:nativeHome,ANTHROPIC_API_KEY:'must-not-inherit'},transport:{async run(spec){
+   nativeCalls++;assert.deepEqual(spec.argv,['--safe-mode','--setting-sources','','auth','status']);
+   assert.equal(spec.environment.CLAUDE_CONFIG_DIR,nativeDirectory);
+   assert.equal(spec.environment.ANTHROPIC_API_KEY,undefined);
+   assert.notEqual(spec.root,nativeHome,'status never loads project configuration from the native home');
+   return {exitCode:nativeStatus.loggedIn?0:1,stdout:JSON.stringify(nativeStatus)};
+ }}});
+ const nativeRuntime={runtimePath:process.execPath,version:'2.1.308',binaryVerified:true,sdkResourcesVerified:true};
+ const nativeAuth=await nativeInspector.inspect(nativeRuntime);
+ assert.equal(nativeAuth.authenticated,true);assert.equal(nativeAuth.reason,null);nativeAuth.validate();
+ assert.equal(nativeAuth.directory,fs.realpathSync(nativeDirectory));
+ assert.doesNotMatch(JSON.stringify(nativeAuth),/private-account|must-not-inherit/);
+ nativeStatus={...nativeStatus,email:'changed-account@example.test'};
+ assert.notEqual((await nativeInspector.inspect(nativeRuntime)).identity,nativeAuth.identity,'account changes invalidate previously bound consent');
+ nativeStatus={loggedIn:false,authMethod:'none',configDirectory:nativeDirectory};
+ assert.equal((await nativeInspector.inspect(nativeRuntime)).reason,'claude_native_login_required');
+ nativeStatus={loggedIn:true,authMethod:'api_key_helper',configDirectory:nativeDirectory};
+ assert.equal((await nativeInspector.inspect(nativeRuntime)).reason,'claude_native_auth_unverified','executable API key helpers are not adopted');
+ nativeStatus={loggedIn:true,authMethod:'claude.ai',configDirectory:nativeDirectory};
+ assert.equal((await nativeInspector.inspect(nativeRuntime)).reason,'claude_native_auth_unverified','a login without account identity cannot bind subsequent approval to the same account');
+ nativeStatus={loggedIn:true,authMethod:'claude.ai',configDirectory:root};
+ assert.equal((await nativeInspector.inspect(nativeRuntime)).reason,'claude_native_auth_unverified','a different profile cannot be claimed by native status');
+ const before=nativeCalls;assert.equal((await nativeInspector.inspect({...nativeRuntime,version:'9.0.0'})).reason,'claude_native_auth_unverified');assert.equal(nativeCalls,before,'unknown CLI versions are not executed for account status');
+ assert.equal(describeRuntimeAuth({provider:'claude',runtimeEvidence:{...nativeRuntime,compatible:true}}).nativeCliSupported,true);
+ assert.equal(describeRuntimeAuth({provider:'gemini',runtimeEvidence:{compatible:true}}).nativeCliSupported,false);
+ const openCodeNative=describeRuntimeAuth({provider:'opencode',runtimeEvidence:{version:'opencode v2.1.4',compatible:true,securityVerified:true}});
+ assert.equal(openCodeNative.nativeCliSupported,false,'Console account may override the isolated system policy on installed 2.1.4');
+ assert.equal(openCodeNative.accountReason,'opencode_native_policy_override_unsupported','the known version exposes the tested account scope defect instead of a missing API key');
+ assert.equal(openCodeNative.methods.find(method=>method.id==='api-key').supported,true,'isolated configured API mode remains supported');
+ assert.equal(describeRuntimeAuth({provider:'opencode',runtimeEvidence:{version:'opencode v2.2.3',compatible:true}}).accountReason,'windows_auth_contract_unverified','documentation for a newer version does not grant local compatibility');
+ const nativePolicy={mode:'native-permissions',verified:true,nativeSandboxSupported:false,strictIsolationVerified:false,nativeApprovalSupported:true,nativePermissionPolicyVerified:true,allToolsRequireApproval:true,nativeSandboxMode:'none',authMode:'native-cli',nativeAccountIdentity:'checked-native-account'};
+ const nativeReady={available:true,installed:true,compatible:true,taskEligible:true,sessionCapable:true,authenticated:true,authConfigured:true,authVerified:true,authentication:'native-cli-authenticated',runtimeConfiguration:{authMode:'native-cli'}};
+ assert.equal(canDispatchTaskAgent(nativeReady,{provider:'claude',security:nativePolicy,explicitProvider:true}),true,'Owner explicitly selected and locally authenticated native CLI can enter the existing per-tool approval path');
+ assert.equal(canDispatchTaskAgent(nativeReady,{provider:'claude',security:nativePolicy}),false,'local auth status does not certify tool execution for automatic assignment');
+ for(const change of [{authenticated:false},{authVerified:false},{authentication:'unknown'},{runtimeConfiguration:{authMode:'api-key'}},{sessionCapable:false}])assert.equal(canDispatchTaskAgent({...nativeReady,...change},{provider:'claude',security:nativePolicy,explicitProvider:true}),false);
+ for(const change of [{allToolsRequireApproval:false},{nativeAccountIdentity:null},{authMode:'api-key'}])assert.equal(canDispatchTaskAgent(nativeReady,{provider:'claude',security:{...nativePolicy,...change},explicitProvider:true}),false);
+ const nativeDtoUi=createDesktopUiService({services:{agentService:{execute:async()=>({id:'claude',available:true,health:{installed:true,compatible:true,authenticated:true,authConfigured:true,authVerified:true,authentication:'native-cli-authenticated',
+   runtimeConfiguration:{provider:'claude',enabled:true,runtimePath:'',nodePath:'',model:'',baseUrl:'https://api.anthropic.com',executionMode:'native-permissions',authMode:'native-cli',credentialConfigured:false,revision:1},
+   connection:{runtime:{installed:true,protocolVerified:true,version:'2.1.308'},authentication:{mode:'native-cli',state:'native-cli-authenticated',verified:true,email:'private-account@example.test'},execution:{eligible:true,reason:null},nativeCliSupported:true,modelRequired:false,nativeProfileDirectory:'PRIVATE_PROFILE_MUST_NOT_PROJECT'}}})}}});
+ const nativeDto=await nativeDtoUi.execute({method:'ui.agent.health',params:{provider:'claude'}});
+ assert.equal(nativeDto.runtimeConfiguration.authMode,'native-cli','native CLI selection survives the public Core UI projection');
+ assert.equal(nativeDto.connection.authentication.mode,'native-cli');assert.equal(nativeDto.connection.authentication.state,'native-cli-authenticated');assert.equal(nativeDto.connection.nativeCliSupported,true);
+ assert.doesNotMatch(JSON.stringify(nativeDto),/private-account|PRIVATE_PROFILE_MUST_NOT_PROJECT/);
+ console.log('PASS explicit Claude native mode, bounded account metadata, signed-out recovery and profile/account binding');
  const rootFor=id=>{const dir=path.join(root,id);fs.mkdirSync(dir,{recursive:true});return {root:dir,provider:id,validate(){}};};
  const gemini=geminiAuthProfile(rootFor('gemini'));
  assert.equal(gemini.environment.GEMINI_CLI_HOME,gemini.root);

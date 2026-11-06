@@ -126,5 +126,29 @@ try {
   assert.equal(options.env.CLAUDE_CONFIG_DIR,path.join(store.current('claude').root,'config'));assert.equal(options.env.ANTHROPIC_API_KEY,undefined);assert.equal(options.env.ANTHROPIC_BASE_URL,undefined);assert.deepEqual(options.settingSources,[]);assert.deepEqual(options.allowedTools,[]);assert.equal(typeof options.hooks.PreToolUse[0].hooks[0],'function');
   await provider.closeSession({sessionId:session.sessionId});assert.equal(fs.existsSync(profile.root),true);await provider.shutdown();await authService.close();
  });
+ await test('R8 explicit native CLI uses account directory without importing settings or copying keys',async()=>{
+  const nativeDirectory=path.join(root,'existing-cli-profile'),source=path.join(root,'native-task-source');fs.mkdirSync(nativeDirectory);fs.mkdirSync(source);
+  const marker=path.join(nativeDirectory,'settings.json');fs.writeFileSync(marker,'{"hooks":{"untrusted":true},"enabledPlugins":{"untrusted":true}}');
+  let options,runnerProfile,approveCalls=0,valid=true;
+  const nativeAuth={authenticated:true,directory:nativeDirectory,identity:'native-account',validate(){if(!valid)throw Object.assign(Error('Native account changed'),{code:'AGENT_RUNTIME_CHANGED'});}};
+  const provider=createClaudeAgentProvider({taskOptions:{authMode:'native-cli',verifiedRuntime:{verified:true,sdkResourcesVerified:true,binaryVerified:true,runtimePath:'/synthetic/claude',tools:['Read'],security:{mode:'native-permissions',verified:true,nativeSandboxSupported:false,strictIsolationVerified:false,nativeApprovalSupported:true,nativePermissionPolicyVerified:true,allToolsRequireApproval:true,nativeSandboxMode:'none'}},validateRuntime:()=>nativeAuth.validate(),resolveTaskWorkspace:async()=>({task:{id:'native-t',workspaceId:'native-w'},workspace:{id:'native-w',root:source}})},
+   resolveCredential(){throw Error('Native task must not read a stored API key');},requestNativeApproval:async()=>{approveCalls++;return {outcome:'rejected'};},
+   launchSdkRunner:createClaudeTaskRunnerLauncher({authMode:'native-cli',resolveNativeAuth:()=>nativeAuth,validateRuntime:()=>nativeAuth.validate(),createRunner:({envSource})=>()=>{
+    runnerProfile=envSource.CLAUDE_CONFIG_DIR;assert.notEqual(runnerProfile,nativeDirectory,'Core runner itself keeps an owned private profile');
+    const readable=new PassThrough(),writable=new PassThrough(),done=runClaudeSdkRunner({input:writable,output:readable,loadSdk:async()=>({query(args){options=args.options;return {async *[Symbol.asyncIterator](){const decision=await options.hooks.PreToolUse[0].hooks[0]({hook_event_name:'PreToolUse',tool_name:'Read',tool_input:{file_path:'README.md'},tool_use_id:'native-read'},'native-read',{});assert.equal(decision.hookSpecificOutput.permissionDecision,'deny');yield {type:'result',subtype:'success',session_id:'native-fixture'};},async interrupt(){}};}})});return {readable,writable,done,async close(){writable.end();await done;}};
+   }})
+  });
+  try {
+   const session=await provider.createSession({taskId:'native-t',workspaceId:'native-w'});await provider.send({sessionId:session.sessionId,content:'synthetic native mode'});
+   for(let i=0;i<100&&(await provider.status({sessionId:session.sessionId})).running;i++)await new Promise(r=>setTimeout(r,2));
+   assert.equal((await provider.status({sessionId:session.sessionId})).lastRunStatus,'completed');assert.equal(approveCalls,1);
+   assert.equal(options.env.CLAUDE_CONFIG_DIR,nativeDirectory);assert.equal(options.env.ANTHROPIC_API_KEY,undefined);assert.equal(options.env.ANTHROPIC_BASE_URL,undefined);
+   assert.equal(options.env.CLAUDE_CODE_SAFE_MODE,'1');assert.equal(options.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY,'1');
+   assert.deepEqual(options.settingSources,[]);assert.deepEqual(options.mcpServers,{});assert.deepEqual(options.plugins,[]);assert.equal(options.strictMcpConfig,true);assert.deepEqual(options.allowedTools,[]);
+   valid=false;await assert.rejects(provider.send({sessionId:session.sessionId,content:'must not use changed login'}),{code:'AGENT_RUNTIME_CHANGED'});
+   await provider.closeSession({sessionId:session.sessionId});assert.equal(fs.existsSync(nativeDirectory),true);assert.equal(fs.existsSync(runnerProfile),false);
+   assert.equal(fs.readFileSync(marker,'utf8'),'{"hooks":{"untrusted":true},"enabledPlugins":{"untrusted":true}}');
+  } finally {await provider.shutdown();}
+ });
 } finally {fs.rmSync(root,{recursive:true,force:true});}
 if(cases.length)throw Error(cases.length+' auth regression cases failed');

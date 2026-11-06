@@ -11,15 +11,26 @@ const ACCOUNT_METHODS = Object.freeze({
 export function describeRuntimeAuth({provider, runtimeEvidence = {}} = {}) {
   if (!['gemini','qwen','opencode','claude'].includes(provider)) throw new TypeError('Unsupported Agent runtime provider');
   const method = ACCOUNT_METHODS[provider];
+  // Pinned 2.1.4 Console policies are applied after the isolated system policy,
+  // and its guarded Console loader can supply MCP and provider packages. The
+  // actual no-prompt native probe reproduced both local deny overrides. Do not
+  // infer compatibility from newer documentation or weaken the existing policy.
+  // https://github.com/anomalyco/opencode/blob/v2.1.4/packages/core/src/managed-policy.ts
+  const nativeAccountReason=provider==='opencode'&&runtimeEvidence.compatible===true&&runtimeEvidence.version==='opencode v2.1.4'
+    ? 'opencode_native_policy_override_unsupported' : method?.reason ?? 'qwen_oauth_discontinued';
   return { servicePresets:runtimeServicePresets(provider).map(({id,label,baseUrl})=>({id,label,baseUrl})),providerSelections:provider==='opencode'?OPENCODE_LOGIN_SELECTIONS:[], methods: [{id:'api-key',label:'API Key',supported:true,reason:null},
     ...(provider==='opencode'?OPENCODE_LOGIN_SELECTIONS.map(selection=>({id:selection.methodId,label:selection.label,supported:false,reason:'windows_auth_contract_unverified'})):method ? [{...method,supported:false}] : [])],
-    accountReason: method?.reason ?? 'qwen_oauth_discontinued',
+    accountReason: nativeAccountReason,
+    nativeCliSupported: provider==='claude' && runtimeEvidence.version==='2.1.308' && runtimeEvidence.binaryVerified===true && runtimeEvidence.sdkResourcesVerified===true,
     modelRequired: provider !== 'claude' || !(runtimeEvidence.compatible === true && runtimeEvidence.binaryVerified === true && runtimeEvidence.sdkResourcesVerified === true) };
 }
 export function runtimeConnectionEvidence({provider, runtimeEvidence = {}, configuration = {}, taskEligible = false, reason = null} = {}) {
   const capability = describeRuntimeAuth({provider,runtimeEvidence});
   return { runtime: {installed: typeof runtimeEvidence.installed === 'boolean' ? runtimeEvidence.installed : Boolean(runtimeEvidence.executable),
     protocolVerified: runtimeEvidence.compatible === true, version: runtimeEvidence.version ?? null},
-    authentication: {mode: configuration.authMode ?? 'api-key', state: configuration.authMode!=='provider-login' && configuration.credentialConfigured ? 'configured-unverified' : 'not-configured', verified:false},
+    authentication: {mode: configuration.authMode ?? 'api-key', state: configuration.authMode==='native-cli'
+      ? runtimeEvidence.nativeAuthenticated===true?'native-cli-authenticated':runtimeEvidence.nativeAuthenticated===false?'native-cli-not-authenticated':'unknown'
+      : configuration.authMode!=='provider-login' && configuration.credentialConfigured ? 'configured-unverified' : 'not-configured',
+      verified:configuration.authMode==='native-cli'&&runtimeEvidence.nativeAuthenticated===true},
     execution: {eligible:taskEligible === true,reason}, ...capability };
 }

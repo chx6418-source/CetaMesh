@@ -13,8 +13,8 @@ export function createAuthTransport({launchFactory=createAcpProcessLauncher}={})
   handle.readable.on('data',receive);
   try {
    const result=await Promise.race([handle.done,new Promise((_,reject)=>{timer=setTimeout(()=>reject(fault('AGENT_AUTH_STATUS_FAILED','Authentication status timed out')),15000);})]);
-   if(overflow||result.startFailed||result.exitCode!==0)throw fault('AGENT_AUTH_STATUS_FAILED','Authentication status is unavailable');
-   return {exitCode:0,stdout:Buffer.concat(output).toString('utf8')};
+   if(overflow||result.startFailed||(result.exitCode!==0&&!(spec.allowSignedOut===true&&result.exitCode===1)))throw fault('AGENT_AUTH_STATUS_FAILED','Authentication status is unavailable');
+   return {exitCode:result.exitCode,stdout:Buffer.concat(output).toString('utf8')};
   } finally {clearTimeout(timer);handle.readable.off('data',receive);output=[];await handle.close();}
  }});
 }

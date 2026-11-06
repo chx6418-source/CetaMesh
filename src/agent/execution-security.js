@@ -23,14 +23,17 @@ export function isNativePermissionSecurity(security) {
     && security.nativeSandboxMode === 'none';
 }
 
-/** Explicit Owner dispatch may verify a configured API key on its first request. */
+/** Explicit Owner dispatch uses configured auth; neither route certifies a model call. */
 export function canDispatchConfiguredNativeAgent(health, security) {
   return security?.verified === true && isNativePermissionSecurity(security)
     && health?.available === true && health?.installed === true && health?.compatible === true
     && health?.taskEligible === true && health?.sessionCapable === true
     && health?.disabled !== true && health?.enabled !== false && health?.ready !== false && health?.reachable !== false
-    && health?.authenticated !== false && health?.authConfigured === true && health?.authVerified === false
-    && health?.authentication === 'configured-unverified' && health?.reason == null;
+    && health?.authenticated !== false && health?.authConfigured === true && health?.reason == null
+    && ((health.authVerified===false&&health.authentication==='configured-unverified')
+      || (health.authenticated===true&&health.authVerified===true&&health.authentication==='native-cli-authenticated'
+        && health.runtimeConfiguration?.authMode==='native-cli'&&security.authMode==='native-cli'
+        && typeof security.nativeAccountIdentity==='string'&&security.nativeAccountIdentity.length>0));
 }
 
 /** Shared observation for task selectors and assignment; dispatch still rechecks live health and consent. */

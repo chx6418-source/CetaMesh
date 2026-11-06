@@ -6,7 +6,7 @@ import { createJsonRpcTransport } from './protocol/json-rpc-transport.js';
 import path from 'node:path';
 import { APP_PATHS, isPackagedRuntime } from '../app-paths.js';
 import { createAcpProcessLauncher } from './acp-provider-descriptors.js';
-import { CLAUDE_NATIVE_TOOLS, createClaudeOwnedProfile, createClaudeRuntimeVerifier } from './claude-runtime.js';
+import { CLAUDE_NATIVE_TOOLS, createClaudeOwnedProfile, createClaudeRuntimeVerifier, createClaudeNativeAuthInspector } from './claude-runtime.js';
 
 /** The private mode always uses this Core executable, never an assumed system Node. */
 export function claudeRunnerLaunchSpec({ executable = process.execPath, sea = false, entry } = {}) {
@@ -22,16 +22,20 @@ export function createClaudeSdkRunnerLauncher({executable = process.execPath, se
 }
 
 /** Internal task transport shares only a promoted owned account generation. */
-export function createClaudeTaskRunnerLauncher({authMode='api-key',resolveAuthProfile,validateRuntime=async()=>{},activeProfiles=new Set(),createRunner=createClaudeSdkRunnerLauncher}={}) {
+export function createClaudeTaskRunnerLauncher({authMode='api-key',resolveAuthProfile,resolveNativeAuth,validateRuntime=async()=>{},activeProfiles=new Set(),createRunner=createClaudeSdkRunnerLauncher}={}) {
   return async binding => {
     await validateRuntime();
     const account=authMode==='provider-login';
-    const profile=account?await resolveAuthProfile?.('claude'):createClaudeOwnedProfile();
+    const nativeAuth=authMode==='native-cli'?await resolveNativeAuth?.():null;
+    if(authMode==='native-cli'&&(nativeAuth?.authenticated!==true||!nativeAuth.directory))throw agentProviderError('AGENT_AUTH_REQUIRED','Sign in using the installed Claude Code CLI first');
+    nativeAuth?.validate();
+    const owned=account?await resolveAuthProfile?.('claude'):createClaudeOwnedProfile();
+    const profile=nativeAuth?{...owned,validate:()=>nativeAuth.validate()}:owned;
     if(!profile)throw agentProviderError('AGENT_AUTH_UNSUPPORTED','No promoted owned account profile');
     let wrapped;
     const wrap = handle => {
       if (wrapped) return wrapped;
-      wrapped = { ...handle, profileRoot: profile.root, async close() {
+      wrapped = { ...handle, profileRoot: profile.root, ...(nativeAuth?{nativeAuthDirectory:nativeAuth.directory}:{}), async close() {
         await handle.close(); await handle.done; await profile.cleanup(); activeProfiles.delete(profile);
       } };
       binding.onHandle?.(wrapped); return wrapped;
@@ -57,7 +61,7 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
       && runtime.security?.verified === true
       && ((runtime.security.mode === 'native' && runtime.security.nativeSandboxSupported === true && runtime.security.nativeApprovalSupported === true)
         || isNativePermissionSecurity(runtime.security)) && (launchSdkRunner == null || typeof launchSdkRunner === 'function')
-      && (taskOptions.authMode === 'provider-login' || typeof resolveCredential === 'function') && typeof taskOptions.resolveTaskWorkspace === 'function') {
+      && (['provider-login','native-cli'].includes(taskOptions.authMode) || typeof resolveCredential === 'function') && typeof taskOptions.resolveTaskWorkspace === 'function') {
     const launcher = launchSdkRunner ?? createClaudeSdkRunnerLauncher();
     return createAcpAgentProvider({
       descriptor: { id: 'claude', label: 'Claude', protocolVersion: 1, verifiedRuntime: true, security: runtime.security },
@@ -73,7 +77,7 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
           throw agentProviderError('AGENT_CONFIGURATION_UNSUPPORTED', 'Claude supports its configured model; change Agent settings before creating a fresh Session. Session reasoning control is not verified.');
         }
         // Secret resolved only after Task Workspace binding and staging were established.
-        const account = taskOptions.authMode === 'provider-login';
+        const account = ['provider-login','native-cli'].includes(taskOptions.authMode);
         const credential = account ? null : await resolveCredential(taskOptions.credentialRef);
         const apiKey = typeof credential === 'string' ? credential : credential?.apiKey;
         if (!account && (typeof apiKey !== 'string' || !apiKey)) throw Object.assign(new Error('Claude credential unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
@@ -83,9 +87,10 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
         binding.onHandle(handle);
         const bootstrap = createJsonRpcTransport({ readable: handle.readable, writable: handle.writable, framing: 'acp-v1-jsonl' });
         try {
-          await bootstrap.request('initialize', { ...(account ? {authMode:'provider-login'} : {credential:apiKey}), cwd: binding.cwd, runtimePath: runtime.runtimePath,
+          await bootstrap.request('initialize', { ...(account ? {authMode:taskOptions.authMode} : {credential:apiKey}), cwd: binding.cwd, runtimePath: runtime.runtimePath,
             ...(typeof credential?.baseUrl === 'string' ? { baseUrl: credential.baseUrl } : {}),
             ...(handle.profileRoot ? { profileRoot: handle.profileRoot, executionMode: 'native-permissions' } : {}),
+            ...(handle.nativeAuthDirectory ? {nativeAuthDirectory:handle.nativeAuthDirectory} : {}),
             tools: runtime.tools ?? [], ...(runtime.model === undefined ? {} : { model: runtime.model }) }, { timeoutMs: 15000 });
           // Release bootstrap request bookkeeping before the lifecycle channel starts its IDs.
           await new Promise(resolve => setImmediate(resolve));
@@ -108,11 +113,12 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
 
 /** Owner-configured production runtime. All verification and launch inputs stay in Core. */
 export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, taskOptions = {}, requestNativeApproval, log,
-  resourceRoot = APP_PATHS.resourceRoot, resolveAuthProfile, createRunner } = {}) {
+  resourceRoot = APP_PATHS.resourceRoot, resolveAuthProfile, createRunner, envSource = process.env } = {}) {
   if (!runtimeConfiguration || ['get', 'identity', 'configure', 'resolveCredential'].some(key => typeof runtimeConfiguration[key] !== 'function')) {
     throw new TypeError('Claude runtime configuration service required');
   }
-  const verifier = createClaudeRuntimeVerifier({ resourceRoot });
+  const verifier = createClaudeRuntimeVerifier({ resourceRoot, envSource });
+  const nativeAuthInspector = createClaudeNativeAuthInspector({envSource});
   const unavailable = createClaudeAgentProvider();
   const sessions = new Map(), inners = new Set(), creating = new Set();
   let latest = null, closing = false, shutdownPromise;
@@ -132,12 +138,13 @@ export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, task
       authConfigured: null, authVerified: false, authenticated: null, authentication: 'unknown', sessionCapable: false, binaryVerified: false, sdkResourcesVerified: false, nativePolicyVerified: false,
       reason, runtimeConfiguration: null };
   }
-  function reasonFor(configuration, evidence) {
+  function reasonFor(configuration, evidence, nativeAuth) {
     if (!configuration.enabled) return 'disabled';
     if (configuration.executionMode !== 'native-permissions') return 'native_policy_unverified';
     if (evidence.reason) return evidence.reason;
     if (configuration.authMode === 'provider-login') return 'provider_login_execution_unverified';
-    if (!configuration.credentialConfigured) return 'credential_missing';
+    if (configuration.authMode === 'native-cli') {if(nativeAuth?.authenticated!==true)return nativeAuth?.reason??'claude_native_auth_unverified';}
+    else if (!configuration.credentialConfigured) return 'credential_missing';
     if (typeof taskOptions.resolveTaskWorkspace !== 'function') return 'task_binding_unavailable';
     if (typeof requestNativeApproval !== 'function') return 'native_approval_unavailable';
     return null;
@@ -146,13 +153,18 @@ export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, task
     const selected = current();
     const evidence = selected.configuration.enabled ? await verifier.inspect(selected.configuration.runtimePath)
       : { installed: null, compatible: false, binaryVerified: false, sdkResourcesVerified: false, reason: 'disabled' };
+    const nativeAuth = selected.configuration.authMode==='native-cli' && !evidence.reason ? await nativeAuthInspector.inspect(evidence) : null;
+    if(selected.configuration.authMode==='native-cli')evidence.nativeAuthenticated=nativeAuth?.authenticated??null;
     if (current().identity !== selected.identity) throw agentProviderError('AGENT_RUNTIME_CHANGED', 'Claude configuration changed; refresh and create a new session');
-    const reason = reasonFor(selected.configuration, evidence);
-    const identity = JSON.stringify([selected.identity, evidence.binaryHash, evidence.sdkHash, evidence.reason]);
+    const reason = reasonFor(selected.configuration, evidence, nativeAuth);
+    const identity = JSON.stringify([selected.identity, evidence.binaryHash, evidence.sdkHash, evidence.reason, nativeAuth?.identity, nativeAuth?.reason]);
     if (latest?.identity === identity) return latest;
     const activeProfiles=new Set();
-    const record = { ...selected, identity, configurationIdentity: selected.identity, evidence, reason,
-      security: security(evidence, selected.identity, !reason), inner: null };
+    const record = { ...selected, identity, configurationIdentity: selected.identity, evidence, nativeAuth, reason,
+      security: {...security(evidence, selected.identity, !reason),authMode:selected.configuration.authMode,
+        ...(nativeAuth?.identity?{nativeAccountIdentity:nativeAuth.identity}:{}),
+        ...(selected.configuration.authMode==='native-cli'?{securityLimitations:[...security().securityLimitations,
+          'Uses the existing Claude Code login. Claude Code may maintain history and authentication in its native profile; CetaMesh does not copy its credentials. User and project settings, plugins and extra MCP servers are disabled.']}: {})}, inner: null };
     if (!reason) {
       async function validateRuntime() {
         for(const profile of activeProfiles)profile.validate?.();
@@ -162,6 +174,12 @@ export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, task
         const checked = await verifier.inspect(now.configuration.runtimePath);
         if (current().identity !== record.configurationIdentity || checked.reason || checked.binaryHash !== evidence.binaryHash || checked.sdkHash !== evidence.sdkHash) {
           throw agentProviderError('AGENT_RUNTIME_CHANGED', 'Claude runtime changed; refresh and create a new session');
+        }
+        if(selected.configuration.authMode==='native-cli') {
+          const authentication=await nativeAuthInspector.inspect(checked);
+          if(current().identity!==record.configurationIdentity||authentication.authenticated!==true||authentication.identity!==nativeAuth.identity)
+            throw agentProviderError('AGENT_RUNTIME_CHANGED','Claude Code login changed; refresh and create a new session');
+          nativeAuth.validate();
         }
       }
       record.inner = createClaudeAgentProvider({
@@ -183,7 +201,7 @@ export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, task
           }
           return credential;
         },
-        launchSdkRunner:createClaudeTaskRunnerLauncher({authMode:selected.configuration.authMode,resolveAuthProfile,validateRuntime,activeProfiles,createRunner})
+        launchSdkRunner:createClaudeTaskRunnerLauncher({authMode:selected.configuration.authMode,resolveAuthProfile,resolveNativeAuth:()=>nativeAuth,validateRuntime,activeProfiles,createRunner})
       });
       inners.add(record.inner);
     }
@@ -222,9 +240,11 @@ export function createConfiguredClaudeAgentProvider({ runtimeConfiguration, task
       try { record = await refresh(); }
       catch (error) { return configurationFailure(error); /* Keep malformed optional configuration untouched and fail closed. */ }
       const available = !record.reason && !closing;
+      const native=record.configuration.authMode==='native-cli',nativeAuthenticated=record.nativeAuth?.authenticated??null;
       return { provider: 'claude', available, installed: record.evidence.installed, compatible: record.evidence.compatible,
-        authConfigured: record.configuration.credentialConfigured, authVerified: false, authenticated: null,
-        authentication: record.configuration.credentialConfigured ? 'configured-unverified' : 'not-configured',
+        authConfigured: native ? nativeAuthenticated===true : record.configuration.credentialConfigured, authVerified: native&&nativeAuthenticated===true, authenticated: native ? nativeAuthenticated : null,
+        authentication: native ? nativeAuthenticated===true?'native-cli-authenticated':nativeAuthenticated===false?'native-cli-not-authenticated':'unknown'
+          : record.configuration.credentialConfigured ? 'configured-unverified' : 'not-configured',
         sessionCapable: available, taskEligible: available, readyForTask: available,
         reason: closing ? 'provider_shutting_down' : record.reason, version: record.evidence.version ?? null,
         binaryVerified: record.evidence.binaryVerified, sdkResourcesVerified: record.evidence.sdkResourcesVerified,

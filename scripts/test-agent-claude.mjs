@@ -95,13 +95,13 @@ runtimeFs.writeFileSync(nativeBinary,nativeBytes);
 const auditedSdkSource=process.env.WHALEBRIDGE_TEST_CLAUDE_SDK_SOURCE;
 const auditedSdkBytes=auditedSdkSource ? await (await import('./claude-sdk-resource.mjs')).compileClaudeSdkResource(auditedSdkSource) : null;
 const nativeLaunches=[],nativeChildren=[];
-let probeVersion='2.1.76 (Claude Code)',nativeOptions,nativeExercise;
+let probeVersion='2.1.76 (Claude Code)',nativeOptions,nativeExercise,nativeAccount,nativeTestHome;
 const nativeSpawn=runtimeMock.method(nativeBoundary.default,'spawn',(command,args,options)=>{
   assert.equal(options.shell,false);assert.equal(options.windowsHide,true);
   assert.equal(options.env.ANTHROPIC_API_KEY,undefined,'keys must not appear in runner or probe process creation');
   assert.equal(options.env.ANTHROPIC_AUTH_TOKEN,undefined);
   assert.notEqual(options.env.HOME,process.env.HOME);assert.notEqual(options.env.USERPROFILE,process.env.USERPROFILE);
-  assert.ok(options.env.HOME.startsWith(options.cwd)||options.env.HOME.includes('cetamesh-claude-profile-'));
+  assert.ok(options.env.HOME.startsWith(options.cwd)||options.env.HOME.includes('cetamesh-claude-profile-')||(args.includes('auth')&&options.env.HOME===nativeTestHome));
   const child=new ProbeEmitter();child.stdout=new PassThrough();child.stdin=new PassThrough();child.stderr=new PassThrough();
   child.kill=()=>{child.emit('close',null,'SIGTERM');return true;};
   nativeLaunches.push({command,args,options,child});
@@ -111,6 +111,10 @@ const nativeSpawn=runtimeMock.method(nativeBoundary.default,'spawn',(command,arg
       return {async *[Symbol.asyncIterator]() {if(nativeExercise)await nativeExercise(options);yield {type:'result',subtype:'success',session_id:'configured-native-id'};},async interrupt(){}};
     }})});
     done.then(()=>child.emit('close',0,null));nativeChildren.push(child);
+  } else if(args.includes('auth')) {
+    assert.equal(command,nativeBinary);assert.deepEqual(args,['--safe-mode','--setting-sources','','auth','status']);
+    assert.equal(options.env.CLAUDE_CONFIG_DIR,runtimePath.join(nativeTestHome,'.claude'));
+    queueMicrotask(()=>{child.stdout.write(JSON.stringify(nativeAccount));child.emit('close',nativeAccount.loggedIn?0:1,null);});
   } else {
     assert.equal(command,nativeBinary);
     assert.ok(args.length===1&&['--version','--help'].includes(args[0]));
@@ -207,6 +211,28 @@ try {
     thirdChild.stdin.end();await configured.closeSession({sessionId:third.sessionId});await configured.shutdown();
     assert.ok(!JSON.stringify(nativeLaunches.map(({command,args})=>({command,args}))).includes('configured-private-key'));
     console.log('Claude configured SDK/binary fingerprint, private bootstrap and owned-profile lifecycle fixture PASS');
+    probeVersion='2.1.308 (Claude Code)';nativeBytes[101]^=1;runtimeFs.writeFileSync(nativeBinary,nativeBytes);
+    nativeTestHome=runtimePath.join(probeRoot,'native-home');runtimeFs.mkdirSync(runtimePath.join(nativeTestHome,'.claude'),{recursive:true});
+    const nativeConfig=createAgentRuntimeConfiguration({stateDir:runtimePath.join(probeRoot,'native-state'),providerSecrets:{list:()=>[],raw(){throw Error('Native mode must never resolve Core secrets');}}});
+    nativeAccount={loggedIn:false,authMethod:'none',configDirectory:runtimePath.join(nativeTestHome,'.claude')};
+    const nativeConfigured=configuredModule.createConfiguredClaudeAgentProvider({runtimeConfiguration:nativeConfig,resourceRoot,envSource:{...process.env,HOME:nativeTestHome,USERPROFILE:nativeTestHome},
+      requestNativeApproval:async()=>({outcome:'rejected'}),taskOptions:{stagingRoot:runtimePath.join(probeRoot,'native-stages'),resolveTaskWorkspace:async()=>({task:{id:'native-task',workspaceId:'native-workspace'},workspace:{id:'native-workspace',root:sourceRoot}})}});
+    nativeConfigured.configure({runtimePath:nativeBinary,authMode:'native-cli'});
+    try {
+      const signedOut=await nativeConfigured.health();assert.equal(signedOut.reason,'claude_native_login_required');assert.equal(signedOut.authenticated,false);assert.equal(signedOut.available,false);
+      nativeAccount={...nativeAccount,loggedIn:true,authMethod:'claude.ai',email:'fixture-native-account@example.test'};
+      const signedIn=await nativeConfigured.health();assert.equal(signedIn.available,true);assert.equal(signedIn.authenticated,true);assert.equal(signedIn.authVerified,true);assert.equal(signedIn.runtimeConfiguration.credentialConfigured,false);
+      assert.equal(signedIn.connection.nativeCliSupported,true);assert.equal(signedIn.connection.authentication.state,'native-cli-authenticated');
+      assert.doesNotMatch(JSON.stringify(signedIn),/fixture-native-account|native-home/,'health never exposes native account metadata or directory');
+      const nativeSession=await nativeConfigured.createSession({taskId:'native-task',workspaceId:'native-workspace'}),nativeChild=nativeChildren.at(-1);
+      await nativeConfigured.send({sessionId:nativeSession.sessionId,content:'native profile fixture'});
+      for(let i=0;i<100&&(await nativeConfigured.status({sessionId:nativeSession.sessionId})).running;i++)await new Promise(resolve=>setTimeout(resolve,2));
+      assert.equal(nativeOptions.env.CLAUDE_CONFIG_DIR,runtimePath.join(nativeTestHome,'.claude'));assert.equal(nativeOptions.env.ANTHROPIC_API_KEY,undefined);assert.equal(nativeOptions.env.ANTHROPIC_BASE_URL,undefined);
+      nativeAccount={...nativeAccount,email:'changed-native-account@example.test'};
+      await assert.rejects(nativeConfigured.send({sessionId:nativeSession.sessionId,content:'changed account'}),{code:'AGENT_RUNTIME_CHANGED'});
+      nativeChild.stdin.end();await nativeConfigured.closeSession({sessionId:nativeSession.sessionId});assert.equal(runtimeFs.existsSync(runtimePath.join(nativeTestHome,'.claude')),true);
+    } finally {await nativeConfigured.shutdown();}
+    console.log('Claude configured native CLI login metadata, private SDK policy and changed-account revocation fixture PASS');
   } else console.log('Claude configured positive SDK fixture NOT_RUN_ENVIRONMENT: set WHALEBRIDGE_TEST_CLAUDE_SDK_SOURCE to exact audited SDK source');
 } finally {
   for(const child of nativeChildren)child.stdin.end();

@@ -34,20 +34,22 @@ export async function runClaudeSdkRunner({ input = process.stdin, output = proce
       if (closed) throw fault('CLAUDE_RUNNER_CLOSED');
       if (method === 'initialize') {
         if (configuration && params.protocolVersion === 1) return { protocolVersion: 1, agentCapabilities: {} };
-        const account=params.authMode==='provider-login';
-        if (configuration || (params.authMode!==undefined&&!['api-key','provider-login'].includes(params.authMode))
+        const native=params.authMode==='native-cli',account=params.authMode==='provider-login'||native;
+        if (configuration || (params.authMode!==undefined&&!['api-key','provider-login','native-cli'].includes(params.authMode))
             || (account ? (params.credential!==undefined||params.baseUrl!==undefined||!params.profileRoot||params.executionMode!=='native-permissions') : (typeof params.credential !== 'string' || !params.credential)) ||
             typeof params.cwd !== 'string' || !params.cwd || typeof params.runtimePath !== 'string' || !params.runtimePath ||
             !Array.isArray(params.tools) || params.tools.some(t => typeof t !== 'string')
             || (params.baseUrl !== undefined && !validEndpoint(params.baseUrl))
             || (params.profileRoot !== undefined && (typeof params.profileRoot !== 'string' || !path.isAbsolute(params.profileRoot) || path.dirname(params.profileRoot) === params.profileRoot))
+            || (native ? typeof params.nativeAuthDirectory!=='string'||!path.isAbsolute(params.nativeAuthDirectory)||path.dirname(params.nativeAuthDirectory)===params.nativeAuthDirectory||params.nativeAuthDirectory===params.profileRoot : params.nativeAuthDirectory!==undefined)
             || (params.executionMode !== undefined && (params.executionMode !== 'native-permissions' || !params.profileRoot))
             || (params.model !== undefined && (typeof params.model !== 'string' || !params.model.trim()
               || params.model !== params.model.trim() || params.model.length > 256 || /[\u0000-\u001f\u007f]/.test(params.model)))) throw fault('CLAUDE_INVALID_CONFIG');
         const loaded = await loadSdk();
         if (closed || typeof loaded?.query !== 'function') throw fault('CLAUDE_SDK_UNAVAILABLE');
         sdk = loaded;
-        configuration = { authMode:account?'provider-login':'api-key', ...(params.baseUrl === undefined ? {} : { baseUrl: params.baseUrl }),
+        configuration = { authMode:account?params.authMode:'api-key', ...(params.baseUrl === undefined ? {} : { baseUrl: params.baseUrl }),
+          ...(native?{nativeAuthDirectory:params.nativeAuthDirectory}:{}),
           ...(params.profileRoot === undefined ? {} : { profileRoot: params.profileRoot }),
           ...(params.executionMode === undefined ? {} : { executionMode: params.executionMode }), credential: params.credential, cwd: params.cwd, runtimePath: params.runtimePath, tools: [...params.tools], ...(params.model === undefined ? {} : { model: params.model }) };
         return { initialized: true };
@@ -143,7 +145,8 @@ export async function runClaudeSdkRunner({ input = process.stdin, output = proce
       try {
         turn.query = sdk.query({ prompt: params.prompt, options: {
           cwd: config.cwd, pathToClaudeCodeExecutable: config.runtimePath,
-          env: { ...(config.profileRoot ? claudeProfileEnvironment(config.profileRoot) : {}), ...(config.authMode==='provider-login'?{}:{ANTHROPIC_API_KEY:config.credential}),
+          env: { ...(config.profileRoot ? claudeProfileEnvironment(config.profileRoot) : {}), ...(config.authMode==='api-key'?{ANTHROPIC_API_KEY:config.credential}:{}),
+            ...(config.authMode==='native-cli'?{CLAUDE_CONFIG_DIR:config.nativeAuthDirectory,CLAUDE_CODE_SAFE_MODE:'1',CLAUDE_CODE_DISABLE_AUTO_MEMORY:'1'}:{}),
             ...(config.baseUrl === undefined ? {} : { ANTHROPIC_BASE_URL: config.baseUrl }) },
           ...(config.executionMode === 'native-permissions' ? { sandbox: { enabled: false } } : {}), settingSources: [], mcpServers: {}, plugins: [], strictMcpConfig: true,
           tools: [...config.tools], allowedTools: [], permissionMode: 'default',

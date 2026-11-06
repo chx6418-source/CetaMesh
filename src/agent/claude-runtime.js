@@ -6,6 +6,7 @@ import childProcess from 'node:child_process';
 import { APP_PATHS } from '../app-paths.js';
 import { createMinimalAgentEnv, findCliCandidates } from './cli-agent-process.js';
 import { CLAUDE_SDK_RESOURCE_FILE, CLAUDE_SDK_RESOURCE_SHA256, verifyClaudeSdkBytes } from './claude-sdk-resource.js';
+import { createAuthTransport } from './auth/transport.js';
 
 export const CLAUDE_NATIVE_TOOLS = Object.freeze(['Read', 'Glob', 'Grep', 'Edit', 'Write', 'Bash']);
 const fault = code => Object.assign(new Error(code), { code });
@@ -64,6 +65,47 @@ export function claudeProfileEnvironment(root, source = process.env) {
   // Only this adapter's private bootstrap adds Claude configuration and authentication keys.
   env.CLAUDE_CONFIG_DIR = path.join(root, 'config');
   return env;
+}
+
+/** Explicit native-cli mode: only the CLI reads its own default account store.
+ * auth status is a local metadata check, not a successful model request.
+ * https://code.claude.com/docs/en/cli-reference#cli-commands
+ */
+export function createClaudeNativeAuthInspector({envSource=process.env,transport=createAuthTransport()}={}) {
+  const unavailable=()=>({authenticated:null,reason:'claude_native_auth_unverified'});
+  return Object.freeze({async inspect(runtime) {
+    if(runtime?.version!=='2.1.308'||runtime.binaryVerified!==true||runtime.sdkResourcesVerified!==true)return unavailable();
+    const home=envSource.USERPROFILE||envSource.HOME||os.homedir();
+    if(typeof home!=='string'||!path.isAbsolute(home))return unavailable();
+    const directory=path.join(home,'.claude'),profile=createClaudeOwnedProfile();
+    let exitConfirmed=false;
+    try {
+      const environment={...claudeProfileEnvironment(profile.root,{}),HOME:home,USERPROFILE:home,CLAUDE_CONFIG_DIR:directory};
+      if(process.platform==='win32'){environment.HOMEDRIVE=path.parse(home).root.replace(/[\\/]$/,'');environment.HOMEPATH=home.slice(environment.HOMEDRIVE.length);}
+      const result=await transport.run({executable:runtime.runtimePath,argv:['--safe-mode','--setting-sources','','auth','status'],root:profile.root,environment,allowSignedOut:true});
+      exitConfirmed=true;
+      const value=JSON.parse(result.stdout);
+      if(value?.loggedIn===false&&value.authMethod==='none'&&result.exitCode===1)return {authenticated:false,reason:'claude_native_login_required'};
+      if(result.exitCode!==0||value?.loggedIn!==true||value.authMethod!=='claude.ai'||typeof value.configDirectory!=='string'
+        ||!path.isAbsolute(value.configDirectory))return unavailable();
+      const canonical=fs.realpathSync(directory),observed=fs.realpathSync(value.configDirectory),stat=fs.lstatSync(directory);
+      if(!stat.isDirectory()||stat.isSymbolicLink()||observed!==canonical||fs.lstatSync(value.configDirectory).isSymbolicLink())return unavailable();
+      // Account metadata is reduced to a private fingerprint; no email/org name,
+      // token, key or account file is read, persisted or returned by Core health.
+      const account={};for(const key of ['email','orgId','accountId'])if(typeof value[key]==='string'&&value[key].trim()&&value[key].length<=512)account[key]=value[key];
+      if(!account.email&&!account.accountId)return unavailable();
+      const identity=crypto.createHash('sha256').update(JSON.stringify({directory:canonical,authMethod:value.authMethod,account})).digest('hex');
+      return {authenticated:true,reason:null,directory:canonical,identity,validate(){
+        try {const current=fs.lstatSync(directory);if(!current.isDirectory()||current.isSymbolicLink()||current.dev!==stat.dev||current.ino!==stat.ino||fs.realpathSync(directory)!==canonical)throw Error('Changed profile');}
+        catch{throw fault('AGENT_RUNTIME_CHANGED');}
+      }};
+    } catch(error) {
+      // Transport retains process ownership if close is unknown. Never delete a
+      // profile that might still be in use; no raw native output crosses this boundary.
+      if(!/CLOSE_UNKNOWN|EXIT_UNCONFIRMED/.test(error?.code??''))exitConfirmed=true;
+      return unavailable();
+    } finally {if(exitConfirmed)profile.cleanup();}
+  }});
 }
 
 function binaryIdentity(selected) {
