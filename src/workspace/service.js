@@ -34,6 +34,7 @@ import { createGitProduct } from './git-product.js';
 import { recoverWorkspaceImports, workspaceImportEvidence } from './transaction.js';
 import { isManagedWorktree } from './managed-worktree.js';
 import { workspaceContentProof } from './handoff-facts.js';
+import { assertObservationActive } from './observation-abort.js';
 
 const GIT_INFO_TTL_MS = 5000;
 
@@ -454,9 +455,9 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     return isInsideRoot(left, right) || isInsideRoot(right, left);
   }
 
-  function contentProof(entry, relevantFiles = []) {
+  function contentProof(entry, relevantFiles = [], signal) {
     return workspaceContentProof(entry.root, {
-      relevantFiles,
+      relevantFiles, signal,
       additionalWorkspaceRoots: registry.list().map(row => row.root),
       excludedRoots: [stateDir, ...excludedRoots],
       ...(managedIsolation(entry) ? { trustedSourceRoot: entry.root } : {})
@@ -465,15 +466,17 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
 
   // Core-only observation: identity and exclusions come from this registry.
   // Unlike Owner recovery, reading Handoff facts must never recover an import.
-  async function collectContentProof(id, { relevantFiles = [], expectedRoot } = {}) {
+  async function collectContentProof(id, { relevantFiles = [], expectedRoot, signal } = {}) {
+    assertObservationActive(signal);
     const entry = registry.get(String(id ?? '').trim());
     if (expectedRoot !== undefined && expectedRoot !== entry.root) fail('WORKSPACE_UNVERIFIED', 'Workspace identity changed during observation');
     if (recoveryState(entry).status === 'blocked') fail('WORKSPACE_RECOVERY_REQUIRED', 'Workspace recovery remains unconfirmed');
-    return contentProof(entry, relevantFiles);
+    return contentProof(entry, relevantFiles, signal);
   }
 
   // Owner recovery intentionally retains its existing write/recovery fence.
-  async function collectRecoveryProof(id, { beforeRecovery } = {}) {
+  async function collectRecoveryProof(id, { beforeRecovery, signal } = {}) {
+    assertObservationActive(signal);
     const entry = requireWorkspace({ id });
     // Only the original registered root can recover its retained batches.
     // Alternate ancestor/descendant registrations remain fenced projections.
@@ -481,9 +484,11 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
       // A pure observation needs no execution reservation. The Owner coordinator
       // rechecks existing ownership synchronously only when imports may mutate.
       if (recovery.has(entry.root) || workspaceImportEvidence(entry.root).length) beforeRecovery?.();
+      assertObservationActive(signal);
       recoverEntry(entry, { ownerReview: true });
     }
-    return contentProof(assertWritable(entry));
+    assertObservationActive(signal);
+    return contentProof(assertWritable(entry), [], signal);
   }
 
   return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof };

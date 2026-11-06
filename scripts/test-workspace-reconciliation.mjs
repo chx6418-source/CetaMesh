@@ -232,19 +232,25 @@ function makeReconciler({ entries = {} } = {}) {
 }
 
 // Production Continuity must reject unverifiable handoff BEFORE changing ownership.
-for (const scenario of ['plain', 'missing', 'stale-supplied-facts', 'missing-file', 'nested-repository']) {
+for (const scenario of ['plain', 'missing', 'stale-supplied-facts', 'missing-file', 'nested-repository', 'nested-worktree', 'external-worktree', 'nested-unknown-effect']) {
   const dir = fs.mkdtempSync(path.join(temp, 'preflight-'));
   const plainDir = fs.mkdtempSync(path.join(temp, 'preflight-workspace-'));
-  const repo = ['missing-file', 'nested-repository'].includes(scenario) ? makeRealRepo() : null;
-  if (scenario === 'nested-repository') {
+  const nestedScenario = scenario.startsWith('nested-') || scenario === 'external-worktree';
+  const repo = scenario === 'missing-file' || nestedScenario ? makeRealRepo() : null;
+  if (nestedScenario) {
     const nested = path.join(repo.dir, '.worktrees', 'nested-project');
-    fs.mkdirSync(nested, { recursive: true });
-    runGit(nested, ['init', '-b', 'main']);
-    runGit(nested, ['config', 'user.email', 'fixture@example.com']);
-    runGit(nested, ['config', 'user.name', 'Fixture']);
-    fs.writeFileSync(path.join(nested, 'nested.txt'), 'Independent execution scope\n');
-    runGit(nested, ['add', 'nested.txt']);
-    runGit(nested, ['commit', '-m', 'nested fixture']);
+    if (['nested-worktree', 'external-worktree'].includes(scenario)) {
+      const source = scenario === 'external-worktree' ? makeRealRepo().dir : repo.dir;
+      runGit(source, ['worktree', 'add', '-b', 'nested-project', nested]);
+    } else {
+      fs.mkdirSync(nested, { recursive: true });
+      runGit(nested, ['init', '-b', 'main']);
+      runGit(nested, ['config', 'user.email', 'fixture@example.com']);
+      runGit(nested, ['config', 'user.name', 'Fixture']);
+      fs.writeFileSync(path.join(nested, 'nested.txt'), 'Independent execution scope\n');
+      runGit(nested, ['add', 'nested.txt']);
+      runGit(nested, ['commit', '-m', 'nested fixture']);
+    }
   }
   const taskRuntime = createTaskRuntime({ stateDir: dir });
   const task = taskRuntime.create({ goal: 'Inspect only', workspaceId: 'ws-preflight' });
@@ -254,7 +260,8 @@ for (const scenario of ['plain', 'missing', 'stale-supplied-facts', 'missing-fil
   const provider = {
     id: 'preflight', label: 'Preflight fixture',
     capabilities: () => ({ workspaceBoundary: 'capability-broker' }),
-    async status() { return {running: false, queued: 0, waitingForApproval: false}; },
+    async status() { return {running: false, queued: 0, waitingForApproval: false,
+      ...(scenario === 'nested-unknown-effect' ? { effectStatus: 'unknown' } : {})}; },
     async createSession() { calls.push('create'); return {sessionId: 'new-session'}; },
     async cancel() { calls.push('cancel'); return {stopped: true}; },
     async send() { calls.push('send'); return {accepted: true}; },
@@ -265,12 +272,21 @@ for (const scenario of ['plain', 'missing', 'stale-supplied-facts', 'missing-fil
   const entries = scenario === 'missing' ? {} : {'ws-preflight': {id: 'ws-preflight', root: repo?.dir ?? plainDir}};
   const service = createContinuityService({taskRuntime, stateDir: dir, agentBroker: createAgentBroker({registry}), reconciler: makeReconciler({entries}), prepareHandoff: async () => { calls.push('prepare'); }});
   const supplied = scenario === 'stale-supplied-facts' ? {available: true, workspaceId: 'ws-preflight', git: {isRepo: true, branch: 'main', headSha: 'a'.repeat(40), dirty: false, diffSummary: null}, files: []} : undefined;
+  if (['nested-repository', 'nested-worktree'].includes(scenario)) {
+    const result = await service.runtime.rollover({taskId: task.id});
+    assert.equal(result.taskId, task.id); assert.equal(result.reconciliation.consistent, true);
+    assert.equal(taskRuntime.get({id: task.id}).task.currentAgent.sessionId, 'new-session');
+    assert.ok(calls.includes('prepare') && calls.includes('create') && calls.includes('send'));
+    ok(scenario + ': automatic native Git proof passes the existing same-Task Handoff without manual review');
+    continue;
+  }
   await assert.rejects(service.runtime.rollover({taskId: task.id, workspaceFacts: supplied,
     relevantFiles: scenario === 'missing-file' ? ['absent.txt'] : []}), error => {
+    if (scenario === 'nested-unknown-effect') { assert.equal(error.code, 'ROLLOVER_NOT_SAFE'); return true; }
     assert.ok(['WORKSPACE_CHANGED', 'WORKSPACE_UNVERIFIED'].includes(error.code));
     assert.doesNotMatch(error.message, /尚未停止/, 'preflight rejection must not claim an idle Agent is running');
     assert.match(error.message, /绑定保持不变/, 'the source assignment is preserved before handoff starts');
-    if (scenario === 'nested-repository') assert.match(error.message, /嵌套.*仓库.*工作树/, 'identify the actual content-proof restriction');
+    if (scenario === 'external-worktree') assert.match(error.message, /自动检查.*工作区之外/, 'report the exact unproved external Git boundary, not a manual text-recovery form');
     if (scenario === 'missing') assert.match(error.message, /工作区.*不可用/, 'missing workspace has a distinct recovery direction');
     if (scenario === 'missing-file') assert.match(error.message, /相关文件.*不存在/, 'missing checkpoint files are not generic Git failures');
     return true;
@@ -329,7 +345,7 @@ for (const scenario of ['plain', 'missing', 'stale-supplied-facts', 'missing-fil
   fs.unlinkSync(path.join(dir,'.env'));
   const capFile=path.join(dir,'over-cap.bin');
   const capHandle=fs.openSync(capFile,'w');
-  try { fs.ftruncateSync(capHandle,10*1024*1024+1); } finally { fs.closeSync(capHandle); }
+  try { fs.ftruncateSync(capHandle,64*1024*1024+1); } finally { fs.closeSync(capHandle); }
   assert.equal((await collect()).available,false,'a bounded snapshot must report incomplete large-file evidence');
   fs.unlinkSync(capFile);
   const originalRead=fs.readSync;

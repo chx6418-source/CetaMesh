@@ -131,6 +131,30 @@ blockers are settled, the existing Workspace service can finish a verified impor
 rollback using its original manifest and preimages. Unknown or changed bytes stay
 untouched; inspection is not unconditionally a read-only filesystem operation.
 
+Content observation can automatically include an in-bound nested Git repository
+or linked worktree. It verifies canonical directories, the Git metadata location
+and a linked worktree's exact `commondir`/`gitdir` backlink before observing its
+HEAD, index and file bytes. Nested Git enumeration fixes both metadata and working
+directories and disables filters, hooks and filesystem monitors; configuration
+values and object contents are not copied into evidence. This proof neither adds
+nested projects to execution staging nor expands import or tool authority.
+External metadata without proven current Workspace ownership, substituted links,
+unmerged indexes and concurrent changes remain unverified with bounded diagnostic
+codes. The original Task binding and operation evidence remain intact.
+
+Read-only Git proof hashes files sequentially in 64 KiB chunks, with a 64 MiB
+per-file and 512 MiB aggregate bound, 25,000 paths, at most 32 nested repositories
+and eight nesting levels. Metadata, file identities and file sets are rechecked
+after asynchronous observation. Only the aggregate digest enters a Handoff; no
+file bytes are included. These observation limits do not change the 10 MiB file
+tool read cap or the existing 5 MiB text-import limit.
+
+The startup recovery sweep snapshots candidate Task IDs before releases can
+reorder pagination, then rereads each current binding. Core shutdown cancels the
+sweep's own read-only Git processes and content observation through an internal
+AbortSignal. Cancellation is rechecked before import rollback and each recovery
+commit; it neither releases an unverified Task nor stops a user's Agent process.
+
 Task details automatically inspect the current revision with `automatic:true`.
 When the proof is complete, `ui.task.reconcile` automatically releases the old
 execution without a human summary, checkbox or new model request. Normal Task

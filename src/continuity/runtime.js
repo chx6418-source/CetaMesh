@@ -67,7 +67,11 @@ function workspacePreflightMessage(preflight, facts, onlyMissingGit) {
   let reason;
   if (onlyMissingGit) reason = '非 Git 工作区无法自动核验交接，请先核对文件和先前操作';
   else if (facts?.reason === 'workspace-not-found') reason = '任务工作区已不可用，请检查项目文件夹和工作区登记状态';
-  else if (observed.has('WORKSPACE_CONTENT_NESTED_REPOSITORY')) reason = '工作区包含嵌套 Git 仓库或工作树，当前无法核验其内容范围；请先核对这些目录的归属与先前操作，不能直接重试交接';
+  else if (observed.has('WORKSPACE_CONTENT_GIT_OUTSIDE_SCOPE')) reason = '自动检查确认嵌套 Git 元数据位于工作区之外，现有项目登记范围无法证明其归属；尚未生成完整内容证明';
+  else if (observed.has('WORKSPACE_CONTENT_NESTED_REPOSITORY')) reason = '自动检查未能证明嵌套 Git 仓库或工作树的目录、元数据与双向归属关系；原文件和执行证据已保留';
+  else if (observed.has('WORKSPACE_CONTENT_PATH_UNVERIFIED')) reason = '自动检查发现文件链接或路径身份无法核验，无法证明内容仍在原工作区范围内';
+  else if (observed.has('WORKSPACE_CONTENT_CHANGED')) reason = '自动检查期间工作区内容或 Git 元数据发生变化，本次摘要未采用；文件写入停止后可重新核验';
+  else if (observed.has('WORKSPACE_CONTENT_LIMIT_EXCEEDED')) reason = '自动内容核验超过有界读取上限，未生成完整摘要；不会跳过未核验文件后继续交接';
   else if (observed.has('GIT_STATUS_OBSERVATION_FAILED')) reason = '无法读取 Git 工作区状态，请检查仓库和文件访问权限';
   else if (observed.has('GIT_HEAD_OBSERVATION_FAILED')) reason = '无法读取 Git HEAD，请检查仓库状态和 Git 可用性';
   else if (observed.has('GIT_DIFF_OBSERVATION_FAILED')) reason = '无法读取 Git 差异，请检查仓库状态和 Git 可用性';

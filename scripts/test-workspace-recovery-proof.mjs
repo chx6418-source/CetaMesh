@@ -5,12 +5,12 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { workspaceContentProof } from '../src/workspace/handoff-facts.js';
-import { createStagingWorkspace } from '../src/workspace/staging.js';
+import { createStagingWorkspace, cleanupStagingWorkspace } from '../src/workspace/staging.js';
 import { createWorkspaceService } from '../src/workspace/service.js';
 import { createWorkspaceRegistry, workspaceRegistryFile } from '../src/workspace/registry.js';
 import { workspaceJournalDir } from '../src/workspace/transaction.js';
 import { createWorkspaceReconciler } from '../src/continuity/reconcile.js';
-import { gitStatus, gitHead, gitDiff } from '../src/workspace/tools.js';
+import { gitStatus, gitHead, gitDiff, gitRun } from '../src/workspace/tools.js';
 
 // Real temporary folders only. No models, user state, Git conversion or imports.
 const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-recovery-proof-')));
@@ -30,6 +30,21 @@ function fixture(files = { 'input.txt': 'before' }) {
     fs.writeFileSync(file, bytes);
   }
   return root;
+}
+
+function git(root, args) {
+  const env = { ...process.env, GIT_OPTIONAL_LOCKS: '0' };
+  for (const key of Object.keys(env)) if (/^GIT_/i.test(key) && key !== 'GIT_OPTIONAL_LOCKS') delete env[key];
+  return execFileSync('git', ['-c', 'core.hooksPath=' + path.join(base, 'no-hooks'),
+    '-c', 'commit.gpgSign=false', '-c', 'core.fsmonitor=false', ...args],
+  { cwd: root, env, encoding: 'utf8', windowsHide: true, stdio: 'pipe' });
+}
+
+function initializeGit(root) {
+  git(root, ['init', '-q', '-b', 'main']);
+  git(root, ['config', 'user.name', 'Proof fixture']);
+  git(root, ['config', 'user.email', 'proof@example.invalid']);
+  git(root, ['add', '.']); git(root, ['commit', '-qm', 'fixture']);
 }
 
 async function check(name, action) {
@@ -267,7 +282,148 @@ try {
     assert.equal(trusted.fileCount, 1);
   });
 
-  await check('independent nested repositories remain unverified and untouched', async () => {
+  await check('in-bound nested Git repositories are automatically proven by bytes and index', async () => {
+    for (const gitParent of [false, true]) {
+      const root = fixture({ 'safe.txt': 'safe' });
+      if (gitParent) initializeGit(root);
+      const nested = path.join(root, 'nested'); fs.mkdirSync(nested);
+      fs.writeFileSync(path.join(nested, 'source.txt'), 'nested bytes'); initializeGit(nested);
+      const { service, entry, file } = registered(root);
+      const registryBefore = fs.readFileSync(file), headBefore = git(nested, ['rev-parse', 'HEAD']);
+      const first = await service.collectContentProof(entry.id);
+      assert.deepEqual(await service.collectContentProof(entry.id), first, 'stable nested bytes have a deterministic proof');
+      fs.writeFileSync(path.join(nested, 'source.txt'), 'changed bytes');
+      const edited = await service.collectContentProof(entry.id);
+      assert.notEqual(edited.sha256, first.sha256, 'nested changes outside relevantFiles are observed');
+      git(nested, ['add', 'source.txt']);
+      assert.notEqual((await service.collectContentProof(entry.id)).sha256, edited.sha256, 'same working bytes with a changed nested index are different facts');
+      assert.deepEqual(fs.readFileSync(file), registryBefore);
+      assert.equal(git(nested, ['rev-parse', 'HEAD']), headBefore, 'proof does not commit or rewrite nested history');
+      if (gitParent) await assert.rejects(workspaceContentProof(root, { ...scope, additionalWorkspaceRoots: [root, nested] }),
+        error => denied(error) && error.reasonCode === 'WORKSPACE_CONTENT_GIT_OUTSIDE_SCOPE', 'a separately registered project cannot borrow parent Task authority');
+    }
+  });
+
+  await check('in-bound linked Worktrees are proven without changing execution staging scope', async () => {
+    const root = fixture({ 'safe.txt': 'safe' }); initializeGit(root);
+    const nested = path.join(root, '.worktrees', 'linked');
+    git(root, ['worktree', 'add', '-q', '-b', 'linked', nested]);
+    const first = await workspaceContentProof(root, scope);
+    assert.deepEqual(await workspaceContentProof(root, scope), first);
+    fs.writeFileSync(path.join(nested, 'safe.txt'), 'linked changed');
+    assert.notEqual((await workspaceContentProof(root, scope)).sha256, first.sha256);
+    const staged = await createStagingWorkspace({taskId:'nested-proof',workspaceId:'nested-proof',sourceRoot:root,
+      stagingRoot:path.join(base,'stage-'+ ++sequence),...scope});
+    try { assert.equal(fs.existsSync(path.join(staged.root,'.worktrees','linked','safe.txt')),false,'proof grants no nested execution input or write scope'); }
+    finally { cleanupStagingWorkspace(staged); }
+  });
+
+  await check('nested source proof uses the existing 512 MiB read budget without lifting caller limits', async () => {
+    const root = fixture({ 'safe.txt': 'safe' }); initializeGit(root);
+    const nested = path.join(root, 'nested'); fs.mkdirSync(nested);
+    fs.writeFileSync(path.join(nested, 'source.txt'), 'source'); initializeGit(nested);
+    const block = Buffer.alloc(8 * 1024 * 1024, 1);
+    for (let index = 0; index < 9; index++) fs.writeFileSync(path.join(nested, `payload-${index}.bin`), block);
+    assert.equal((await workspaceContentProof(root, scope)).kind, 'git-workspace-v1');
+    await assert.rejects(workspaceContentProof(root, { ...scope, maxBytes: 64 * 1024 * 1024 }), denied);
+    await assert.rejects(workspaceContentProof(root, { ...scope, maxFiles: 5 }), denied);
+  });
+
+  await check('ordinary media above the tool read limit is hashed in bounded chunks without content in proof', async () => {
+    const root = fixture({ 'safe.txt': 'safe' }); initializeGit(root);
+    const media = path.join(root, 'intro.mp4'), block = Buffer.alloc(64 * 1024, 7);
+    const output = fs.openSync(media, 'w');
+    try { for (let index = 0; index < 176; index++) fs.writeSync(output, block); }
+    finally { fs.closeSync(output); }
+    const open = fs.openSync, read = fs.readSync, close = fs.closeSync, paths = new Map();
+    let reads = 0;
+    try {
+      fs.openSync = function(file, ...args) { const fd = open.call(this, file, ...args); paths.set(fd, file); return fd; };
+      fs.closeSync = function(fd, ...args) { paths.delete(fd); return close.call(this, fd, ...args); };
+      fs.readSync = function(fd, ...args) {
+        if (samePath(paths.get(fd), media)) { reads++; assert.ok(args[0].length <= 64 * 1024, 'proof never allocates a whole media file buffer'); }
+        return read.call(this, fd, ...args);
+      };
+      const first = await workspaceContentProof(root, scope);
+      assert.ok(reads >= 176); assert.deepEqual(Object.keys(first).sort(), ['kind', 'sha256']);
+      assert.ok(JSON.stringify(first).length < 200, 'the proof contains only a digest, never media bytes');
+      const edit = fs.openSync(media, 'r+'); try { fs.writeSync(edit, Buffer.from([8]), 0, 1, 64 * 1024); } finally { fs.closeSync(edit); }
+      assert.notEqual((await workspaceContentProof(root, scope)).sha256, first.sha256);
+      fs.truncateSync(media, 64 * 1024 * 1024 + 1);
+      await assert.rejects(workspaceContentProof(root, scope), error => denied(error) && error.reasonCode === 'WORKSPACE_CONTENT_LIMIT_EXCEEDED');
+    } finally { fs.openSync = open; fs.readSync = read; fs.closeSync = close; }
+  });
+
+  await check('external worktree metadata and copied back-links never borrow Workspace ownership', async () => {
+    const root = fixture({ 'safe.txt': 'safe' }), external = fixture({ 'outside.txt': 'outside' });
+    initializeGit(external);
+    const nested = path.join(root, 'nested'); git(external, ['worktree', 'add', '-q', '-b', 'nested', nested]);
+    const marker = fs.readFileSync(path.join(nested, '.git'));
+    await assert.rejects(workspaceContentProof(root, scope), error => denied(error) && error.reasonCode === 'WORKSPACE_CONTENT_GIT_OUTSIDE_SCOPE');
+    assert.deepEqual(fs.readFileSync(path.join(nested, '.git')), marker);
+    const owned = fixture({ 'safe.txt': 'safe' }); initializeGit(owned);
+    const linked = path.join(owned, '.worktrees', 'linked'); git(owned, ['worktree', 'add', '-q', '-b', 'linked', linked]);
+    const copied = path.join(owned, 'copied'); fs.mkdirSync(copied);
+    fs.copyFileSync(path.join(linked, '.git'), path.join(copied, '.git'));
+    await assert.rejects(workspaceContentProof(owned, scope), error => denied(error) && error.reasonCode === 'WORKSPACE_CONTENT_NESTED_REPOSITORY');
+  });
+
+  await check('nested proof does not invoke configured hooks, filters or filesystem monitors', async () => {
+    const root = fixture({ 'safe.txt': 'safe' }); initializeGit(root);
+    const nested = path.join(root, 'nested'); fs.mkdirSync(nested);
+    fs.writeFileSync(path.join(nested, 'source.txt'), 'source'); initializeGit(nested);
+    const marker = path.join(base, 'unexpected-hook-' + ++sequence);
+    const script = path.join(base, 'hook-' + sequence + '.mjs');
+    fs.writeFileSync(script, `import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(marker)},'unexpected');`);
+    const command = `node "${script.replaceAll('\\', '/')}"`;
+    git(nested, ['config', 'core.fsmonitor', command]);
+    git(nested, ['config', 'filter.proof.clean', command]);
+    git(nested, ['config', 'filter.proof.process', command]);
+    fs.writeFileSync(path.join(nested, '.gitattributes'), 'source.txt filter=proof\n');
+    await workspaceContentProof(root, scope);
+    assert.equal(fs.existsSync(marker), false, 'read-only proof must not execute nested repository commands');
+  });
+
+  await check('a forged HEAD ref cannot turn metadata inspection into a configuration read', async () => {
+    const root = fixture({ 'safe.txt': 'safe' }), nested = path.join(root, 'nested'); fs.mkdirSync(nested);
+    fs.writeFileSync(path.join(nested, 'source.txt'), 'source'); initializeGit(nested);
+    fs.writeFileSync(path.join(nested, '.git', 'HEAD'), 'ref: refs/heads/..\\..\\config\n');
+    const open = fs.openSync; let configurationRead = false;
+    try {
+      fs.openSync = function(file, ...args) {
+        if (samePath(file, path.join(nested, '.git', 'config'))) configurationRead = true;
+        return open.call(this, file, ...args);
+      };
+      await assert.rejects(workspaceContentProof(root, scope), denied);
+      assert.equal(configurationRead, false, 'Git ref validation happens before opening a metadata target');
+    } finally { fs.openSync = open; }
+  });
+
+  await check('same-name nested metadata replacement during hashing cannot certify a mixed proof', async () => {
+    const root = fixture({ 'safe.txt': 'safe' }); initializeGit(root);
+    const nested = path.join(root, 'nested'); fs.mkdirSync(nested);
+    fs.writeFileSync(path.join(nested, 'source.txt'), 'source'); initializeGit(nested);
+    const open = fs.openSync, read = fs.readSync, close = fs.closeSync, paths = new Map();
+    let changed = false;
+    try {
+      fs.openSync = function(file, ...args) { const fd = open.call(this, file, ...args); paths.set(fd, file); return fd; };
+      fs.closeSync = function(fd, ...args) { paths.delete(fd); return close.call(this, fd, ...args); };
+      fs.readSync = function(fd, ...args) {
+        const count = read.call(this, fd, ...args);
+        if (!changed && count && samePath(paths.get(fd), path.join(nested, 'source.txt'))) {
+          changed = true;
+          fs.renameSync(path.join(nested, '.git'), path.join(nested, '.git-preserved'));
+          fs.cpSync(path.join(nested, '.git-preserved'), path.join(nested, '.git'), { recursive: true });
+        }
+        return count;
+      };
+      await assert.rejects(workspaceContentProof(root, scope), denied);
+      assert.equal(changed, true);
+      assert.equal(fs.existsSync(path.join(nested, '.git-preserved', 'HEAD')), true, 'original metadata remains available');
+    } finally { fs.openSync = open; fs.readSync = read; fs.closeSync = close; }
+  });
+
+  await check('unverifiable nested repositories remain unverified and untouched', async () => {
     const root = fixture({ 'safe.txt': 'safe', 'nested/.git': 'gitdir: independent', 'nested/source.txt': 'nested content' });
     await assert.rejects(workspaceContentProof(root, scope), error => denied(error) && error.reasonCode === 'WORKSPACE_CONTENT_NESTED_REPOSITORY');
     assert.equal(fs.readFileSync(path.join(root, 'nested/source.txt'), 'utf8'), 'nested content');
@@ -309,6 +465,40 @@ try {
       fs.readFileSync = function(file, ...args) { return samePath(file, path.join(root, 'input.txt')) ? failure() : read.call(this, file, ...args); };
       await assert.rejects(workspaceContentProof(root, scope), denied);
     } finally { fs.openSync = open; fs.readFileSync = read; }
+  });
+
+  await check('cancelled observation stops its own read-only Git child and preserves cancellation identity', async () => {
+    const root = fixture({ 'safe.txt': 'safe' }); initializeGit(root);
+    const cancelled = new AbortController(); cancelled.abort();
+    await assert.rejects(workspaceContentProof(root, { ...scope, signal: cancelled.signal }), { code: 'ABORT_ERR' });
+    await assert.rejects(gitStatus(root, { signal: cancelled.signal }), { code: 'ABORT_ERR' });
+    const waiting = new AbortController(), started = Date.now();
+    const timer = setTimeout(() => waiting.abort(), 50);
+    try {
+      await assert.rejects(gitRun(root, ['hash-object', '--stdin'], { signal: waiting.signal, timeoutMs: 2000 }), { code: 'ABORT_ERR' });
+      assert.ok(Date.now() - started < 1500, 'the owned Git observation exits on cancellation rather than the command timeout');
+    } finally { clearTimeout(timer); }
+  });
+
+  await check('cancellation during file hashing stops before another chunk or a complete proof', async () => {
+    const root = fixture({ 'input.txt': Buffer.alloc(128 * 1024, 1) }); initializeGit(root);
+    const controller = new AbortController(), open = fs.openSync, read = fs.readSync, close = fs.closeSync, paths = new Map();
+    let reads = 0;
+    try {
+      fs.openSync = function(file, ...args) { const fd = open.call(this, file, ...args); paths.set(fd, file); return fd; };
+      fs.closeSync = function(fd, ...args) { paths.delete(fd); return close.call(this, fd, ...args); };
+      fs.readSync = function(fd, ...args) { const count = read.call(this, fd, ...args); if (count && samePath(paths.get(fd), path.join(root, 'input.txt'))) { reads++; controller.abort(); } return count; };
+      await assert.rejects(workspaceContentProof(root, { ...scope, signal: controller.signal }), { code: 'ABORT_ERR' });
+      assert.equal(reads, 1, 'an aborted proof never continues its next file chunk');
+    } finally { fs.openSync = open; fs.readSync = read; fs.closeSync = close; }
+  });
+
+  await check('cancellation at import recovery reservation leaves original bytes and journal intact', async () => {
+    const root = fixture({ 'input.txt': 'original' }), { service, entry, file } = registered(root);
+    const intent = importIntent(root), controller = new AbortController();
+    const before = [file, intent.manifest, intent.preimage, path.join(root, 'input.txt')].map(name => fs.readFileSync(name));
+    await assert.rejects(service.collectRecoveryProof(entry.id, { signal: controller.signal, beforeRecovery: () => controller.abort() }), { code: 'ABORT_ERR' });
+    [file, intent.manifest, intent.preimage, path.join(root, 'input.txt')].forEach((name, index) => assert.deepEqual(fs.readFileSync(name), before[index]));
   });
 
   await check('source replacement cannot bind new files to the old root identity', async () => {

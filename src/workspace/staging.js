@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {gitStatus} from './tools.js';
 import { gitPathKey, selectGitSnapshot } from './git-snapshot.js';
+import { assertObservationActive } from './observation-abort.js';
 import { canonicalizeRoot, isInsideRoot, resolveInside } from './boundary.js';
 
 const DEFAULT_MAX_FILES = 25_000;
@@ -125,8 +126,9 @@ function sourceSnapshotScope({ sourceRoot, additionalWorkspaceRoots = [], exclud
 
 function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES, excludedRoots = [],
   excludedPaths = [], selection = null, gitPolicy = null, paths = null, discoverBrowserProfiles = false,
-  strictObservation = false, area = 'unknown' } = {}) {
+  strictObservation = false, observeNestedRepository = null, signal, area = 'unknown' } = {}) {
   function readFailure(message, cause) {
+    assertObservationActive(signal);
     const error = new StagingWorkspaceError('STAGING_READ_FAILED', message, { cause });
     error.snapshotArea = area;
     throw error;
@@ -151,6 +153,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
     const entries = [];
     try {
       for (let entry; (entry = directory.readSync()) !== null;) {
+        assertObservationActive(signal);
         if (entries.length >= entryLimit) fail('STAGING_TOO_MANY_FILES', 'Workspace snapshot exceeds entry limit');
         entries.push(entry);
       }
@@ -159,6 +162,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
   };
   const entryNames = entries => entries.map(entry => entry.name).sort();
   const assertCanonicalIdentity = (file, before) => {
+    assertObservationActive(signal);
     const after = fs.lstatSync(file);
     if (!sameIdentity(before, after) || after.isSymbolicLink()
       || gitPathKey(fs.realpathSync.native(file)) !== gitPathKey(file)) changed();
@@ -172,6 +176,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       const hash = crypto.createHash('sha256');
       let bytes = 0;
       for (;;) {
+        assertObservationActive(signal);
         const count = fs.readSync(descriptor, buffer, 0, Math.min(buffer.length, before.size - bytes + 1), null);
         if (!count) break;
         bytes += count;
@@ -188,6 +193,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
     for (let index = 1; index < parts.length; index++) selectedDirectories.add(parts.slice(0, index).join('/'));
   }
   const visit = (dir, relative, depth) => {
+    assertObservationActive(signal);
     if (relative && omitted.has(relative)) return;
     // Discover private browser profiles only when selecting the initial input.
     // Freeze these paths for subsequent stage/source comparisons: new marker files
@@ -203,6 +209,11 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       if (!stat.isDirectory() || stat.isSymbolicLink()
         || gitPathKey(fs.realpathSync.native(dir)) !== gitPathKey(dir)) changed();
       if (relative && hasEntry(path.join(dir, '.git'))) {
+        if (typeof observeNestedRepository === 'function') {
+          observeNestedRepository(dir);
+          observations.push([dir, stat]);
+          return;
+        }
         fail('WORKSPACE_CONTENT_NESTED_REPOSITORY', 'Nested repository is outside comparable source evidence');
       }
       observations.push([dir, stat]);
@@ -218,6 +229,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
     }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+      assertObservationActive(signal);
       if (sensitiveName(entry.name)) continue;
       const source = path.join(dir, entry.name);
       const rel = relative ? `${relative}/${entry.name}` : entry.name;
@@ -286,7 +298,8 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
 
 /** Core-only, read-only non-Git snapshot; uses the exact execution-input scope and filters. */
 export function collectStagingSourceSnapshot({ sourceRoot, additionalWorkspaceRoots, excludedRoots, trustedSourceRoot = null,
-  maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES } = {}) {
+  maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES, observeNestedRepository = null, signal } = {}) {
+  assertObservationActive(signal);
   for (const roots of [additionalWorkspaceRoots, excludedRoots]) {
     if (!Array.isArray(roots) || roots.some(root => typeof root !== 'string' || !root.trim() || !path.isAbsolute(root) || root.includes('\0'))) {
       fail('STAGING_SCOPE_UNAVAILABLE', 'Recovery requires the current registered Workspace and private-root scope');
@@ -303,7 +316,7 @@ export function collectStagingSourceSnapshot({ sourceRoot, additionalWorkspaceRo
   if (hasEntry(path.join(source, '.git'))) fail('STAGING_SNAPSHOT_CHANGED', 'Source Git identity changed during observation');
   const identity = fs.lstatSync(source);
   const snapshot = walkFiles(source, { maxFiles, maxBytes, excludedRoots: excluded, excludedPaths,
-    discoverBrowserProfiles: true, strictObservation: true, area: 'source' });
+    discoverBrowserProfiles: true, strictObservation: true, observeNestedRepository, signal, area: 'source' });
   const assertUnchanged = () => {
     snapshot.assertUnchanged();
     const current = fs.lstatSync(source);

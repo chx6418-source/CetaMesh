@@ -15,6 +15,7 @@ import { createContinuityService } from '../src/continuity/service.js';
 import { createCodexSessionLifecycle } from '../src/agent/codex-session-lifecycle.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
 import { createDesktopPlatformRuntime } from '../src/desktop/platform-runtime.js';
+import { createTaskRecovery } from '../src/desktop/task-recovery.js';
 
 // Deterministic service-level fault injection. This suite is NOT native/model evidence.
 const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'cetamesh-recovery-chain-'));
@@ -747,6 +748,190 @@ test('automatic recovery retires a stopped non-Git execution without a manual fo
     await f.call('ui.task.reconcile', { id: settled.id, automatic: true, action: 'release' });
     assert.deepEqual(f.read(), settled, 'repeated automatic inspection does not append another review or release a different owner');
     assert.deepEqual(createTaskService({ stateDir: f.stateDir }).runtime.get({ id: before.id }).task, settled);
+  } finally { await f.close(); }
+});
+
+test('historical Codex startup witness survives Core reload, then automatically releases and resumes the same Task', async () => {
+  const f = await fixture('legacy-boot-recovery');
+  const before = f.read();
+  const bootA = { kind: 'windows-kernel-boot-v1', hostId: 'a'.repeat(64), bootedAt: 100000,
+    eventRecordId: 10, bootMode: 0, bootType: 0 };
+  const bootB = { ...bootA, bootedAt: 200000, eventRecordId: 20 };
+  const provider = boot => createCodexAgentProvider({ stateDir: f.stateDir,
+    cliProcess: { executable: () => null, probe: () => ({ available: false, stdout: '', stderr: '' }), async shutdown() {} },
+    resolveTaskWorkspace: () => ({ task: f.read(), workspace: f.workspace }),
+    legacyRecoveryTasks: () => [f.read()], probeHostBoot: () => boot });
+  try {
+    f.broker.require = () => provider(bootA);
+    const previewA = await f.call('ui.task.recovery.inspect', { id: before.id, automatic: true });
+    assert.equal(previewA.canRelease, false);
+    assert.equal(previewA.session.code, 'CODEX_HOST_RESTART_REQUIRED');
+    assert.match(previewA.blockers.find(row => row.code === 'SESSION_EXECUTION_UNCONFIRMED').message, /重启 Windows/);
+    assert.deepEqual(f.read(), before, 'recording a boot witness never rewrites a Task or certifies an effect');
+    const nativeB = provider(bootB);
+    f.broker.require = () => nativeB;
+    const startupRecovery = createDesktopPlatformRuntime({ capabilityService: f.capabilities,
+      workspaceService: f.workspaces, taskRuntime: f.tasks.runtime, agentBroker: f.broker }).taskRecovery;
+    const recoveredAtStartup = await startupRecovery.recoverLegacyBoots();
+    assert.deepEqual(recoveredAtStartup, [{ taskId: before.id, released: true }]);
+    assert.equal(f.state.sends + f.state.creates, 0, 'startup retires proven old ownership without sending a model request');
+    const released = { task: f.read() };
+    assert.equal(released.task.id, before.id);
+    assert.equal(released.task.status, 'paused');
+    assert.equal(released.task.currentAgent, null);
+    const proof = f.read().recoveryReviews.at(-1).sessionProof;
+    assert.equal(proof.source, 'windows-restart-witness');
+    assert.equal(proof.legacyExecutionIdentity, 'unknown');
+    assert.equal(proof.runId, null);
+    assert.deepEqual(f.read().checkpoint, before.checkpoint);
+    assert.deepEqual(f.read().executionEvidence, before.executionEvidence);
+    const recoveryState = JSON.parse(fs.readFileSync(path.join(f.stateDir, 'tasks', 'tasks.json'), 'utf8'));
+    for (const mutate of [
+      row => { row.sessionProof.source = 'untrusted'; },
+      row => { delete row.sessionProof.source; },
+      row => { row.sessionProof.runId = 'invented-native-run'; },
+      row => { row.sessionProof.witness.afterBoot.hostId = 'b'.repeat(64); },
+      row => { row.sessionProof.witness.afterBoot.eventRecordId = row.sessionProof.witness.beforeBoot.eventRecordId; },
+      row => { row.sessionProof.witness.afterBoot.bootType = 2; }
+    ]) {
+      const changed = structuredClone(recoveryState);
+      mutate(changed.tasks.find(task => task.id === before.id).recoveryReviews.at(-1));
+      assert.throws(() => assertTaskSchema(changed), error => error.code === 'STORE_CORRUPT');
+    }
+    const afterRelease = f.read();
+    const historyState = path.join(root, 'legacy-review-after-history-truncation');
+    fs.mkdirSync(path.join(historyState, 'tasks'), { recursive: true });
+    fs.writeFileSync(path.join(historyState, 'tasks/tasks.json'), JSON.stringify(recoveryState));
+    const laterTasks = createTaskService({ stateDir: historyState });
+    for (let i = 0; i < 100; i++) {
+      const current = laterTasks.runtime.get({ id: before.id }).task;
+      laterTasks.runtime.attachAgent({ id: current.id, expectedRev: current.rev, provider: 'codex', sessionId: 'later-' + i });
+    }
+    assert.equal(createTaskService({ stateDir: historyState }).runtime.get({ id: before.id }).task.recoveryReviews.length, 1,
+      'bounded Agent history may expire without corrupting retained recovery authority');
+    await f.call('ui.task.reconcile', { id: before.id, automatic: true, action: 'release' });
+    assert.deepEqual(f.read(), afterRelease, 'the retired legacy witness remains usable after detachment without another review');
+    await f.call('ui.task.resume', { id: before.id, expectedRev: f.read().rev, requestId: 'legacy-new-instruction' });
+    assert.equal(f.state.creates, 1);
+    assert.equal(f.state.sends, 1);
+    assert.notEqual(f.read().currentAgent.sessionId, before.currentAgent.sessionId);
+    assert.equal(f.read().id, before.id);
+    assert.match(f.state.instruction, /ONLY_PROOF_TXT_SCOPE_4217/);
+    assertTaskSchema(JSON.parse(fs.readFileSync(path.join(f.stateDir, 'tasks', 'tasks.json'), 'utf8')));
+  } finally { await f.close(); }
+});
+
+test('startup recovery snapshots more than 100 real Task identities before releases reorder the list', async () => {
+  const f = await fixture('legacy-startup-pagination', { restart: false });
+  try {
+    const candidates = [];
+    for (let index = 0; index < 102; index++) {
+      let task = f.tasks.runtime.create({ goal: 'Historical paginated Task ' + index, workspaceId: f.workspace.id });
+      task = f.tasks.runtime.attachAgent({ id: task.id, expectedRev: task.rev, provider: 'codex', sessionId: 'legacy-page-' + index }).task;
+      task = f.tasks.runtime.block({ id: task.id, expectedRev: task.rev, note: 'Historical stop needs a boot witness' }).task;
+      candidates.push(task.id);
+    }
+    retainUnknownTool(f);
+    const unknownBefore = f.read();
+    const bootA = { kind: 'windows-kernel-boot-v1', hostId: 'd'.repeat(64), bootedAt: 100000, eventRecordId: 10, bootMode: 0, bootType: 0 };
+    const provider = boot => createCodexAgentProvider({ stateDir: f.stateDir,
+      cliProcess: { executable: () => null, probe: () => ({ available: false, stdout: '', stderr: '' }), async shutdown() {} },
+      resolveTaskWorkspace: ({ taskId }) => ({ task: f.tasks.runtime.get({ id: taskId }).task, workspace: f.workspace }),
+      legacyRecoveryTasks: () => [f.read(), ...candidates.map(id => f.tasks.runtime.get({ id }).task)], probeHostBoot: () => boot });
+    provider(bootA);
+    const afterBoot = provider({ ...bootA, bootedAt: 200000, eventRecordId: 20 });
+    let changedAssignment = null;
+    f.broker.require = () => ({ ...afterBoot, async verifyStoppedTask(scope) {
+      if (!changedAssignment) {
+        const current = f.tasks.runtime.get({ id: candidates[0] }).task;
+        changedAssignment = f.tasks.runtime.attachAgent({ id: current.id, expectedRev: current.rev,
+          provider: 'cetamesh', sessionId: 'concurrent-assignment' }).task;
+      }
+      return afterBoot.verifyStoppedTask(scope);
+    } });
+    // Pagination uses real persistent Task services and native lifecycle records.
+    // Freeze one real read-only Workspace proof to isolate list mutation from 300 repeated Git probes.
+    const workspaceProof = await f.workspaces.collectContentProof(f.workspace.id);
+    const recovery = createTaskRecovery({ services: { ...f.services, workspaceService: { ...f.workspaces,
+      collectContentProof: async () => structuredClone(workspaceProof), collectRecoveryProof: async () => structuredClone(workspaceProof) } } });
+    const results = await recovery.recoverLegacyBoots();
+    assert.equal(results.filter(row => row.released).length, 101, 'releasing page one must not skip older Tasks that moved ahead of its offset');
+    assert.equal(new Set(results.map(row => row.taskId)).size, results.length);
+    assert.deepEqual(results.find(row => row.taskId === unknownBefore.id), { taskId: unknownBefore.id, released: false, code: 'TASK_EFFECT_UNCONFIRMED' });
+    assert.deepEqual(f.read(), unknownBefore, 'a host restart never retires unknown tool effects');
+    assert.deepEqual(f.tasks.runtime.get({ id: candidates[0] }).task, changedAssignment, 'fresh lookup preserves a concurrent executor replacement');
+    assert.equal(results.some(row => row.taskId === candidates[0]), false);
+    for (const id of candidates.slice(1)) assert.equal(f.tasks.runtime.get({ id }).task.currentAgent, null);
+    assert.equal(f.state.sends + f.state.creates + f.state.cancels + f.state.closes, 0);
+  } finally { await f.close(); }
+});
+
+test('startup cancellation interrupts Workspace observation without releasing the current Task', async () => {
+  const f = await fixture('legacy-startup-cancel');
+  const originalProof = f.workspaces.collectRecoveryProof;
+  try {
+    const bootA = { kind: 'windows-kernel-boot-v1', hostId: 'e'.repeat(64), bootedAt: 100000, eventRecordId: 10, bootMode: 0, bootType: 0 };
+    const provider = boot => createCodexAgentProvider({ stateDir: f.stateDir,
+      cliProcess: { executable: () => null, probe: () => ({ available: false, stdout: '', stderr: '' }), async shutdown() {} },
+      resolveTaskWorkspace: () => ({ task: f.read(), workspace: f.workspace }), legacyRecoveryTasks: () => [f.read()], probeHostBoot: () => boot });
+    provider(bootA); const afterBoot = provider({ ...bootA, bootedAt: 200000, eventRecordId: 20 });
+    f.broker.require = () => afterBoot;
+    const recovery = createTaskRecovery({ services: f.services }), controller = new AbortController(), before = f.read();
+    let observedSignal;
+    f.workspaces.collectRecoveryProof = async (id, options) => {
+      observedSignal = options?.signal;
+      const observation = originalProof(id, options);
+      setImmediate(() => controller.abort());
+      return observation;
+    };
+    await assert.rejects(recovery.recoverLegacyBoots({ signal: controller.signal }), { code: 'ABORT_ERR' });
+    assert.equal(observedSignal, controller.signal, 'startup cancellation reaches the existing Workspace owner');
+    assert.deepEqual(f.read(), before);
+    assert.equal(recovery.isInFlight(before.id), false);
+    assert.equal(f.state.sends + f.state.creates + f.state.cancels + f.state.closes, 0);
+  } finally { f.workspaces.collectRecoveryProof = originalProof; await f.close(); }
+});
+
+test('cancellation after final content collection prevents every Task recovery write', async () => {
+  const f = await fixture('automatic-cancel-before-commit');
+  const originalProof = f.workspaces.collectRecoveryProof;
+  try {
+    const recovery = createTaskRecovery({ services: f.services }), controller = new AbortController(), before = f.read();
+    const taskFile = path.join(f.stateDir, 'tasks', 'tasks.json'), beforeBytes = fs.readFileSync(taskFile);
+    let observations = 0;
+    f.workspaces.collectRecoveryProof = async (id, options) => {
+      const proof = await originalProof(id, options);
+      if (++observations === 3) controller.abort();
+      return proof;
+    };
+    await assert.rejects(recovery.automatic(before, { action: 'release', signal: controller.signal }), { code: 'ABORT_ERR' });
+    assert.equal(observations, 3, 'cancel exactly after the final asynchronous proof');
+    assert.deepEqual(f.read(), before); assert.deepEqual(fs.readFileSync(taskFile), beforeBytes);
+    assert.equal(f.state.sends + f.state.creates, 0);
+  } finally { f.workspaces.collectRecoveryProof = originalProof; await f.close(); }
+});
+
+test('a later boot cannot settle unknown tool effects or a changed historical assignment', async () => {
+  const f = await fixture('legacy-boot-unknown-effect', { restart: false });
+  try {
+    retainUnknownTool(f);
+    const before = f.read();
+    let boot = { kind: 'windows-kernel-boot-v1', hostId: 'c'.repeat(64), bootedAt: 100000, eventRecordId: 10, bootMode: 0, bootType: 0 };
+    const lifecycle = createCodexSessionLifecycle({ stateDir: f.stateDir, probeHostBoot: () => boot });
+    const options = { stateDir: f.stateDir, sessionLifecycle: lifecycle,
+      cliProcess: { executable: () => null, probe: () => ({ available: false, stdout: '', stderr: '' }), async shutdown() {} },
+      resolveTaskWorkspace: () => ({ task: f.read(), workspace: f.workspace }), legacyRecoveryTasks: () => [f.read()] };
+    f.broker.require = () => createCodexAgentProvider(options);
+    await f.call('ui.task.recovery.inspect', { id: before.id, automatic: true });
+    boot = { ...boot, bootedAt: 200000, eventRecordId: 20 };
+    await assert.rejects(f.call('ui.task.reconcile', { id: before.id, automatic: true, action: 'release' }),
+      error => error.code === 'TASK_EFFECT_UNCONFIRMED');
+    assert.deepEqual(f.read(), before);
+    assert.equal(f.state.sends + f.state.creates, 0);
+    const pending = lifecycle.beginCreation({ taskId: before.id });
+    assert.equal((await f.broker.require().verifyStoppedTask({ taskId: before.id,
+      workspaceId: before.workspaceId, sessionId: before.currentAgent.sessionId })).stopped, false);
+    pending();
   } finally { await f.close(); }
 });
 

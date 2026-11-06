@@ -13,6 +13,7 @@ import { exec, execFile } from 'node:child_process';
 import { resolveInside } from './boundary.js';
 import {prepareScopedCommit,commitScopedPaths} from './scoped-git-commit.js';
 import { applyWorkspaceTransaction } from './transaction.js';
+import { assertObservationActive } from './observation-abort.js';
 
 export class WorkspaceToolError extends Error {
   constructor(code, message, { cause } = {}) {
@@ -297,18 +298,20 @@ export function fileSearch(rootReal, { query = '', glob = '', searchPath = '.', 
 
 // ── Git（只读直接执行；commit 由 service 层按策略审批后调用） ────────────────
 
-export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile, literalPaths = false } = {}) {
+export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile, literalPaths = false, signal } = {}) {
+  assertObservationActive(signal);
   const env={...process.env};for(const key of Object.keys(env))if(/^GIT_/i.test(key))delete env[key];
   env.GIT_OPTIONAL_LOCKS='0';if(indexFile)env.GIT_INDEX_FILE=indexFile;
   // Git's clean/process filters execute commands even for status/diff. Enumerate
   // configuration without running worktree conversions, then disable every driver.
   const keys = await new Promise((resolve, reject) => {
     execFile('git', ['config', '--null', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process|required)$'],
-      { cwd, env, windowsHide: true, timeout: timeoutMs, maxBuffer: GIT_MAX_BUFFER }, (error, stdout) => {
+      { cwd, env, windowsHide: true, timeout: timeoutMs, maxBuffer: GIT_MAX_BUFFER, signal }, (error, stdout) => {
         if (error && error.code !== 1) { reject(error); return; }
         resolve(String(stdout ?? '').split('\0').filter(Boolean));
       });
   });
+  assertObservationActive(signal);
   const filters = keys.flatMap(key => ['-c', key + (key.endsWith('.required') ? '=false' : '=')]);
   return new Promise((resolve, reject) => {
     execFile(
@@ -319,6 +322,7 @@ export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile,
         windowsHide: true,
         timeout: timeoutMs,
         maxBuffer: GIT_MAX_BUFFER,
+        signal,
         env
       },
       (error, stdout, stderr) => {
@@ -338,19 +342,21 @@ function gitUnavailable(error) {
   return error?.code === 'ENOENT';
 }
 
-export async function gitStatus(rootReal, {completeFiles=false}={}) {
+export async function gitStatus(rootReal, {completeFiles=false, signal}={}) {
   let out;
   try {
-    out = await gitRun(rootReal, ['status', '--porcelain=v1', '--branch',...(completeFiles?['-z','--untracked-files=all']:[]), '--', '.']);
+    out = await gitRun(rootReal, ['status', '--porcelain=v1', '--branch',...(completeFiles?['-z','--untracked-files=all']:[]), '--', '.'], { signal });
   } catch (error) {
+    assertObservationActive(signal);
     if (gitUnavailable(error)) fail('GIT_UNAVAILABLE', 'git 不可用（未安装或不在 PATH）');
     if (/not a git repository/i.test(error.gitStderr ?? '')) {
       return { isRepo: false, branch: '', dirty: false, entries: [] };
     }
     fail('GIT_FAILED', `git status 失败：${error.gitStderr || error.message}`);
   }
-  const repoRoot=fs.realpathSync.native((await gitRun(rootReal,['rev-parse','--show-toplevel'])).stdout.trim());
-  const {headSha}=await gitHead(rootReal);
+  const repoRoot=fs.realpathSync.native((await gitRun(rootReal,['rev-parse','--show-toplevel'], { signal })).stdout.trim());
+  const {headSha}=await gitHead(rootReal, { signal });
+  assertObservationActive(signal);
   if(completeFiles) {
     const records=out.stdout.split('\0').filter(Boolean),entries=[];let branch='';
     for(let index=0;index<records.length;index++) {
@@ -429,12 +435,14 @@ export async function gitDiff(rootReal, { cached = false, context = 3, statOnly 
 }
 
 /** 只读 HEAD 检查：`git rev-parse HEAD`。空仓库（无提交）→ headSha:null，不伪造。 */
-export async function gitHead(rootReal) {
+export async function gitHead(rootReal, { signal } = {}) {
   try {
-    const out = await gitRun(rootReal, ['rev-parse', 'HEAD']);
+    const out = await gitRun(rootReal, ['rev-parse', 'HEAD'], { signal });
+    assertObservationActive(signal);
     const headSha = String(out.stdout ?? '').trim();
     return { isRepo: true, headSha: /^[0-9a-f]{40}$/i.test(headSha) ? headSha : null };
   } catch (error) {
+    assertObservationActive(signal);
     if (gitUnavailable(error)) fail('GIT_UNAVAILABLE', 'git 不可用（未安装或不在 PATH）');
     if (/not a git repository/i.test(error.gitStderr ?? '')) {
       return { isRepo: false, headSha: null };

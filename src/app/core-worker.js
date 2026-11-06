@@ -198,6 +198,12 @@ export async function runCoreWorker({ paths = APP_PATHS, processRef = process, p
       if(r.status!==200||r.json?.mode!=='core'||r.json?.protocolVersion!==1||r.json?.tokenModel!=='service-only')throw Error('DATA_IPC_INVALID');return true;};
     const startupReport=await diagnostics.run('startup');
     if(startupReport.status!=='BLOCKED')void application.services.meshService?.restoreTransport().catch(()=>{});
+    if(startupReport.status!=='BLOCKED') {
+      const controller = new AbortController();
+      const recovery = application.services.platformRuntime.taskRecovery.recoverLegacyBoots({ signal: controller.signal })
+        .catch(error => { if (error?.code !== 'ABORT_ERR') log('Legacy Task recovery unavailable: ' + (error?.code ?? 'TASK_RECOVERY_REVIEW_REQUIRED')); });
+      application.lifecycle.register(() => { controller.abort(); return recovery; }, { name: 'Legacy Task recovery' });
+    }
     diagnostics.startMonitoring();
     application.lifecycle.bind();
     processRef.once('beforeExit', () => { void shutdown(); });

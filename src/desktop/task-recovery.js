@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { inspectTaskSession } from '../agent/session-recovery.js';
 import { taskEvidenceReference, unreviewedTaskEffects } from '../task/recovery-evidence.js';
+import { assertObservationActive } from '../workspace/observation-abort.js';
 
 const fail = (code, message) => { throw Object.assign(new Error(message), { code }); };
 const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
@@ -52,7 +53,8 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
       reason: task.recoveryReservation ? 'recovery-dispatch-pending' : task.currentAgent ? 'assigned-executor' : 'retained-execution-evidence',
       unconfirmedOperations: reviewIds.length, safeActions: ['inspect-task', 'inspect-workspace', 'review-recovery'] };
   }
-  async function collect(task, automatic = false) {
+  async function collect(task, automatic = false, signal) {
+    assertObservationActive(signal);
     const blockers = [];
     if (!recoverable(task)) blockers.push({ code: 'TASK_RECOVERY_NOT_REQUIRED', message: '此任务当前没有可核对的中断状态。' });
     if ((runtime.listChildren?.({ parentTaskId: task.id }).children ?? []).some(child => !['completed', 'failed', 'cancelled'].includes(child.status))) {
@@ -80,6 +82,7 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
     }
     if (review.capabilities?.active) blockers.push({ code: 'OPERATION_STILL_RUNNING', message: '原工具调用仍在运行，结束前不能核对或重派发。' });
     for (const fence of review.capabilities?.workspaceFences ?? []) {
+      assertObservationActive(signal);
       if (fence.provider === 'cetamesh') continue;
       let stopped = false;
       try {
@@ -139,12 +142,17 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
       && proof.sessionId === task.currentAgent?.sessionId) ?? await inspectTaskSession(services.agentBroker, task);
     const session = { ...(handoffProofs.length ? { ...inspectedSession, handoffProofs, handoffReview: review.handoff } : inspectedSession),
       ...(automatic ? { automatic: true } : {}) };
+    assertObservationActive(signal);
     if (review.taskEvidence.some(row => row.provider !== task.currentAgent?.provider || row.sessionId !== task.currentAgent?.sessionId)) {
       blockers.push({ code: 'TASK_EFFECT_SCOPE_UNCONFIRMED',
         message: '存在不属于当前执行者的未知工具记录，不能借用当前会话的停止凭据核销。请保留原任务和执行记录。' });
     }
     if (!session.stopped) blockers.push({ code: 'SESSION_EXECUTION_UNCONFIRMED',
-      message: '旧执行尚无完整停止凭据，不能续接或释放写入权。保留任务和结果，等待原执行结束后重新核查。' });
+      message: session.code === 'CODEX_HOST_RESTART_REQUIRED'
+        ? '此旧版任务未保存进程停止凭据。已自动记录本次系统启动；请保存其他工作后重启 Windows 一次，程序会重新核验并恢复。仅重启 CetaMesh 不够，无需填写人工核对结果。'
+        : ['CODEX_LEGACY_STOP_EVIDENCE_MISSING', 'CODEX_HOST_RESTART_UNVERIFIED'].includes(session.code)
+          ? '此旧版任务缺少停止凭据，系统启动证据也尚未核实。请查看诊断；不能仅凭任务时间、会话丢失或未发现进程释放占用。'
+          : '旧执行尚无完整停止凭据，不能续接或释放写入权。保留任务和结果，等待原执行结束后重新核查。' });
     if (automatic && !blockers.length) {
       const broker = services.capabilityService.broker;
       const operations = broker.operationsForTask({ taskId: task.id, workspaceId: task.workspaceId });
@@ -169,15 +177,17 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
           byPath.set(normalized, [...(byPath.get(normalized) ?? []), operation]);
         }
         for (const operations of byPath.values()) {
+          assertObservationActive(signal);
           let verified = false, failureCode = 'OPERATION_RESULT_STALE';
           for (const operation of operations.reverse()) {
             try {
               const result = await broker.execute({ actor: { kind: 'owner', id: 'desktop' }, capability: 'operation.read',
                 taskId: task.id, workspaceId: task.workspaceId, input: { operationRef: operation.operationId },
                 reason: 'Core automatic recovery: verify retained file receipt without replay' });
+              assertObservationActive(signal);
               if (result.status === 'completed' && result.result?.verified === true) { verified = true; break; }
               failureCode = codeOf(result.result?.code);
-            } catch (error) { failureCode = codeOf(error?.code); }
+            } catch (error) { assertObservationActive(signal); failureCode = codeOf(error?.code); }
           }
           if (!verified) blockers.push({ code: failureCode, message: '文件与已完成写入的凭据不一致，自动恢复已暂停并保留原记录。' });
         }
@@ -187,12 +197,14 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
       }
     }
     let workspace = null;
+    assertObservationActive(signal);
     try {
       // Import rollback can write files. Inspecting an active/unknown executor
       // must stay read-only until every execution/operation blocker is settled.
       workspace = blockers.length
-        ? await services.workspaceService.collectContentProof?.(task.workspaceId) ?? null
-        : await services.workspaceService.collectRecoveryProof(task.workspaceId, { beforeRecovery: () => {
+        ? await services.workspaceService.collectContentProof?.(task.workspaceId, { signal }) ?? null
+        : await services.workspaceService.collectRecoveryProof(task.workspaceId, { signal, beforeRecovery: () => {
+          assertObservationActive(signal);
           const current = runtime.get({ id: task.id }).task, currentReview = journals(current);
           currentReview.taskId = current.id;
           if (current.rev !== task.rev || digest(currentReview) !== journalFingerprint) {
@@ -204,11 +216,12 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
           services.capabilityService.assertWorkspaceRecoveryAvailable({ taskId: task.id, workspaceId: task.workspaceId });
         } });
     }
-    catch (error) { blockers.push({ code: codeOf(error?.code),
+    catch (error) { assertObservationActive(signal); blockers.push({ code: codeOf(error?.code),
       ...(error?.code === 'TASK_WORKSPACE_BUSY' && error.blockingTaskId ? { blockingTaskId: error.blockingTaskId } : {}),
       message: error?.code === 'TASK_WORKSPACE_BUSY' && error.blockingTaskId
         ? `工作区仍由任务 ${error.blockingTaskId} 占用。请先核查该任务的执行归属，再恢复导入。`
         : '工作区内容无法完整核验，请检查项目可访问性、边界及保留的操作记录后重新核查。' }); }
+    assertObservationActive(signal);
     const latest = runtime.get({ id: task.id }).task;
     const stable = journals(latest); stable.taskId = latest.id;
     if (latest.rev !== task.rev || digest(stable) !== journalFingerprint) {
@@ -220,8 +233,9 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
     return digest({ taskId: row.task.id, taskRev: row.task.rev, workspaceId: row.task.workspaceId,
       assignment: row.task.currentAgent, session: row.session, workspace: row.workspace, journals: row.review });
   }
-  async function inspect(task, { automatic = false } = {}) {
-    const row = await collect(task, automatic), ready = row.blockers.length === 0;
+  async function inspect(task, { automatic = false, signal } = {}) {
+    const row = await collect(task, automatic, signal), ready = row.blockers.length === 0;
+    assertObservationActive(signal);
     // An intentionally paused, settled Managed Session in this Core remains
     // useful context. Transport loss/restart and native processes do not enter
     // this path; their exact stop proof still leads to fresh-session recovery.
@@ -240,7 +254,8 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
       workspace: row.workspace, blockers: row.blockers, reviewOperationIds: row.reviewOperationIds,
       canResume: ready, canRelease: ready && !reusable, ownership: ownership(task, row.reviewOperationIds) };
   }
-  async function commit(task, params, beforeCommit) {
+  async function commit(task, params, beforeCommit, { signal } = {}) {
+    assertObservationActive(signal);
     const token = tokens.get(params.reviewToken);
     if (!recoverable(task)) fail('TASK_RECOVERY_NOT_REQUIRED', '任务当前不需要中断恢复');
     if (!token || token.taskId !== task.id || token.expiresAt <= now()) fail('TASK_RECOVERY_REVIEW_REQUIRED', '请先核查当前执行、文件和操作凭据，再确认恢复');
@@ -250,42 +265,55 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
       || (action === 'resume' && (!String(params.nextInstruction ?? '').trim() || !String(params.requestId ?? '').trim()))) {
       fail('INVALID_PARAMS', '需要明确核对结果；续接还需要新指令和唯一请求 ID');
     }
-    const row = await collect(task, token.automatic);
+    const row = await collect(task, token.automatic, signal);
+    assertObservationActive(signal);
     if (row.blockers.length || fingerprint(row) !== token.fingerprint) fail('TASK_RECOVERY_REVIEW_STALE', '执行、文件或待核对操作已变化，请重新核查');
     if (!Array.isArray(params.reviewedOperationIds) || digest([...new Set(params.reviewedOperationIds)].sort()) !== digest(row.reviewOperationIds)) {
       fail('TASK_RECOVERY_OPERATIONS_REQUIRED', '需要逐项确认当前列出的未确认操作；它们不会被标记为成功或自动重放');
     }
     if (beforeCommit) await beforeCommit();
+    assertObservationActive(signal);
     // Provider readiness/consent may await external state. Recheck all evidence
     // afterwards; token consumption and the journal/Task commits are synchronous.
-    const final = await collect(task, token.automatic);
+    const final = await collect(task, token.automatic, signal);
+    assertObservationActive(signal);
     if (token.expiresAt <= now() || final.blockers.length || fingerprint(final) !== token.fingerprint) fail('TASK_RECOVERY_REVIEW_STALE', '核对证据已变化，请重新核查');
     committing.add(task.id); tokens.delete(params.reviewToken);
     try {
+      assertObservationActive(signal);
       const intent = runtime.prepareOwnerRecovery({ id: task.id, expectedRev: task.rev,
         reviewId: params.reviewToken, summary: String(params.reviewSummary).trim(), workspaceProof: final.workspace,
         sessionProof: final.session, operationIds: final.reviewOperationIds, journalSha256: digest(final.review) });
+      assertObservationActive(signal);
       services.capabilityService.acknowledgeTaskRecovery(task.id);
+      assertObservationActive(signal);
       services.toolExecutionCoordinator?.acknowledgeTaskRecovery(task.id);
+      assertObservationActive(signal);
       if (final.review.handoff) services.continuityService.runtime.acknowledgeTransactionRecovery(task.id);
+      assertObservationActive(signal);
       const reviewed = runtime.applyOwnerRecovery({ id: task.id, expectedRev: intent.rev, action,
         reviewId: params.reviewToken, summary: String(params.reviewSummary).trim(), workspaceProof: final.workspace,
         sessionProof: final.session, operationIds: final.reviewOperationIds, journalSha256: digest(final.review) });
       return { task: reviewed, action };
     } finally { committing.delete(task.id); }
   }
-  async function automatic(task, { action = 'release', beforeCommit, preserveLiveSession = false } = {}) {
+  async function automatic(task, { action = 'release', beforeCommit, preserveLiveSession = false, signal } = {}) {
+    assertObservationActive(signal);
     if (!['resume', 'release'].includes(action)) fail('INVALID_PARAMS', '未知恢复操作');
     const existing = automaticChecks.get(task.id);
     if (existing) {
-      if (existing.action !== action || existing.preserveLiveSession !== preserveLiveSession) fail('TASK_RECOVERY_IN_FLIGHT', '任务正在自动核验，请等待当前操作完成');
+      if (existing.action !== action || existing.preserveLiveSession !== preserveLiveSession || existing.signal !== signal) fail('TASK_RECOVERY_IN_FLIGHT', '任务正在自动核验，请等待当前操作完成');
       return existing.promise;
     }
     const promise = (async () => {
-      const preview = await inspect(task, { automatic: true });
+      const preview = await inspect(task, { automatic: true, signal });
+      assertObservationActive(signal);
       if (preview.blockers.length) {
         const blocker = preview.blockers[0];
-        throw Object.assign(new Error(blocker.message), { code: blocker.code, blockers: preview.blockers });
+        const recoveryCode = blocker.code === 'SESSION_EXECUTION_UNCONFIRMED'
+          && ['CODEX_HOST_RESTART_REQUIRED', 'CODEX_LEGACY_STOP_EVIDENCE_MISSING', 'CODEX_HOST_RESTART_UNVERIFIED'].includes(preview.session.code)
+          ? preview.session.code : null;
+        throw Object.assign(new Error(blocker.message), { code: blocker.code, blockers: preview.blockers, recoveryCode });
       }
       if ((action === 'resume' || preserveLiveSession) && tokens.get(preview.reviewToken)?.reusable) {
         tokens.delete(preview.reviewToken);
@@ -298,9 +326,9 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
       return commit(task, { action, reviewed: true, reviewToken: preview.reviewToken,
         reviewedOperationIds: preview.reviewOperationIds,
         reviewSummary: 'Core automatic verification: execution stopped, operation receipts settled and Workspace content verified; no prior operation replayed.',
-        nextInstruction: 'Continue from verified current state; do not replay prior operations.', requestId: crypto.randomUUID() }, beforeCommit);
+        nextInstruction: 'Continue from verified current state; do not replay prior operations.', requestId: crypto.randomUUID() }, beforeCommit, { signal });
     })();
-    automaticChecks.set(task.id, { action, preserveLiveSession, promise });
+    automaticChecks.set(task.id, { action, preserveLiveSession, promise, signal });
     try { return await promise; }
     finally { if (automaticChecks.get(task.id)?.promise === promise) automaticChecks.delete(task.id); }
   }
@@ -310,10 +338,42 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
     try { await automatic(owner, { action: 'release' }); }
     catch (error) {
       throw Object.assign(new Error(`工作区仍由任务 ${owner.id} 占用；自动核验未通过：${error.message}`), {
-        code: 'TASK_WORKSPACE_BUSY', blockingTaskId: owner.id, recoveryCode: codeOf(error.code), blockers: error.blockers ?? [] });
+        code: 'TASK_WORKSPACE_BUSY', blockingTaskId: owner.id, recoveryCode: codeOf(error.recoveryCode ?? error.code), blockers: error.blockers ?? [] });
     }
   }
-  return { inspect, commit, automatic, releaseWorkspace, ownership, isInFlight: taskId => committing.has(taskId) || automaticChecks.has(taskId) };
+  async function recoverLegacyBoots({ signal } = {}) {
+    assertObservationActive(signal);
+    const results = [], candidates = [];
+    let offset = 0, page;
+    // Releases change status/updatedAt and therefore reorder runtime.list().
+    // Capture IDs without yielding; offsets must never span recovery mutations.
+    do {
+      assertObservationActive(signal);
+      page = runtime.list({ statuses: ['blocked', 'paused', 'waiting'], limit: 100, offset });
+      offset = page.nextOffset;
+      candidates.push(...page.tasks.filter(task => task.currentAgent?.provider === 'codex').map(task => task.id));
+    } while (offset !== null);
+    for (const taskId of candidates) {
+      try {
+        assertObservationActive(signal);
+        const task = runtime.get({ id: taskId }).task;
+        if (!recoverable(task) || task.currentAgent?.provider !== 'codex') continue;
+        const proof = await inspectTaskSession(services.agentBroker, task);
+        assertObservationActive(signal);
+        if (proof.stopped !== true || proof.source !== 'windows-restart-witness') continue;
+        await automatic(task, { action: 'release', signal });
+        results.push({ taskId, released: true });
+      } catch (error) {
+        assertObservationActive(signal);
+        // No startup model dispatch and no replay. The ordinary Task view
+        // retains the precise blocker and can retry its read-only checks.
+        results.push({ taskId, released: false, code: codeOf(error.code) });
+      }
+    }
+    return results;
+  }
+  return { inspect, commit, automatic, releaseWorkspace, recoverLegacyBoots, ownership,
+    isInFlight: taskId => committing.has(taskId) || automaticChecks.has(taskId) };
 }
 
 export function taskRecoveryInstruction(task, nextInstruction) {

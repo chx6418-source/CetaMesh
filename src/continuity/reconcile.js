@@ -106,9 +106,11 @@ export function createWorkspaceReconciler({
       try { proof = await contentProof(entry.root, {relevantFiles, workspaceId: id}); }
       catch (error) {
         observationErrors.push('WORKSPACE_CONTENT_UNVERIFIED');
-        // Only this fixed local code crosses the observation boundary. No raw
+        // Only fixed local codes cross the observation boundary. No raw
         // error, file path or repository metadata becomes product feedback.
-        if (error?.reasonCode === 'WORKSPACE_CONTENT_NESTED_REPOSITORY') observationErrors.push(error.reasonCode);
+        if (['WORKSPACE_CONTENT_NESTED_REPOSITORY', 'WORKSPACE_CONTENT_GIT_OUTSIDE_SCOPE',
+          'WORKSPACE_CONTENT_PATH_UNVERIFIED', 'WORKSPACE_CONTENT_LIMIT_EXCEEDED', 'WORKSPACE_CONTENT_CHANGED']
+          .includes(error?.reasonCode)) observationErrors.push(error.reasonCode);
       }
     }
     return {
