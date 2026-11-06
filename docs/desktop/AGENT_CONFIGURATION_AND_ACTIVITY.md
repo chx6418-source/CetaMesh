@@ -59,8 +59,12 @@ Workspace ownership remains a Task-domain decision. New-launch readiness cannot 
 existing Session's cleanup obligation. External cancellation needs its exact close result;
 Codex uses its existing owned-process receipt. Task/run/Workspace identity is checked again
 synchronously immediately before the revision-checked cancellation mutation. A replacement
-Session cannot be cancelled using an older receipt. Unknown tool effects still require the
-existing Owner review flow; none of these projections supplies replay authority.
+Session cannot be cancelled using an older receipt. The shared Core recovery
+coordinator automatically retires stopped executions after verifying settled
+receipts and Workspace contents. Task details, normal resume and Chat continuation
+use this proof without requiring a human recovery form. Unknown tool effects remain
+blocked; none of these projections supplies replay authority. See
+[Workspace recovery](WORKSPACE.md#automatic-recovery-after-a-lost-agent-session).
 
 Tests distinguish controlled protocol fixtures, installed CLIs with synthetic model servers,
 authorized remote models, actual Core services, rendered browser UI and native Desktop

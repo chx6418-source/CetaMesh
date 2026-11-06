@@ -1,6 +1,6 @@
 # Agent integration status
 
-Updated: 2026-11-05. This page describes the current Desktop source and verification boundaries. It does not establish general runtime availability or a new signed release.
+Updated: 2026-11-06. This page describes the current Desktop source and verification boundaries. It does not establish general runtime availability or a new signed release.
 
 ## Registered providers
 
@@ -8,9 +8,9 @@ Updated: 2026-11-05. This page describes the current Desktop source and verifica
 | --- | --- | --- |
 | DSH | Existing staged Provider retained | Requires its configured runtime and task authorization |
 | Codex | Existing exec transport stays default; App Server adapter added | App Server requires a verified version/schema and native policy; old sessions are not blindly migrated |
-| Claude | Configured native Claude Code runtime, pinned SDK 0.3.308, supervised private runner and all-tool approvals; bounded discovery includes the native coding executable shipped with supported Desktop installations | Requires a verified console CLI and explicit API configuration. Native 2.1.308 read/edit/test/import is exercised with a local synthetic model; real account execution and dynamic session reasoning remain unverified |
+| Claude | Configured native Claude Code runtime, pinned SDK 0.3.308, supervised private runner and all-tool approvals; bounded discovery includes the native coding executable shipped with supported Desktop installations | Explicit API configuration or opt-in existing CLI subscription login on verified 2.1.308. Native read/edit/test/import is exercised with a local synthetic model; real account execution and dynamic session reasoning remain unverified |
 | Gemini CLI | Shared ACP, official 0.65.0/0.66.0 discovery/handshake and native policy probes | These verified probes omit exact tool input from ACP permission requests; native_input_unverified keeps Task execution unavailable |
-| OpenCode | Bundled CLI discovery, verified 2.1.4 ACP and private native approval policy | Requires explicit model/API configuration, verified runtime identity and Owner execution consent |
+| OpenCode | Bundled CLI discovery, verified 2.1.4 ACP and private native approval policy | Isolated API mode requires explicit model/API configuration and Owner execution consent. Native Console account mode is blocked on 2.1.4 because its remote policies and MCP can override the isolated policy |
 | Qwen Code | Verified 0.26.1 coding CLI, ACP and explicit builtin-tool permission policy | Requires the coding CLI, standalone Node, explicit model/API configuration and Owner execution consent |
 | ZCode | Protocol presence is recognized; execution unavailable | Exact external control, version, approval and workspace contract unverified |
 | WorkBuddy | Fixed-origin, bounded private API client | Real OAuth/account authorization and local Workspace execution remain unavailable |
@@ -48,11 +48,16 @@ Changing service/endpoint requires re-entering its scoped API Key. Selecting acc
 mode preserves an existing key but never resolves or injects it into account processes.
 Version-1 settings migrate in memory only; explicit saves write version 2.
 
-Official account adapters and synthetic lifecycle contracts are implemented, but **all
-new account login and account task routes remain disabled** pending native Windows
+Official in-app account adapters and synthetic lifecycle contracts are implemented, but
+their new login and account task routes remain disabled pending native Windows
 profile/ACL, process, policy and interaction acceptance. There is no clickable placeholder
 login action. API configuration remains available; no real account or paid model call is
 performed by a refresh. Native contract tests are not account acceptance.
+
+Claude separately supports an explicit `native-cli` selection for an already signed-in
+CLI; it does not initiate in-app OAuth or copy credentials. API mode remains the default.
+The Agent directory performs bounded local readiness checks on first visit and after
+saving configuration. Checking readiness does not start a Task, Session or model request.
 
 - Gemini 0.65.0 uses the actual ACP `oauth-personal` route and provider-owned browser
   flow, with a five-minute timeout. Its private root resolves `.gemini` exactly once;
@@ -69,12 +74,30 @@ performed by a refresh. Native contract tests are not account acceptance.
   ACP's empty authenticate reply is not login evidence. The browser candidate can
   cancel another localhost:1455 login on a port collision and remains closed.
   Credential-value/export APIs, token-sharing and global imports are excluded.
+- OpenCode 2.1.4's builtin Console account is a separate unsupported case:
+  `opencode_native_policy_override_unsupported`. A real CLI with a synthetic loopback
+  Console demonstrated that remote provider/MCP allow statements override the local
+  system policy before any prompt. The isolated API route stays available. A stored
+  native credential or nonempty model catalog does not establish policy compatibility;
+  newer versions require their own validation.
 - Claude's new route requires native 2.1.308 and the pinned SDK 0.3.308, subscription
   authentication and a canonical matching `configDirectory`. Console no-key sign-in
   is excluded because its storage is not fully scoped by `CLAUDE_CONFIG_DIR`.
   [Current support guidance](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
   and older SDK overview eligibility wording differ; release review must reconcile
   them rather than treating technical login as permission or a categorical prohibition.
+
+Claude's opt-in existing-CLI path verifies fixed `auth status` metadata against the
+default canonical non-link profile, exact runtime/SDK and stable account identity.
+Signed-out status is distinct from an unknown status check. Native account changes
+invalidate execution consent. Only the native CLI accesses its account store; Core
+health/DTOs contain no email, account identifier, token or raw status output. The private
+runner disables user/project settings, automatic memory, plugins and additional MCP,
+uses safe mode and preserves the existing all-tool approvals. The CLI may retain its
+own history/authentication. Actual no-prompt CLI/SDK initialization verified that
+synthetic hooks and MCP were not loaded; this does not prove model entitlement or
+remote-model execution. Use the official `claude auth login` command, then select the
+native CLI connection and refresh. See the [CLI reference](https://code.claude.com/docs/en/cli-reference).
 
 Auth uses new private generations; only uncancelled successful attempts with confirmed
 process exit and unchanged connection identity may promote a generation. Cancelled

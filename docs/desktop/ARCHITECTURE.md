@@ -72,6 +72,14 @@ key or endpoint override. Renderer auth requests use strict Owner-only DTOs, not
 command, environment, terminal or credential interface. Native Windows acceptance remains
 required before enabling any new login or account-execution route.
 
+The separately selected Claude `native-cli` mode delegates credential access to the
+verified existing CLI. Core checks bounded local authentication metadata and binds
+consent to a private account fingerprint; it neither copies the account database nor
+starts an OAuth flow. The runner disables ambient customization with the pinned CLI's
+safe mode while retaining tool approvals. Native profile history stays CLI-owned.
+OpenCode 2.1.4 Console mode remains blocked because its remote policy can override the
+isolated policy; API execution continues using the existing private profile.
+
 Explicit Owner dispatch may use configured but unverified API credentials only after
 runtime, session and every-tool permission policy verification. Such dispatch does not
 claim authentication; automatic assignment still abstains without authentication and

@@ -108,7 +108,7 @@ Primary error codes: `WORKSPACE_CONFLICT`, `WORKSPACE_RECONCILIATION_REQUIRED`,
 `GIT_COMMIT_DENIED`, `PENDING_BUSY`, `PENDING_RECONCILIATION_REQUIRED`.
 Do not convert any of them into successful delivery or unconditional retry.
 
-## Owner recovery after a lost Agent session
+## Automatic recovery after a lost Agent session
 
 An unavailable transport or `SESSION_NOT_FOUND` from an external Provider is not
 evidence that its process stopped. Keep the old Task binding, execution evidence
@@ -119,15 +119,35 @@ the owned Job has no active processes. A root-process exit, missing PID or Owner
 description cannot substitute for that receipt. Historical sessions without
 trustworthy receipts remain unresolved; recovery does not invent missing proof.
 
-`ui.task.recovery.inspect` is read-only. It reports the blocking Task, Agent,
+`ui.task.recovery.inspect` reports the blocking Task, Agent,
 status, ownership reason, unresolved operations and available actions. Its
 short-lived review token binds the current Task revision, session proof,
 Workspace contents and exact operation set. A non-Git Workspace uses an
 exhaustive bounded proof of the filtered staging scope, including file bytes,
 paths, sizes and modes. This path does not initialize Git. Incomplete scans,
-links, changed roots or concurrent changes cannot certify recovery.
+links, changed roots or concurrent changes cannot certify recovery. Inspection
+does not dispatch an Agent or replay tools. Once all execution and operation
+blockers are settled, the existing Workspace service can finish a verified import
+rollback using its original manifest and preimages. Unknown or changed bytes stay
+untouched; inspection is not unconditionally a read-only filesystem operation.
 
-The Owner submits the current token and review through `ui.task.reconcile`.
+Task details automatically inspect the current revision with `automatic:true`.
+When the proof is complete, `ui.task.reconcile` automatically releases the old
+execution without a human summary, checkbox or new model request. Normal Task
+resume and a new Chat message use the same Core coordinator to verify and continue
+the same Task. Creation in an occupied Workspace can retire a proven stale owner
+through that coordinator; the new Task does not inherit the old execution.
+
+Automatic recovery requires a proven stopped executor, settled operation journals,
+no pending approval or unknown effect, verified Workspace contents and valid import
+receipts. For each path with completed Core writes, its current bytes must match a
+retained completed receipt. Intent timestamps are not completion order; this check
+recognizes a known postimage, not the final intended result or Task success. A fresh
+execution must inspect current state. Prepared Handoffs and incomplete historical
+manual reviews cannot be automatically acknowledged. Failures expose their actual
+blocker and retain history; refreshing the page does not loop failed recovery.
+
+The older Owner token-and-review API remains available for compatibility.
 Active execution, unknown stop state, active tools, pending approvals and children
 still prevent retirement. A prepared Handoff additionally requires its original
 Task/Workspace and both exact participants to be verified stopped. Missing target
@@ -150,8 +170,13 @@ blocking acceptance of a later independently evidenced run; a new unknown tool
 result, changed observation or unrelated Session remains blocked. A textual
 summary alone never retires a tool observation.
 
-The Owner can either release ownership without dispatch or continue the same
-Task with a fresh Session, explicit new instruction and new request identity.
+Recovery can release ownership without dispatch or continue the same
+Task with a fresh Session and new request identity. Automatic continuation carries
+the original goal and requirements, historical checkpoint and an instruction to
+verify current state without replaying prior effects. A new user instruction is
+appended to that context. Oversized constraints stop dispatch rather than being
+silently dropped. Concurrent identical resume actions share the entire recovery
+and dispatch promise; different pending requests are refused.
 Prior requests remain non-replayable. Checkpoints, Memory references, reports and
 execution evidence remain available. The compatibility resume entry point also
 requires new instruction/request identity after this retirement. Recovery intent
@@ -161,8 +186,9 @@ Workspace cannot detach that evidence from its scope.
 A separate durable dispatch fence covers the interval before Task attachment,
 including attachment or blocked-state persistence failure. `blocked` alone never
 releases it. Workspace-busy feedback links to the actual owner; pre-dispatch Chat
-failures do not create Agent output or imply tool completion. The UI requires a
-current inspection before enabling recovery and prevents duplicate submissions.
+failures do not create Agent output or imply tool completion. The UI binds automatic
+recovery to the inspected Task revision and prevents duplicate submissions,
+including remounts while a release is still pending.
 
 Registered regressions include `test-owner-session-recovery`,
 `test-agent-workspace-fence`, `test-workspace-recovery-proof`,
