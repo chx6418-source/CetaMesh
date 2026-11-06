@@ -3,6 +3,8 @@ import path from 'node:path';
 
 // Read-only inventory: native tests may coexist with another test or a user's
 // desktop. A shared executable name does not establish process ownership.
+// Callers canonicalize their owned directory before launching processes so CIM
+// executable paths and inherited TEMP paths use the same native identity.
 export function listOwnedWindowsProcesses({ rootDir, pids = [] }, { execFileImpl = execFile } = {}) {
   if (!path.win32.isAbsolute(rootDir)) throw new Error('process inventory requires an absolute suite directory');
   const prefix = path.win32.normalize(rootDir).replace(/\\+$/, '').toLowerCase() + '\\';
@@ -14,7 +16,9 @@ export function listOwnedWindowsProcesses({ rootDir, pids = [] }, { execFileImpl
       if (error) { reject(new Error(`process inventory failed: ${stderr || error.message}`)); return; }
       try {
         const text = String(stdout ?? '').trim();
-        const rows = text ? [].concat(JSON.parse(text)) : [];
+        if (!text) throw new Error('empty process inventory');
+        const rows = [].concat(JSON.parse(text));
+        if (!rows.length) throw new Error('empty process inventory');
         if (rows.some(row => !row || !Number.isSafeInteger(row.ProcessId)
           || row.ExecutablePath != null && typeof row.ExecutablePath !== 'string')) throw new Error('invalid process inventory JSON');
         resolve(rows.filter(row => ownedPids.has(row.ProcessId)

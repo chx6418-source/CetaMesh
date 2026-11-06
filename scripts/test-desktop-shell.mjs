@@ -205,7 +205,7 @@ assert.doesNotMatch(nativeUi, /tauri::|WebviewWindowBuilder|WebviewUrl/i, '原�
 assert.match(supervisorSource, /core\.ready[\s\S]*fn wait_for_ipc[\s\S]*probe_ipc/, 'Supervisor readiness 应验证版本化 IPC ready 握手');
 step('✅ 桌面架构：WebView2 默认承载 Harbor，egui 是显式 fallback，UI 与 Supervisor 均使用 IPC');
 
-const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-desktop-test-'));
+const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-desktop-test-')));
 let suitePassed = false;
 
 try {

@@ -77,7 +77,7 @@ assert.ok(fs.existsSync(SHELL), `未找到 ${path.relative(ROOT, SHELL)}，请�
 assert.ok(fs.existsSync(CORE_DIST), '未找到 dist/core，请先执行 npm run build:core');
 step('✅ 前置：桌面壳（含安装器）与 dist/core 就绪');
 
-const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-install-'));
+const tempRoot = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'whalebridge-install-')));
 const installerEnv = { ...process.env, TEMP: tempRoot, TMP: tempRoot, TMPDIR: tempRoot };
 const sandbox = {
   installDir: path.join(tempRoot, 'ProgramFiles', 'WhaleBridge'),
@@ -93,6 +93,13 @@ fs.mkdirSync(stagingDir, { recursive: true });
 const payloadV1 = makePayload(path.join(stagingDir, 'payload'));
 fs.copyFileSync(SHELL, path.join(stagingDir, 'WhaleBridge.exe'));
 const installer = path.join(stagingDir, 'WhaleBridge.exe');
+
+// CIM reports the executable's canonical path even when TEMP arrived via an
+// 8.3 alias. Exercise that real filesystem identity before claiming no leftovers.
+const inventoryProbe = { ProcessId: 4242, ExecutablePath: fs.realpathSync.native(installer) };
+assert.deepEqual(await listOwnedWindowsProcesses({ rootDir: tempRoot }, {
+  execFileImpl: (_file, _args, _options, done) => done(null, JSON.stringify([inventoryProbe]), '')
+}), [inventoryProbe], 'canonical installer executable must belong to this suite, including under short TEMP');
 
 // 所有沙箱参数始终成组传递：任何一个漏掉都会让安装器回落到真实的 Program Files / 开始菜单。
 function sandboxArgs() {

@@ -50,6 +50,11 @@ await assert.rejects(listOwnedWindowsProcesses({ rootDir: 'C:\\tests\\case' },
   { execFileImpl: queryFixture(Error('access denied'), '') }), /query denied/, 'an inaccessible process inventory cannot mean no leftovers');
 await assert.rejects(listOwnedWindowsProcesses({ rootDir: 'C:\\tests\\case' },
   { execFileImpl: queryFixture(null, 'not JSON') }), /JSON/, 'malformed process evidence cannot mean no leftovers');
+for (const output of ['', ' \r\n', '[]']) {
+  await assert.rejects(listOwnedWindowsProcesses({ rootDir: 'C:\\tests\\case' },
+    { execFileImpl: queryFixture(null, output) }), /empty process inventory/,
+  'a successful full-system inventory includes its querying process; missing evidence cannot establish absence');
+}
 console.log('PASS native suite process evidence is scoped to exact owned PIDs and directories');
 
 // Windows may finish closing a descendant between taskkill's enumeration and
