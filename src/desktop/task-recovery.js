@@ -222,17 +222,23 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
   }
   async function inspect(task, { automatic = false } = {}) {
     const row = await collect(task, automatic), ready = row.blockers.length === 0;
+    // An intentionally paused, settled Managed Session in this Core remains
+    // useful context. Transport loss/restart and native processes do not enter
+    // this path; their exact stop proof still leads to fresh-session recovery.
+    const reusable = automatic && ready && task.status === 'paused' && task.currentAgent?.provider === 'cetamesh'
+      && row.session.evidence === 'provider-idle' && task.executionObservation?.state !== 'unknown'
+      && !task.recoveryIntent && !task.recoveryReservation && !row.reviewOperationIds.length;
     let reviewToken = null, expiresAt = null;
     if (ready) {
       reviewToken = crypto.randomUUID(); expiresAt = now() + REVIEW_TTL_MS;
-      tokens.set(reviewToken, { taskId: task.id, fingerprint: fingerprint(row), expiresAt, automatic });
+      tokens.set(reviewToken, { taskId: task.id, fingerprint: fingerprint(row), expiresAt, automatic, reusable });
       while (tokens.size > MAX_TOKENS) tokens.delete(tokens.keys().next().value);
     }
     return { taskId: task.id, taskRev: task.rev, reviewToken, expiresAt,
       session: { state: row.session.state, stopped: row.session.stopped, provider: row.session.provider,
         sessionId: row.session.sessionId, code: row.session.code ?? null },
       workspace: row.workspace, blockers: row.blockers, reviewOperationIds: row.reviewOperationIds,
-      canResume: ready, canRelease: ready, ownership: ownership(task, row.reviewOperationIds) };
+      canResume: ready, canRelease: ready && !reusable, ownership: ownership(task, row.reviewOperationIds) };
   }
   async function commit(task, params, beforeCommit) {
     const token = tokens.get(params.reviewToken);
@@ -268,11 +274,11 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
       return { task: reviewed, action };
     } finally { committing.delete(task.id); }
   }
-  async function automatic(task, { action = 'release', beforeCommit } = {}) {
+  async function automatic(task, { action = 'release', beforeCommit, preserveLiveSession = false } = {}) {
     if (!['resume', 'release'].includes(action)) fail('INVALID_PARAMS', '未知恢复操作');
     const existing = automaticChecks.get(task.id);
     if (existing) {
-      if (existing.action !== action) fail('TASK_RECOVERY_IN_FLIGHT', '任务正在自动核验，请等待当前操作完成');
+      if (existing.action !== action || existing.preserveLiveSession !== preserveLiveSession) fail('TASK_RECOVERY_IN_FLIGHT', '任务正在自动核验，请等待当前操作完成');
       return existing.promise;
     }
     const promise = (async () => {
@@ -280,6 +286,10 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
       if (preview.blockers.length) {
         const blocker = preview.blockers[0];
         throw Object.assign(new Error(blocker.message), { code: blocker.code, blockers: preview.blockers });
+      }
+      if ((action === 'resume' || preserveLiveSession) && tokens.get(preview.reviewToken)?.reusable) {
+        tokens.delete(preview.reviewToken);
+        return { task, action, changed: false };
       }
       // Page refreshes and polling must not consume the bounded recovery history.
       if (task.status === 'paused' && task.recoveryReviews?.at(-1)?.sessionProof?.automatic === true
@@ -290,7 +300,7 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
         reviewSummary: 'Core automatic verification: execution stopped, operation receipts settled and Workspace content verified; no prior operation replayed.',
         nextInstruction: 'Continue from verified current state; do not replay prior operations.', requestId: crypto.randomUUID() }, beforeCommit);
     })();
-    automaticChecks.set(task.id, { action, promise });
+    automaticChecks.set(task.id, { action, preserveLiveSession, promise });
     try { return await promise; }
     finally { if (automaticChecks.get(task.id)?.promise === promise) automaticChecks.delete(task.id); }
   }
@@ -298,7 +308,10 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
     const owner = runtime.activeWorkspaceOwner?.({ workspaceId, exceptTaskId });
     if (!owner || !recoverable(owner)) return;
     try { await automatic(owner, { action: 'release' }); }
-    catch (error) { error.blockingTaskId = owner.id; throw error; }
+    catch (error) {
+      throw Object.assign(new Error(`工作区仍由任务 ${owner.id} 占用；自动核验未通过：${error.message}`), {
+        code: 'TASK_WORKSPACE_BUSY', blockingTaskId: owner.id, recoveryCode: codeOf(error.code), blockers: error.blockers ?? [] });
+    }
   }
   return { inspect, commit, automatic, releaseWorkspace, ownership, isInFlight: taskId => committing.has(taskId) || automaticChecks.has(taskId) };
 }

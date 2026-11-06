@@ -138,6 +138,13 @@ resume and a new Chat message use the same Core coordinator to verify and contin
 the same Task. Creation in an occupied Workspace can retire a proven stale owner
 through that coordinator; the new Task does not inherit the old execution.
 
+A normally paused Managed Session that is still present and proven idle in the
+same Core can resume without retirement. Automatic inspection reports
+`canResume:true, canRelease:false`; the UI enables Continue without submitting a
+release. Native processes and missing/restarted Sessions do not qualify for this
+shortcut. A competing Task still needs the full owner-release proof; a refusal
+preserves `TASK_WORKSPACE_BUSY`, the blocking Task ID and its specific recovery code.
+
 Automatic recovery requires a proven stopped executor, settled operation journals,
 no pending approval or unknown effect, verified Workspace contents and valid import
 receipts. For each path with completed Core writes, its current bytes must match a

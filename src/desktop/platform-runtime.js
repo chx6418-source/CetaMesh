@@ -14,7 +14,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     const current = taskRuntime.get({ id }).task;
     if (expectedRev !== undefined && current.rev !== expectedRev) throw capabilityError('TASK_CONFLICT', '任务在自动核验前已变化');
     if (!['blocked', 'paused', 'waiting'].includes(current.status)) return { task: current, changed: false };
-    return taskRecovery.automatic(current, { action: 'release' });
+    return taskRecovery.automatic(current, { action: 'release', preserveLiveSession: true });
   }
   function assertTaskControlAvailable(taskRow) {
     if (taskRow.recoveryIntent) throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', '上次核对尚未完整提交，请先在任务详情完成恢复核对');
@@ -180,7 +180,10 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     }
     if (requested && selected && requested !== selected) throw capabilityError('AGENT_SELECTION_CONFLICT', '请求的执行者与会话选择不同，请确认执行者后重试');
     const explicit = requested || (selected && selected !== 'none' ? selected : null);
-    const pinned = explicit || task?.currentAgent?.provider;
+    // A verified retirement removes the Session binding, not the Task's selected
+    // executor. Fresh continuation must not silently enter automatic assignment.
+    const retainedProvider = task?.recoveryReviews?.findLast(row => row.previousAgent)?.previousAgent?.provider;
+    const pinned = explicit || task?.currentAgent?.provider || retainedProvider;
     if (pinned) {
       const health = await agentBroker.health(pinned);
       if (pinned === 'codex' && health?.sandboxCapable === false) {
@@ -286,7 +289,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       const recovered = !task.currentAgent && ['paused', 'blocked', 'waiting'].includes(task.status);
       const recoveryContext = recovered ? taskRecoveryInstruction(task) + '\n[New Owner request]\n' : '';
       const dispatchText = (!task.currentAgent && inheritedContext ? inheritedContext + '\n[Current request]\n' : '') + recoveryContext + text;
-      if (recovered) {
+      if (recovered || task.status === 'paused') {
         const latest = taskRuntime.get({ id: task.id }).task;
         task = taskRuntime.resume({ id: latest.id, expectedRev: latest.rev }).task;
       }

@@ -122,6 +122,11 @@ try {
     const priorHistory = structuredClone(checkpoint.agentHistory);
     const paused = await integrated.ui('ui.task.pause', { id, expectedRev: checkpoint.rev });
     assert.equal(paused.task.status, 'paused');
+    const pausedBeforeCheck = integrated.read(id);
+    const inspection = await integrated.ui('ui.task.recovery.inspect', { id, automatic: true });
+    assert.equal(inspection.canResume, true);
+    assert.equal(inspection.canRelease, false, 'a proven idle live Managed Session needs no automatic retirement');
+    assert.deepEqual(integrated.read(id), pausedBeforeCheck, 'inspection preserves the live Session and Task revision');
     const resumed = await integrated.ui('ui.task.resume', { id, expectedRev: paused.task.rev, requestId: 'integrated-resume' });
     assert.equal(resumed.task.id, id);
     const ended = await integrated.complete(id);

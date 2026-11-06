@@ -28,7 +28,8 @@ try {
     const task=(id,workspaceId,title)=>({id,rev:1,title,goal:title,status:'queued',currentPhase:'',progress:{percent:0,note:''},workspaceId,agent:null,currentAgent:null,parentTaskId:null,verification:null,attemptCount:0,childOutputKind:null,attempts:[],children:[],createdAt:1,updatedAt:1,checkpoint:null,result:null,artifacts:[],executionEvidence:[],agentHistory:[],failure:null});
     const recovery={...task('recover','a','Recovery parent'),rev:3,status:'blocked',currentAgent:{provider:'codex',sessionId:'fixture'},agentHistory:[{provider:'codex',sessionId:'fixture',attachedAt:1,detachedAt:null,note:''}],progress:{percent:null,note:'needs-reconciliation: synthetic uncertain effect'},execution:{state:'needs-reconciliation',hadToolActivity:true,hasEvidence:true},recovery:{operations:[{operationId:'test-operation',capability:'filesystem.write',status:'UNKNOWN',executorId:'codex',blocker:'needs-reconciliation'}],omitted:0},children:[{id:'child',title:'Child result',status:'completed',agent:'none',supersedesChildId:null,verification:'NEEDS_REVIEW',attemptCount:1,usage:null}]};
     const childTask={...task('child','a','Child result'),parentTaskId:'recover',status:'completed'};
-    state.tasks=[recovery,...Array.from({length:55},(_,i)=>task('a-'+i,'a','Alpha task '+i)),task('b-1','b','Beta one'),task('b-2','b','Beta two')];
+    const pausedManaged={...task('paused-managed','a','Paused Managed task'),rev:2,status:'paused',currentAgent:{provider:'cetamesh',sessionId:'managed-idle-session'}};
+    state.tasks=[recovery,pausedManaged,...Array.from({length:55},(_,i)=>task('a-'+i,'a','Alpha task '+i)),task('b-1','b','Beta one'),task('b-2','b','Beta two')];
     window.confirm=message=>{if(!message.startsWith('取消任务'))throw Error('Unexpected confirmation');return true;};
     window.ipc={postMessage(raw){const request=JSON.parse(raw);void (async()=>{
       let result;if(request.method!=='ui.events.next')state.calls.push({method:request.method,params:request.params});
@@ -58,13 +59,14 @@ try {
       }else if(request.method==='ui.task.recovery.inspect'){
         const row=state.tasks.find(item=>item.id===request.params.id),ready=state.recoveryReady;
         result={taskId:row.id,taskRev:row.rev,operations:[{operationId:'test-operation',capability:'filesystem.write',status:ready?'SUCCEEDED':'UNKNOWN',verified:ready,code:ready?null:'RECONCILIATION_REQUIRED'}],omitted:0,reviewToken:null,expiresAt:null,session:{state:'stopped',stopped:true,provider:'none',sessionId:'fixture',code:null},workspace:null,blockers:ready?[]:[{code:'TASK_RECOVERY_EFFECT_UNKNOWN',message:'Synthetic operation outcome is still unknown'}],reviewOperationIds:ready?[]:['test-operation'],canResume:ready,canRelease:ready,ownership:{taskId:row.id,provider:'none',taskStatus:row.status,reason:'interrupted',unconfirmedOperations:ready?0:1,safeActions:ready?['resume','release']:[]}};
+        if(row.id==='paused-managed')result={...result,operations:[],session:{state:'paused',stopped:false,provider:'cetamesh',sessionId:'managed-idle-session',code:null},blockers:[],reviewOperationIds:[],canResume:true,canRelease:false,ownership:{taskId:row.id,provider:'cetamesh',taskStatus:'paused',reason:'paused-idle',unconfirmedOperations:0,safeActions:['resume']}};
       }else if(request.method==='ui.task.reconcile'){
         const row=state.tasks.find(item=>item.id===request.params.id);if(!row||row.rev!==request.params.expectedRev||request.params.automatic!==true||request.params.action!=='release')throw Error('Synthetic automatic recovery mismatch');row.rev++;row.status='paused';row.currentAgent=null;row.execution=null;row.progress.note='Synthetic safe recovery restored readiness';result={task:structuredClone(row)};
         if(state.holdNextRelease){state.holdNextRelease=false;await new Promise(resolve=>state.releaseReply=resolve);}
       }else if(request.method==='ui.task.resume'){
         const row=state.tasks.find(item=>item.id===request.params.id);if(!row||row.rev!==request.params.expectedRev)throw Error('Synthetic resume revision mismatch');
         if(state.holdNextResume){state.holdNextResume=false;await new Promise(resolve=>state.resumeReply=resolve);}
-        row.rev++;row.status='running';row.currentAgent={provider:'codex',sessionId:'fresh-fixture'};result={task:structuredClone(row)};
+        row.rev++;row.status='running';row.currentAgent??={provider:'codex',sessionId:'fresh-fixture'};result={task:structuredClone(row)};
       }else if(request.method==='ui.agent.security')result={required:true,authorized:true,fingerprint:'fixture',disclosure:'Retained native authorization'};
       else if(request.method==='ui.agent.list')result={agents:[]};
       else if(request.method==='ui.settings.get')result={settings:{agents:{defaultAgentProvider:'auto'}}};
@@ -145,7 +147,11 @@ try {
       state.holdNextResume=true;const continueButton=button('继续任务');continueButton.click();continueButton.click();await until(()=>state.resumeReply,'ordinary continuation response held');await wait(100);
       result.resumePendingDisabled=continueButton.disabled;result.resumeCallCount=state.calls.filter(row=>row.method==='ui.task.resume').length;state.resumeReply();
       result.resumeCall=state.calls.find(row=>row.method==='ui.task.resume')?.params;result.resumeScope=state.calls.find(row=>row.method==='ui.agent.security')?.params;
-      result.scopeBeforeResume=state.calls.findIndex(row=>row.method==='ui.agent.security')>=0&&state.calls.findIndex(row=>row.method==='ui.agent.security')<state.calls.findIndex(row=>row.method==='ui.task.resume');root.unmount();
+      result.scopeBeforeResume=state.calls.findIndex(row=>row.method==='ui.agent.security')>=0&&state.calls.findIndex(row=>row.method==='ui.agent.security')<state.calls.findIndex(row=>row.method==='ui.task.resume');
+      await close();openCard('Paused Managed task');await until(()=>document.querySelector('.cm-sheet h2')?.textContent==='Paused Managed task'&&button('继续任务'),'idle paused Managed task remains resumable');
+      result.managedReadyShown=document.body.innerText.includes('已自动恢复可用状态');result.managedReconcileCalls=state.calls.filter(row=>row.method==='ui.task.reconcile'&&row.params.id==='paused-managed').length;
+      result.managedSessionPreserved=pausedManaged.currentAgent?.sessionId==='managed-idle-session';click('继续任务');await until(()=>state.calls.some(row=>row.method==='ui.task.resume'&&row.params.id==='paused-managed'),'ordinary Managed continuation');
+      result.managedResumeCall=state.calls.find(row=>row.method==='ui.task.resume'&&row.params.id==='paused-managed')?.params;root.unmount();
     }catch(error){result.error=String(error.message)}finally{document.getElementById('result').textContent=encodeURIComponent(JSON.stringify(result));}})();
   ` }, bundle: true, write: false, outdir:path.join(sandbox.root,'bundle'), minify: true, format: 'iife', platform: 'browser', jsx: 'automatic' });
   const file = path.join(sandbox.root, 'fixture.html');
@@ -197,6 +203,10 @@ try {
   assert.equal(result.scopeBeforeResume, true, 'native execution scope is checked before ordinary continuation');
   assert.equal(result.resumeCallCount, 1, 'double-clicking Continue cannot create duplicate resume RPCs');
   assert.equal(result.resumePendingDisabled, true, 'Continue stays disabled while its response is pending');
+  assert.equal(result.managedReadyShown, true, 'a proven idle paused Managed task shows usable recovery status');
+  assert.equal(result.managedReconcileCalls, 0, 'canResume true and canRelease false must not retire the paused Managed session');
+  assert.equal(result.managedSessionPreserved, true, 'automatic inspection leaves the paused Managed assignment intact');
+  assert.deepEqual(result.managedResumeCall, {id:'paused-managed',expectedRev:2}, 'ordinary continuation resumes the unchanged Managed task revision');
   failed = false;
   console.log('PASS Chromium refusal retains the newer approval state after a stale response');
 } finally {

@@ -565,7 +565,12 @@ function TaskRecoveryEvidence({ task, onReconcile, onReady }: { task: Task; onRe
       if (!isCurrent()) return;
       if (!result || result.taskId !== task.id || result.taskRev !== task.rev) throw new Error('任务已变化，请刷新后重新自动检查。');
       setInspection(result);
-      if (result.canRelease !== true) return;
+      if (result.canRelease !== true) {
+        // A proven idle paused session can continue without retiring its current
+        // assignment. The Core still decides whether ordinary resume is safe.
+        if (result.canResume === true && result.blockers.length === 0) { setReleased(true); onReady(true); }
+        return;
+      }
       if (!attempt.release) {
         attempt.pending = true;
         attempt.release = onReconcile({ preview: result, automatic: true, action: 'release' }).then(
