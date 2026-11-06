@@ -103,6 +103,31 @@ a wire version.
 
 ## Real project collaboration
 
+Project rooms (`scene: project`) use their explicitly selected `workspaceId`
+for bounded read-only reference context before the existing Model Runtime call.
+The Project bridge uses the existing Workspace file search and read interfaces;
+an ordinary Simulation room receives no implicit file access, even when it has
+a Workspace association. A room without a Workspace asks for that binding in
+room settings. No Task is required merely to discuss project files.
+
+Each turn includes at most 30 relative file names and three file excerpts of
+2 KiB each, within an 8,000-character reference budget and the existing total
+context budget. Explicitly mentioned relative files take priority over the
+default README and package manifest. Hidden files, credentials, private key
+formats, protected local state, links and paths outside the bound Workspace are
+excluded. Credential-bearing quoted JSON excerpts and incomplete PEM blocks are
+redacted locally; binary and unavailable files are identified without raw errors.
+This is bounded project context, not a complete repository copy or a general
+filesystem tool for personas.
+
+Discussion messages retain the observed relative paths, read/truncation metadata
+and file or excerpt SHA-256 values in their existing stored trace, without copying
+file bodies into the provenance record. The **工作区只读依据** disclosure shows
+these receipts after history reload as well as on new replies. A partial read has
+only an excerpt hash and cannot serve as a write baseline. Unbinding or changing
+the room while context is being read invalidates the pending turn before model
+dispatch. Private room/role Memory scopes remain unchanged.
+
 Creating a Task saves a proposal; it does not execute it. Review the requirements
 and acceptance criteria, then explicitly start. A clean Git source is required
 for isolated Worktree creation so uncommitted work cannot be silently omitted.

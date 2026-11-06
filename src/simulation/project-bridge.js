@@ -1,5 +1,6 @@
 // Simulation plans are content. Existing Tasks, Broker approvals and Workspace own execution.
 import crypto from 'node:crypto';
+import {readProjectContext} from './project-context.js';
 const fail=(code,message)=>{throw Object.assign(new Error(message),{code});};
 const text=(value,max=2000)=>typeof value==='string'?value.trim().slice(0,max):'';
 const items=value=>Array.isArray(value)?value.slice(0,50).map(x=>text(typeof x==='string'?x:x?.text,1000)).filter(Boolean):[];
@@ -52,6 +53,7 @@ export function createSimulationProjectBridge({taskService,workspaceService,capa
     return {task:updated,isolation:'git-worktree'};
   }
   return {
+    context:params=>readProjectContext({...params,workspaceService}),
     async create({room,goal,requirements,acceptanceCriteria,requestId}={}) {
       const source=workspace(room),intent=text(requestId,128);
       if(!intent)fail('SIMULATION_REQUEST_ID_REQUIRED','项目创建需要稳定请求标识。');
