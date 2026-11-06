@@ -88,6 +88,22 @@ recorded in [Agent integration status](AGENT_INTEGRATION_STATUS.md).
 
 ## Task execution and result review
 
+Chat task identity comes from an explicit existing binding or its exact creation
+request. Equal goal text in the same Workspace is not a cross-Chat continuation
+identity. New Chat requests still pass the existing Workspace owner fence and do
+not acquire another Task's history, configuration or unknown execution state.
+
+Legacy local Codex assignments without native lifecycle receipts use an optional
+host-startup witness in the existing lifecycle journal. The new Core records the
+exact assignment in a positively observed Windows kernel boot before any recovery
+can succeed. Only a later full boot on the same host and StateDir may prove those
+local processes ended; Task timestamps, missing sessions, sleep and Core-only
+restart do not. Creation before native lifecycle registration shares a Task fence.
+Native generation, transport and run identity remain explicitly unknown for this
+proof source. The Task v1 compatibility envelope is not native execution evidence.
+All operation, approval and Workspace checks remain required. This is not a
+cross-host Task migration facility or evidence that remote effects were undone.
+
 Workspace state ownership, existing execution backends, compatibility approval
 recovery and the Project → Task → Changes flow are documented in
 [Workspace ownership and recovery](WORKSPACE.md).
@@ -381,6 +397,24 @@ Use the root runner for focused source/transport/UI checks:
 with `WHALEBRIDGE_TEST_UI_MOTION=1`, `--suite test-startup-diagnostics-ui`.
 Source/fixture results do not replace acceptance of the current Windows WebView2 build,
 Defender safety clearance, installation tests or a release decision.
+
+## Project discussion and explicit collaboration
+
+Project rooms reuse the existing Simulation project bridge to collect bounded,
+read-only Workspace references before calling Model Runtime. Only a room with
+`scene: project` and an explicit registered Workspace receives this context.
+Relative paths, read ranges, truncation and hashes are retained with the discussion
+message; file bodies are not duplicated into the evidence trace. Ordinary persona
+rooms receive no implicit filesystem access. Persona content and file excerpts
+remain untrusted reference data, and execution still belongs to Task/Capability.
+
+An explicit collaboration-analysis instruction in ordinary Chat enters the existing
+Desktop platform Task coordinator. It does not expose `task.create` to the model.
+The current configured, tool-ready Managed model can read the chosen Workspace and
+propose a bounded delegation; additional executors remain subject to current cost,
+policy and native-consent checks. Quoted instructions, negations and ordinary
+conversation do not establish collaboration authority. Existing policy expiry,
+revocation, usage and Task grants remain authoritative on later turns.
 
 ## Core protocol governance
 
