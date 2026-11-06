@@ -119,6 +119,7 @@ export function createChatService({
   requireProductContext = false,
   router = null,
   platformRoute = null,
+  recoverTask = null,
   agentFollow = null,
   defaults,
   defaultAgentProvider = () => 'auto',
@@ -2040,17 +2041,22 @@ export function createChatService({
     'Core 重启前的工具操作或审批仍需人工核对，不能自动重试');
     let prompt = '继续';
     if (record.taskId) {
-      const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
+      let task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
       if (!task) throw chatError('TASK_NOT_FOUND', 'Chat attached Task is unavailable');
-      if (record.interruptedAt && (task.recoveryReviews?.length || task.decisions?.some(item => item.decision === 'Owner reviewed interrupted effect'))) {
+      let automaticallyRecovered = false;
+      if (['blocked', 'paused', 'waiting'].includes(task.status) && typeof recoverTask === 'function') {
+        task = (await recoverTask({ id: task.id, expectedRev: task.rev })).task;
+        automaticallyRecovered = true;
+      }
+      if (!automaticallyRecovered && record.interruptedAt && (task.recoveryReviews?.length || task.decisions?.some(item => item.decision === 'Owner reviewed interrupted effect'))) {
         throw chatError('RECOVERY_USE_NEW_INSTRUCTION', '旧回合的副作用已人工核对；请发送新的明确指令，不能自动重放旧回合');
       }
       if (task.workspaceId !== record.config.workspaceId) throw chatError('WORKSPACE_RECONCILIATION_REQUIRED', 'Chat and Task Workspace differ');
-      if (['blocked', 'paused', 'waiting'].includes(task.status)) {
-        throw chatError('TASK_RECOVERY_REVIEW_REQUIRED', '当前任务需要先恢复：请点“查看任务”，在任务详情的“人工核对后恢复”中填写核对结果和新的执行指令；不会自动重放旧操作。');
+      if (!automaticallyRecovered && ['blocked', 'paused', 'waiting'].includes(task.status)) {
+        throw chatError('TASK_RECOVERY_REVIEW_REQUIRED', '当前任务需要 Core 自动核验旧执行和文件回执；请打开任务详情查看具体阻塞原因。');
       }
       if (['completed', 'failed', 'cancelled'].includes(task.status)) throw chatError('TASK_NOT_RESUMABLE', 'Task is terminal');
-      if (record.dshSessionId && (task.currentAgent?.sessionId !== record.dshSessionId
+      if (!automaticallyRecovered && record.dshSessionId && (task.currentAgent?.sessionId !== record.dshSessionId
         || task.currentAgent?.provider !== (record.runtimeProvider || record.config.agentProvider))) {
         throw chatError('TASK_SESSION_MISMATCH', 'Chat cannot reuse an old Agent Session for this Task');
       }

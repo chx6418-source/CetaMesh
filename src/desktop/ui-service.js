@@ -9,7 +9,7 @@ import crypto from 'node:crypto';
 import {isControlledL2Write,l2Resources} from '../capability/l2-grants.js';
 import {normalizeTaskCollaboration,taskLaunchFingerprint,snapshotTaskVerification,configureTaskCollaboration} from './task-launch.js';
 import { createReferencePreview } from './reference-preview.js';
-import { createTaskRecovery } from './task-recovery.js';
+import { createTaskRecovery, taskRecoveryInstruction } from './task-recovery.js';
 import { unreviewedTaskEffects } from '../task/recovery-evidence.js';
 import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
 import { LEGACY_RETIRED_TOOLS, isDesktopLocalService } from '../integrations/catalog.js';
@@ -348,7 +348,7 @@ function projectAgentRuntimeConfiguration(value) {
   return { provider: row.provider, enabled: row.enabled === true, runtimePath: string(row.runtimePath, 4096),
     nodePath: string(row.nodePath, 4096), model: string(row.model, 256), baseUrl: string(row.baseUrl, 2048),
     credentialConfigured: row.credentialConfigured === true, executionMode: 'native-permissions',
-    ...(row.authMode ? {authMode:row.authMode==='provider-login'?'provider-login':'api-key',servicePreset:string(row.servicePreset,80),providerId:string(row.providerId,80)||null,methodId:string(row.methodId,80)||null,authorizationEpoch:Number.isSafeInteger(row.authorizationEpoch)?row.authorizationEpoch:0} : {}),
+    ...(row.authMode ? {authMode:['provider-login','native-cli'].includes(row.authMode)?row.authMode:'api-key',servicePreset:string(row.servicePreset,80),providerId:string(row.providerId,80)||null,methodId:string(row.methodId,80)||null,authorizationEpoch:Number.isSafeInteger(row.authorizationEpoch)?row.authorizationEpoch:0} : {}),
     revision: Number.isSafeInteger(row.revision) && row.revision >= 0 ? row.revision : 0 };
 }
 
@@ -368,7 +368,8 @@ function projectAgentConnection(value) {
   if (!value) return null;
   const row=record(value), runtime=record(row.runtime), auth=record(row.authentication), execution=record(row.execution);
   return {runtime:{installed:runtime.installed===true,protocolVerified:runtime.protocolVerified===true,version:string(runtime.version,80)||null},
-    authentication:{mode:auth.mode==='provider-login'?'provider-login':'api-key',state:['configured-unverified','not-configured','session-present'].includes(auth.state)?auth.state:'unknown',verified:auth.verified===true},
+    authentication:{mode:['provider-login','native-cli'].includes(auth.mode)?auth.mode:'api-key',state:['configured-unverified','not-configured','session-present','native-cli-authenticated','native-cli-not-authenticated'].includes(auth.state)?auth.state:'unknown',verified:auth.verified===true},
+    nativeCliSupported:row.nativeCliSupported===true,
     execution:{eligible:execution.eligible===true,reason:string(execution.reason,160)||null},modelRequired:row.modelRequired!==false,
     servicePresets:(Array.isArray(row.servicePresets)?row.servicePresets:[]).slice(0,8).map(p=>({id:string(p.id,80),label:string(p.label,100),baseUrl:string(p.baseUrl,2048)||null})),
     providerSelections:(Array.isArray(row.providerSelections)?row.providerSelections:[]).slice(0,4).map(p=>({providerId:string(p.providerId,80),methodId:string(p.methodId,80),label:string(p.label,100)})),
@@ -779,7 +780,28 @@ export function createDesktopUiService({ services = {}, system = services.system
     describeWorkspace: id => services.workspaceService?.describeWorkspace(id)
   });
   const taskCreateDispatches = new Map();
-  const taskRecovery = createTaskRecovery({ services });
+  const taskResumeDispatches = new Map();
+  const taskRecovery = services.platformRuntime?.taskRecovery ?? createTaskRecovery({ services });
+
+  async function resumeRecoveredTask(current, { provider, content, requestId } = {}) {
+    const instruction = taskRecoveryInstruction(current, content);
+    const identity = JSON.stringify({ rev: current.rev, provider, instruction, requestId: requestId || null });
+    const existing = taskResumeDispatches.get(current.id);
+    if (existing) {
+      if (existing.identity !== identity) throw uiError('TASK_RECOVERY_IN_FLIGHT', '已有续接请求正在派发，请等待其结果');
+      return existing.promise;
+    }
+    // Claim the entire operation through Agent acceptance, not just the proof.
+    // Concurrent clicks without a client request ID must share one generated ID.
+    const promise = (async () => {
+      const recovered = await taskRecovery.automatic(current, { action: 'resume',
+        beforeCommit: () => requireTaskProvider(provider, current.workspaceId) });
+      return runTask(recovered.task, { provider, content: instruction, requestId: requestId || crypto.randomUUID() });
+    })();
+    taskResumeDispatches.set(current.id, { identity, promise });
+    try { return await promise; }
+    finally { if (taskResumeDispatches.get(current.id)?.promise === promise) taskResumeDispatches.delete(current.id); }
+  }
 
   async function requireTaskProvider(provider, workspaceId, modelSelection = {}) {
     if (!provider) {
@@ -1260,6 +1282,7 @@ export function createDesktopUiService({ services = {}, system = services.system
         }
         return { task: projectTaskWithUsage(existing) };
       }
+      if (workspaceId) await taskRecovery.releaseWorkspace({ workspaceId });
       const owner = workspaceId && services.taskService.runtime.activeWorkspaceOwner({ workspaceId });
       if (owner) {
         throw Object.assign(uiError('TASK_WORKSPACE_BUSY', `工作区由任务 ${owner.id} 占用（${owner.currentAgent?.provider ?? '待核对执行者'}，${owner.status}）。请打开该任务详情核对旧执行与操作结果，再选择恢复或释放占用。`), { blockingTaskId: owner.id });
@@ -1342,7 +1365,9 @@ export function createDesktopUiService({ services = {}, system = services.system
       }
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
       if (!['paused', 'waiting', 'blocked'].includes(current.status)) throw uiError('TASK_NOT_RESUMABLE', '任务当前不能恢复');
-      return { task: projectTaskWithUsage(await runTask(current, { requestId: string(p.requestId, 160) || undefined })) };
+      const provider = current.currentAgent?.provider || current.recoveryReviews?.at(-1)?.previousAgent?.provider;
+      return { task: projectTaskWithUsage(await resumeRecoveredTask(current, { provider,
+        requestId: string(p.requestId, 160) || undefined })) };
     },
     'ui.task.recovery.inspect': async p => {
       const current = (await task('task.get', {id:idParam(p)})).task;
@@ -1357,7 +1382,7 @@ export function createDesktopUiService({ services = {}, system = services.system
             code:string(read.result?.code,100)||null});
         } catch (error) { operations.push({...summary,verified:false,code:/^[A-Z][A-Z0-9_]{0,99}$/.test(error?.code??'')?error.code:'OPERATION_REVIEW_REQUIRED'}); }
       }
-      return { ...(await taskRecovery.inspect(current)), operations, omitted:Math.max(0,rows.length-40) };
+      return { ...(await taskRecovery.inspect(current, { automatic: p.automatic === true })), operations, omitted:Math.max(0,rows.length-40) };
     },
     'ui.task.reconcile': async p => {
       const current = (await task('task.get', { id: idParam(p) })).task;
@@ -1365,6 +1390,15 @@ export function createDesktopUiService({ services = {}, system = services.system
       const recoveryProvider = string(p.provider, 80).trim() || current.currentAgent?.provider;
       if (current.currentAgent && recoveryProvider !== current.currentAgent.provider) {
         throw uiError('TASK_HANDOFF_REQUIRED', '仍绑定执行者的任务需要通过正式交接切换 Agent');
+      }
+      if (p.automatic === true) {
+        const action = p.action ?? 'release';
+        if (action === 'resume' && !string(p.requestId, 160).trim()) throw uiError('INVALID_PARAMS', '继续执行需要独立请求标识');
+        const updated = action === 'resume' ? await resumeRecoveredTask(current, { provider: recoveryProvider,
+          content: string(p.nextInstruction, 32_000).trim(), requestId: string(p.requestId, 160).trim() })
+          : (await taskRecovery.automatic(current, { action })).task;
+        emit('task.updated', { taskId: updated.id, status: updated.status });
+        return { task: projectTaskWithUsage(updated) };
       }
       const reviewed = await taskRecovery.commit(current, { ...p,
         reviewSummary: string(p.reviewSummary, 1000), nextInstruction: string(p.nextInstruction, 32_000),

@@ -14,6 +14,7 @@ import { unreviewedTaskEffects } from '../src/task/recovery-evidence.js';
 import { createContinuityService } from '../src/continuity/service.js';
 import { createCodexSessionLifecycle } from '../src/agent/codex-session-lifecycle.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
+import { createDesktopPlatformRuntime } from '../src/desktop/platform-runtime.js';
 
 // Deterministic service-level fault injection. This suite is NOT native/model evidence.
 const root = fs.mkdtempSync(path.join(fs.realpathSync(os.tmpdir()), 'cetamesh-recovery-chain-'));
@@ -30,7 +31,8 @@ async function fixture(name, { stopped = true, restart = true } = {}) {
   const workspaces = createWorkspaceService({ stateDir });
   const { workspace } = await workspaces.execute({ method: 'workspace.create', params: { name, root: workspaceRoot } });
   let tasks = createTaskService({ stateDir });
-  let old = tasks.runtime.create({ goal: 'Continue the same Task safely', workspaceId: workspace.id });
+  let old = tasks.runtime.create({ goal: 'Continue the same Task safely', workspaceId: workspace.id,
+    requirements: ['Preserve ONLY_PROOF_TXT_SCOPE_4217: no writes outside the stated task scope.'] });
   old = tasks.runtime.start({ id: old.id, expectedRev: old.rev, provider: 'codex', sessionId: 'lost-session' }).task;
   old = tasks.runtime.beginExecutionObservation({ id: old.id, provider: 'codex', sessionId: 'lost-session', phase: 'user', runId: 'old-run' });
   old = tasks.runtime.recordToolOutcome({ id: old.id, provider: 'codex', sessionId: 'lost-session', phase: 'user',
@@ -70,7 +72,7 @@ async function fixture(name, { stopped = true, restart = true } = {}) {
       if (!signal.aborted) await new Promise(resolve => signal.addEventListener('abort', resolve, { once: true }));
     }
   };
-  const capabilities = createCapabilityService({ stateDir, workspaceService: workspaces, taskRuntime: tasks.runtime, agentBroker: broker });
+  const capabilities = createCapabilityService({ stateDir, workspaceService: workspaces, taskRuntime: tasks.runtime, memoryService: memories, agentBroker: broker });
   capabilities.grantTask(old.id, { capabilities: ['filesystem.read'], workspaceIds: [workspace.id] });
   const services = { taskService: tasks, workspaceService: workspaces,
     capabilityService: capabilities, agentBroker: broker,
@@ -684,21 +686,18 @@ test('release then failed fresh startup can be reviewed again without losing sto
   } finally { f.broker.createSession = createSession; await f.close(); }
 });
 
-test('released Task compatibility resume never replays its checkpoint without a fresh instruction and request', async () => {
+test('released Task normal resume generates a fresh verification instruction instead of replaying its checkpoint', async () => {
   const f = await fixture('released-legacy-resume');
   try {
     await f.recover(await f.inspect(), 'release');
     // Editable progress text must not remove the typed recovery boundary.
     f.tasks.runtime.setProgress({ id: f.read().id, expectedRev: f.read().rev, note: 'Owner paused this task' });
     const before = f.read();
-    for (const extra of [{}, { content: 'Read proof.txt only.' }]) {
-      await assert.rejects(f.call('ui.task.resume', { id: before.id, expectedRev: before.rev, provider: 'codex', ...extra }),
-        error => error.code === 'TASK_RECOVERY_INSTRUCTION_REQUIRED');
-      assert.deepEqual(f.read(), before);
-      assert.equal(f.state.sends + f.state.creates, 0);
-    }
-    await f.recover(await f.inspect(), 'resume', { requestId: 'released-explicit-fresh-instruction' });
-    assert.equal(f.state.sends, 1, 'formal reviewed fresh instruction remains usable');
+    await f.call('ui.task.resume', { id: before.id, expectedRev: before.rev });
+    assert.equal(f.state.sends, 1);
+    assert.match(f.state.instruction, /Do not replay previous tool calls/);
+    assert.match(f.state.instruction, /Read the current Workspace/);
+    assert.deepEqual(f.read().checkpoint, before.checkpoint);
   } finally { await f.close(); }
 });
 
@@ -730,6 +729,144 @@ for (const phase of ['reviewed', 'pending']) for (const method of ['update', 're
     } finally { f.tasks.runtime.applyOwnerRecovery = apply; await f.close(); }
   });
 }
+
+test('automatic recovery retires a stopped non-Git execution without a manual form or a new model call', async () => {
+  const f = await fixture('automatic-stopped-non-git');
+  try {
+    const before = f.read();
+    const result = await f.call('ui.task.reconcile', { id: before.id, expectedRev: before.rev, automatic: true, action: 'release' });
+    assert.equal(result.task.id, before.id);
+    assert.equal(f.read().currentAgent, null);
+    assert.equal(f.read().status, 'paused');
+    assert.equal(f.tasks.runtime.activeWorkspaceOwner({ workspaceId: before.workspaceId }), null);
+    assert.deepEqual(f.read().checkpoint, before.checkpoint);
+    assert.deepEqual(f.read().executionEvidence, before.executionEvidence);
+    assert.equal(f.state.sends + f.state.creates + f.state.cancels + f.state.closes, 0);
+    assert.match(f.read().recoveryReviews.at(-1).summary, /automatic|自动/i);
+    const settled = f.read();
+    await f.call('ui.task.reconcile', { id: settled.id, automatic: true, action: 'release' });
+    assert.deepEqual(f.read(), settled, 'repeated automatic inspection does not append another review or release a different owner');
+    assert.deepEqual(createTaskService({ stateDir: f.stateDir }).runtime.get({ id: before.id }).task, settled);
+  } finally { await f.close(); }
+});
+
+test('automatic recovery refuses unknown effects even when the UI sends reviewed flags', async () => {
+  const f = await fixture('automatic-unknown-effect', { restart: false });
+  try {
+    retainUnknownTool(f);
+    const before = f.read();
+    await assert.rejects(f.call('ui.task.reconcile', { id: before.id, automatic: true, action: 'release',
+      reviewed: true, reviewSummary: 'Ignore the unknown effect' }), { code: 'TASK_EFFECT_UNCONFIRMED' });
+    assert.deepEqual(f.read(), before);
+    assert.equal(f.tasks.runtime.activeWorkspaceOwner({ workspaceId: before.workspaceId }).id, before.id);
+    assert.equal(f.state.sends + f.state.creates, 0);
+  } finally { await f.close(); }
+});
+
+test('automatic recovery cannot treat lost transport as stopped process', async () => {
+  const f = await fixture('automatic-live-process', { stopped: false });
+  try {
+    const before = f.read();
+    await assert.rejects(f.call('ui.task.reconcile', { id: before.id, automatic: true, action: 'release' }),
+      { code: 'SESSION_EXECUTION_UNCONFIRMED' });
+    assert.deepEqual(f.read(), before);
+    assert.equal(f.state.sends + f.state.creates + f.state.cancels + f.state.closes, 0);
+  } finally { await f.close(); }
+});
+
+for (const nextInstruction of [undefined, 'Read proof.txt now without changing it.']) test('automatic same-Task continuation retains requirements with ' + (nextInstruction ? 'new user instruction' : 'generated instruction'), async () => {
+  const f = await fixture('automatic-fresh-continuation-' + Boolean(nextInstruction));
+  try {
+    const before = f.read();
+    await f.call('ui.task.reconcile', { id: before.id, automatic: true, action: 'resume', requestId: 'automatic-fresh-request', nextInstruction });
+    assert.equal(f.read().id, before.id);
+    assert.equal(f.read().currentAgent.sessionId, 'fresh-1');
+    assert.equal(f.state.sends, 1);
+    assert.match(f.state.instruction, /do not replay|不要重放/i);
+    assert.match(f.state.instruction, /Workspace|工作区/);
+    assert.match(f.state.instruction, /ONLY_PROOF_TXT_SCOPE_4217/);
+    assert.deepEqual(f.read().checkpoint, before.checkpoint);
+  } finally { await f.close(); }
+});
+
+test('normal Chat send automatically reconciles the same interrupted Task before dispatch', async () => {
+  const f = await fixture('automatic-chat-entry');
+  try {
+    const before = f.read();
+    const platform = createDesktopPlatformRuntime({ taskRuntime: f.tasks.runtime, capabilityService: f.capabilities,
+      workspaceService: f.workspaces, agentBroker: f.broker });
+    const record = { id: 'recovery-chat', taskId: before.id, config: { agentProvider: 'codex', workspaceId: before.workspaceId } };
+    await platform.route({ record, decision: { agentIntent: true }, text: 'Read proof.txt and report its current content.', requestId: 'normal-chat-new-request' });
+    assert.equal(record.taskId, before.id);
+    assert.equal(f.state.creates, 1);
+    assert.equal(f.state.sends, 1);
+    assert.match(f.state.instruction, /Read proof.txt and report/);
+    assert.deepEqual(f.read().checkpoint, before.checkpoint);
+    assert.equal(f.read().status, 'running');
+  } finally { await f.close(); }
+});
+
+test('automatic verification checks latest completed file receipts and refuses tampered content', async () => {
+  for (const tampered of [false, true]) {
+    const f = await fixture('automatic-file-receipt-' + tampered);
+    try {
+      for (const [operationId, content] of [['first-write', 'earlier'], ['latest-write', 'settled']]) {
+        await f.capabilities.broker.execute({ actor: OWNER_ACTOR, approved: true, taskId: f.read().id,
+          workspaceId: f.workspace.id, operationId, capability: 'filesystem.write', input: { path: 'result.txt', content } });
+      }
+      if (tampered) fs.writeFileSync(path.join(f.workspaceRoot, 'result.txt'), 'changed');
+      const before = f.read(), call = () => f.call('ui.task.reconcile', { id: before.id, automatic: true, action: 'release' });
+      if (tampered) { await assert.rejects(call(), { code: 'OPERATION_RESULT_STALE' }); assert.deepEqual(f.read(), before); }
+      else { await call(); assert.equal(f.read().currentAgent, null); }
+      assert.equal(fs.readFileSync(path.join(f.workspaceRoot, 'result.txt'), 'utf8'), tampered ? 'changed' : 'settled');
+      assert.equal(f.state.sends + f.state.creates, 0);
+    } finally { await f.close(); }
+  }
+});
+
+test('new Task automatically retires a proven stale Workspace owner without inheriting its history', async () => {
+  const f = await fixture('automatic-workspace-owner');
+  try {
+    const old = f.read();
+    const result = await f.call('ui.task.create', { goal: 'Independent new read request', workspaceId: f.workspace.id,
+      agentProvider: 'codex', requestId: 'independent-new-task' });
+    assert.notEqual(result.task.id, old.id);
+    assert.equal(f.read().currentAgent, null);
+    assert.equal(f.read().status, 'paused');
+    assert.deepEqual(f.read().checkpoint, old.checkpoint);
+    const created = f.tasks.runtime.get({ id: result.task.id }).task;
+    assert.equal((created.recoveryReviews ?? []).length, 0);
+    assert.equal(created.executionEvidence.length, 0);
+    assert.equal(f.state.creates, 1);
+  } finally { await f.close(); }
+});
+
+test('automatic recovery uses a completed file receipt even when preparation order differs from execution', async () => {
+  const f = await fixture('automatic-receipt-order');
+  try {
+    const request = { actor: OWNER_ACTOR, approved: true, taskId: f.read().id, workspaceId: f.workspace.id,
+      operationId: 'prepared-first-finished-last', capability: 'filesystem.write', input: { path: 'ordered.txt', content: 'final' } };
+    await f.capabilities.broker.prepareOperation(request);
+    await f.capabilities.broker.execute({ ...request, operationId: 'prepared-last-finished-first', input: { path: 'ordered.txt', content: 'intermediate' } });
+    await f.capabilities.broker.execute(request);
+    await f.call('ui.task.reconcile', { id: f.read().id, automatic: true, action: 'release' });
+    assert.equal(f.read().currentAgent, null);
+    assert.equal(fs.readFileSync(path.join(f.workspaceRoot, 'ordered.txt'), 'utf8'), 'final');
+    assert.equal(f.state.sends, 0);
+  } finally { await f.close(); }
+});
+
+test('concurrent normal resume clicks share one recovery and one actual Agent dispatch', async () => {
+  const f = await fixture('automatic-double-resume');
+  try {
+    const before = f.read(), params = { id: before.id, expectedRev: before.rev };
+    const results = await Promise.all([f.call('ui.task.resume', params), f.call('ui.task.resume', params)]);
+    assert.equal(f.state.creates, 1);
+    assert.equal(f.state.sends, 1, 'two identical resume clicks cannot send the checkpoint twice');
+    assert.equal(f.read().recoveryReviews.length, 1);
+    assert.equal(results[0].task.id, results[1].task.id);
+  } finally { await f.close(); }
+});
 
 let failures = 0;
 try {

@@ -266,6 +266,7 @@ export function createCetaMeshServices(options = {}) {
     handoffTask: request => continuityService.runtime.rollover(request),
     recordOwnerContext: request => taskService.runtime.recordOwnerContext(request),
     platformRoute: request => platformRuntime.route(request),
+    recoverTask: request => platformRuntime.recoverTask(request),
     agentFollow: request => agentBroker.follow(request),
     defaults: dshDefaults,
     defaultModelConfig: () => settingsService.store.get().settings.models,
@@ -365,6 +366,8 @@ export function createCetaMeshServices(options = {}) {
     toolExecutionCoordinator,
     continuityRuntime: {
       isInFlight: taskId => continuityService?.runtime.isInFlight(taskId) === true,
+      transactionReviewState: taskId => continuityService?.runtime.transactionReviewState(taskId) ?? null,
+      acknowledgeTransactionRecovery: taskId => continuityService?.runtime.acknowledgeTransactionRecovery(taskId),
       rollover: params => {
         if (!continuityService) throw Object.assign(new Error('Continuity Runtime is unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
         return continuityService.runtime.rollover(params);

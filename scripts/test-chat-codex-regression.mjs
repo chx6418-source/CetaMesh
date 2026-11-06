@@ -168,11 +168,15 @@ try {
  });
  await check('verified unavailable preflight on Resume does not invent uncertain effects',async()=>{
   let t=make();t=rt.attachAgent({id:t.id,expectedRev:t.rev,provider:'codex',sessionId:'paused'}).task;t=rt.start({id:t.id,expectedRev:t.rev}).task;t=rt.pause({id:t.id,expectedRev:t.rev}).task;
-  // Eligibility changes only at the authoritative Capability preflight, after UI selection.
-  let checks=0;broker.health=async()=>({available:++checks===1,installed:true,authenticated:true,sessionCapable:true,compatible:true});
+  // A controlled stopped receipt permits automatic recovery; eligibility changes
+  // only at the authoritative Capability preflight, after recovery/UI selection.
+  const priorStop=broker.verifyStoppedTask,priorRequire=broker.require;
+  broker.require=()=>({verifyStoppedTask:async scope=>({...scope,provider:'codex',stopped:true,state:'stopped',receiptId:'fixture-stop',generation:1,runId:'fixture-paused-run',evidence:'process-tree-exit'})});
+  let checks=0;broker.health=async()=>({available:++checks<=2,installed:true,authenticated:true,sessionCapable:true,compatible:true});
   const ui=createDesktopUiService({services:{taskService,capabilityService:cap,agentBroker:broker,workspaceService}});
-  await assert.rejects(ui.execute({method:'ui.task.resume',params:{id:t.id,expectedRev:t.rev,provider:'codex'}}),{code:'PROVIDER_UNAVAILABLE'});assert.equal(checks,2,'must reach trusted Capability preflight');
+  await assert.rejects(ui.execute({method:'ui.task.resume',params:{id:t.id,expectedRev:t.rev,provider:'codex'}}),{code:'PROVIDER_UNAVAILABLE'});assert.equal(checks,3,'must reach trusted Capability preflight');
   const after=rt.get({id:t.id}).task;assert.notEqual(after.status,'running');assert.doesNotMatch(after.progress.note,/needs-reconciliation/);
+  broker.verifyStoppedTask=priorStop;broker.require=priorRequire;
  });
 }finally{fs.rmSync(root,{recursive:true,force:true});}
 if(failures)process.exitCode=1;

@@ -845,13 +845,15 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         workspaceProof, sessionProof, operationIds, journalSha256, intent: draft.recoveryIntent }].slice(-32);
       draft.recoveryIntent = null;
       const last = draft.agentHistory.at(-1);
-      if (last && last.detachedAt === null) { last.detachedAt = at; last.detachNote = 'Owner verified recovery; prior execution retained'; }
+      const automatic = sessionProof.automatic === true;
+      if (last && last.detachedAt === null) { last.detachedAt = at; last.detachNote = automatic
+        ? 'Core automatically verified recovery; prior execution retained' : 'Owner verified recovery; prior execution retained'; }
       draft.currentAgent = null;
       draft.executionObservation = null;
       draft.recoveryReservation = action === 'resume';
       draft.status = action === 'release' ? 'paused' : 'blocked';
-      draft.progress.note = 'Owner reviewed interrupted effect: ' + reviewSummary;
-      draft.decisions = [...draft.decisions, { at, decision: 'Owner reviewed interrupted effect', rationale: reviewSummary }].slice(-TASK_LIMITS.decisions);
+      draft.progress.note = (automatic ? 'Core automatically verified recovery: ' : 'Owner reviewed interrupted effect: ') + reviewSummary;
+      draft.decisions = [...draft.decisions, { at, decision: automatic ? 'Core automatically verified recovery' : 'Owner reviewed interrupted effect', rationale: reviewSummary }].slice(-TASK_LIMITS.decisions);
       // Review is not success. Retain the original Attempt, outcome and reason.
       for (const attempt of draft.attempts ?? []) if (['unknown', 'started', 'accepted'].includes(attempt.state)
         && attempt.provider === current.currentAgent?.provider && attempt.sessionId === current.currentAgent?.sessionId) {

@@ -4,9 +4,18 @@ import crypto from 'node:crypto';
 import { rankTaskAgents } from '../router/agent-assignment.js';
 import { isSafeAgentDispatchPreflight } from '../capability/service.js';
 import { inspectTaskSession } from '../agent/session-recovery.js';
+import { createTaskRecovery, taskRecoveryInstruction } from './task-recovery.js';
 
 /** Owner application operations reuse the existing Task and execution authorities. */
 export function createDesktopPlatformRuntime({ capabilityService, workspaceService, taskRuntime, agentBroker, continuityRuntime, toolExecutionCoordinator, modelRuntime, legacyModel, prepareTaskContext = null }) {
+  const taskRecovery = createTaskRecovery({ services: { taskService: { runtime: taskRuntime }, capabilityService,
+    workspaceService, agentBroker, toolExecutionCoordinator, continuityService: { runtime: continuityRuntime } } });
+  async function recoverTask({ id, expectedRev } = {}) {
+    const current = taskRuntime.get({ id }).task;
+    if (expectedRev !== undefined && current.rev !== expectedRev) throw capabilityError('TASK_CONFLICT', '任务在自动核验前已变化');
+    if (!['blocked', 'paused', 'waiting'].includes(current.status)) return { task: current, changed: false };
+    return taskRecovery.automatic(current, { action: 'release' });
+  }
   function assertTaskControlAvailable(taskRow) {
     if (taskRow.recoveryIntent) throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', '上次核对尚未完整提交，请先在任务详情完成恢复核对');
     if (continuityRuntime?.isInFlight?.(taskRow.id)) {
@@ -250,6 +259,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       // references, never file bytes; the reader rechecks the committed Session/Task.
       const attachedText=attachmentManifest.some(r=>r.kind==='text'&&r.scope?.sessionId===record.id&&r.scope?.workspaceId===workspaceId);
       if(attachmentManifest.length&&provider!=='cetamesh')throw capabilityError('ATTACHMENT_AGENT_UNSUPPORTED','当前外部 Agent 没有受控附件读取桥；请先申请将项目ZIP导入Workspace，或使用CetaMesh分析附件');
+      await taskRecovery.releaseWorkspace({ workspaceId, exceptTaskId: task?.id });
       let createdTask = false;
       if (!task) {
         const concurrent = taskRuntime.findByGoalWorkspace({ goal: text.slice(0, 2000), workspaceId });
@@ -262,9 +272,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
         createdTask = !concurrent;
       } else {
         record.taskId = task.id;
-        if (['paused', 'blocked', 'waiting'].includes(task.status)) {
-          throw capabilityError('TASK_RECOVERY_REVIEW_REQUIRED', '当前任务需要先恢复：请点“查看任务”，在任务详情的“人工核对后恢复”中填写核对结果和新的执行指令；不会自动重放旧操作。');
-        }
+        if (['paused', 'blocked', 'waiting'].includes(task.status)) task = (await recoverTask({ id: task.id, expectedRev: task.rev })).task;
       }
       if (signal?.aborted) {
         if (createdTask) {
@@ -275,8 +283,13 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       const inheritedContext = typeof prepareTaskContext === 'function'
         ? await prepareTaskContext({ record, taskId: task.id,
           requireComplete: !task.currentAgent || task.currentAgent.provider !== provider }) : null;
-      const dispatchText = !task.currentAgent && inheritedContext
-        ? inheritedContext + '\n[Current request]\n' + text : text;
+      const recovered = !task.currentAgent && ['paused', 'blocked', 'waiting'].includes(task.status);
+      const recoveryContext = recovered ? taskRecoveryInstruction(task) + '\n[New Owner request]\n' : '';
+      const dispatchText = (!task.currentAgent && inheritedContext ? inheritedContext + '\n[Current request]\n' : '') + recoveryContext + text;
+      if (recovered) {
+        const latest = taskRuntime.get({ id: task.id }).task;
+        task = taskRuntime.resume({ id: latest.id, expectedRev: latest.rev }).task;
+      }
       if (task.currentAgent && task.currentAgent.provider !== provider) {
         if (typeof continuityRuntime?.rollover !== 'function') {
           throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Changing Agent Provider on an existing Task requires Continuity Fresh Session');
@@ -365,6 +378,12 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
           }
         }
       } catch (error) {
+        if (recovered) {
+          const latest = taskRuntime.get({ id: task.id }).task;
+          if (latest.status === 'running' && !latest.currentAgent) taskRuntime.block({ id: latest.id, expectedRev: latest.rev,
+            reason: isSafeAgentDispatchPreflight(error) ? 'Agent dispatch preflight rejected: ' + error.code + '; no new execution started'
+              : 'needs-reconciliation: Fresh dispatch failed; retain current execution evidence' });
+        }
         if (createdTask && !dispatchBegun && error.code === 'AGENT_PROVIDER_SELECTION_REQUIRED') {
           const current = taskRuntime.get({ id: task.id }).task;
           if (current.status === 'queued' && !current.currentAgent
@@ -407,6 +426,6 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       throw error;
     }
   }
-  return { route, pauseTask, cancelTask };
+  return { route, pauseTask, cancelTask, recoverTask, taskRecovery };
 }
 
