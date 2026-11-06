@@ -43,7 +43,7 @@ const evidence = {
     codexRestartOnly?'Actual Codex account reads with a controlled Core service restart after a whole-process-tree completion receipt; no OS crash is claimed.':'Actual Provider IO is separate from the explicit Owner rejection and owned-session close injected by this suite.',
     'Core/UI API acceptance; no native Desktop UI or operating-system crash acceptance.',
     'Codex root Tasks retain run observations/history but do not have child Attempt records; no Attempt is fabricated.',
-    'Recovery uses the production token-bound Owner inspection and reconcile APIs; no direct Task detach or storage rewrite.',
+    codexRestartOnly?'Recovery uses the production automatic evidence verification path without an Owner review form; no direct Task detach or storage rewrite.':'Recovery uses the production token-bound Owner inspection and reconcile APIs; no direct Task detach or storage rewrite.',
     'Only isolated synthetic projects are used. No user process, account configuration or global runtime is terminated.'
   ]
 };
@@ -116,6 +116,8 @@ function observeProduction() {
   };
   const send = services.agentBroker.send.bind(services.agentBroker);
   services.agentBroker.send = async request => {
+    if (codexRestartOnly && request.provider === 'codex') assert.ok(evidence.dispatches.filter(row => row.provider === 'codex').length < 4,
+      'Codex total dispatch budget including initialization exceeded');
     if (request.provider === 'codex' && request.phase !== 'bootstrap') {
       assert.ok(evidence.dispatches.filter(row => row.provider === 'codex' && row.phase !== 'bootstrap').length
         < evidence.codexUserTurnLimit, 'Codex user-turn budget exceeded');
@@ -391,8 +393,11 @@ async function codexSessionLoss() {
       row.observedLossCode = error.code; return error.code === 'SESSION_TRANSPORT_UNKNOWN';
     });
     const beforeResume=evidence.dispatches.length;
-    await assert.rejects(ui('ui.task.resume',{id:restored.id,expectedRev:restored.rev,requestId:'must-not-auto-resume'}),{code:'TASK_RECOVERY_REVIEW_REQUIRED'});
-    assert.equal(evidence.dispatches.length,beforeResume,'restart does not silently send another Agent instruction');
+    await ui('ui.task.reconcile',{id:restored.id,expectedRev:restored.rev,automatic:true,action:'release'});
+    assert.equal(task(restored.id).currentAgent,null,'automatic Core proof retires only the stopped old assignment');
+    assert.equal(task(restored.id).status,'paused');
+    assert.deepEqual(task(restored.id).attempts,row.originalAttempts);
+    assert.equal(evidence.dispatches.length,beforeResume,'automatic reconciliation does not send another Agent instruction');
     row.coreRestart={status:'PASS',restoredStatus:restored.status,restoredObservation:restored.executionObservation.state,automaticSends:0};
     const freshScope=await ui('ui.agent.security',{provider:'codex',workspaceId:workspace.id});
     if(!freshScope.authorized){
@@ -411,15 +416,16 @@ async function codexSessionLoss() {
     + 'Get-Content -Raw -LiteralPath source.txt. Report the exact marker from that actual command output, '
     + 'not a value remembered from checkpoints. Give a fresh observed report after this explicit Owner recovery.';
   assert.ok(!recoveryInstruction.includes(freshMarker), 'fresh value is never supplied in recovery instructions');
-  const preview = await ui('ui.task.recovery.inspect', { id: initial.id });
+  const preview = await ui('ui.task.recovery.inspect', { id: initial.id, automatic: codexRestartOnly });
   assert.equal(preview.session.stopped, true);
   assert.ok(preview.reviewToken);
   assert.equal(preview.workspace.kind, 'filtered-workspace-v1', 'non-Git content proof is required');
   row.ownerRecoveryPreview = { taskId: preview.taskId, taskRev: preview.taskRev, session: preview.session,
     workspace: preview.workspace, blockers: preview.blockers, reviewOperationIds: preview.reviewOperationIds };
   await ui('ui.task.reconcile', {id: initial.id, expectedRev: preview.taskRev, provider: 'codex',
-    action: 'resume', reviewToken: preview.reviewToken, reviewedOperationIds: preview.reviewOperationIds,
+    action: 'resume', ...(codexRestartOnly?{automatic:true}:{reviewToken: preview.reviewToken, reviewedOperationIds: preview.reviewOperationIds,
     reviewed: true, reviewSummary: 'Owner verified confirmed session close and unchanged original pre-fault files, then deliberately replaced only the synthetic source marker; authorize a fresh read of the reviewed Owner postimage. No Agent write or import is approved.',
+    }),
     nextInstruction: recoveryInstruction,
     requestId: 'real-recovery-codex-permitted'});
   assert.equal(evidence.dispatches.length, sendsBeforeReview + 1);

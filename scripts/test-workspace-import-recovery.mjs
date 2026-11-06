@@ -49,8 +49,8 @@ test('F0 conflicting bytes retain project ownership and original recovery eviden
   assert.deepEqual(fs.readFileSync(path.join(f.batch, 'manifest.json')), manifest);
 });
 
-test('F1 Owner verifies original import and resumes the same Task in the same Core', async () => {
-  const f = fixture('same-core');
+for (const automatic of [false, true]) test(`F1 ${automatic ? 'Core automatically' : 'Owner'} verifies original import and resumes the same Task in the same Core`, async () => {
+  const f = fixture('same-core-' + automatic);
   const services = createCetaMeshServices({ stateDir: f.stateDir, dataRoot: path.join(f.root, 'data'), resourceRoot: f.root, sourceRoot: f.root });
   try {
     const rt = services.taskService.runtime, task = rt.create({ goal: 'Read reconciled input.txt', workspaceId: f.workspace.id });
@@ -83,12 +83,12 @@ test('F1 Owner verifies original import and resumes the same Task in the same Co
     // Simulate Owner reconciling the actual bytes against retained preimages;
     // text acknowledgement alone cannot satisfy this proof.
     fs.writeFileSync(path.join(f.project, 'input.txt'), 'original');
-    const reviewed = await ui('ui.task.recovery.inspect', { id: task.id });
+    const reviewed = await ui('ui.task.recovery.inspect', { id: task.id, automatic });
     assert.equal(reviewed.canResume, true, JSON.stringify(reviewed.blockers));
     assert.equal(reviewed.workspace.kind, 'filtered-workspace-v1');
     const resumed = await ui('ui.task.reconcile', { id: task.id, expectedRev: read().rev,
-      action: 'resume', provider: 'cetamesh', reviewed: true, reviewToken: reviewed.reviewToken,
-      reviewedOperationIds: reviewed.reviewOperationIds, reviewSummary: 'Verified original bytes and retained batch evidence',
+      action: 'resume', provider: 'cetamesh', ...(automatic ? { automatic: true } : { reviewed: true, reviewToken: reviewed.reviewToken,
+      reviewedOperationIds: reviewed.reviewOperationIds, reviewSummary: 'Verified original bytes and retained batch evidence' }),
       nextInstruction: 'Read input.txt through the registered filesystem tool', requestId: 'explicit-import-resume' });
     assert.equal(resumed.task.id, task.id);
     const deadline = Date.now() + 10_000;
