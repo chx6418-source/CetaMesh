@@ -2,12 +2,24 @@ import crypto from 'node:crypto';
 import path from 'node:path';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { agentProviderError as fault } from './agent-provider.js';
+import { probeCodexHostBoot } from './codex-process-supervisor.js';
 
 const MAX_SESSIONS = 4096;
 const STATES = new Set(['idle', 'running', 'stopped', 'closed', 'unknown']);
 const PROOFS = new Set(['never-started', 'process-tree-exit', 'supervisor-close']);
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 240 && !/[\r\n\0]/.test(value);
 const nullableText = value => value === null || text(value);
+const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+const validBoot = row => row?.kind === 'windows-kernel-boot-v1' && /^[a-f0-9]{64}$/.test(row.hostId)
+  && Number.isSafeInteger(row.bootedAt) && row.bootedAt > 0
+  && Number.isSafeInteger(row.eventRecordId) && row.eventRecordId > 0 && row.bootMode === 0 && row.bootType === 0;
+const laterBoot = (before, after) => validBoot(before) && validBoot(after) && before.hostId === after.hostId
+  && after.bootedAt > before.bootedAt && after.eventRecordId > before.eventRecordId;
+const validWitness = row => row && ['id', 'taskId', 'workspaceId', 'sessionId'].every(key => text(row[key]))
+  && Number.isSafeInteger(row.attachedAt) && row.attachedAt >= 0
+  && /^[a-f0-9]{64}$/.test(row.scopeSha256) && validBoot(row.beforeBoot)
+  && Number.isSafeInteger(row.observedAt) && row.observedAt >= 0
+  && (row.afterBoot === null || laterBoot(row.beforeBoot, row.afterBoot));
 
 function validRow(row) {
   return row && ['sessionId','taskId','workspaceId','snapshotId'].every(key => text(row[key]))
@@ -23,8 +35,23 @@ function validRow(row) {
 }
 
 /** Core-only lifecycle evidence. Neither Task prose nor a missing process is a receipt. */
-export function createCodexSessionLifecycle({ stateDir, now = Date.now } = {}) {
+export function createCodexSessionLifecycle({ stateDir, now = Date.now, probeHostBoot = probeCodexHostBoot } = {}) {
   const file = stateDir ? path.join(stateDir, 'agent', 'codex-session-lifecycle.json') : null;
+  const creating = new Map();
+  const stateIdentity = stateDir ? path.resolve(stateDir) : null;
+  const scopeHash = binding => hash([stateIdentity, binding.taskId, binding.workspaceId, binding.sessionId, binding.attachedAt]);
+  let failedBootProbeAt = null;
+  function currentBoot() {
+    // Optional OS evidence may be unavailable. A whole legacy Task list shares
+    // one failed probe; later explicit checks can retry without blocking startup
+    // once per historical Task.
+    if (failedBootProbeAt !== null && now() - failedBootProbeAt < 30_000) return null;
+    let value;
+    try { value = probeHostBoot(); } catch { value = null; }
+    if (!validBoot(value)) { failedBootProbeAt = now(); return null; }
+    failedBootProbeAt = null;
+    return value;
+  }
   let memory = {version:1,sessions:[]};
   function load() {
     let data;
@@ -33,6 +60,11 @@ export function createCodexSessionLifecycle({ stateDir, now = Date.now } = {}) {
     if (!data || data.version !== 1 || !Array.isArray(data.sessions) || data.sessions.length > MAX_SESSIONS
       || !data.sessions.every(validRow) || new Set(data.sessions.map(row=>row.sessionId)).size !== data.sessions.length) {
       throw fault('CODEX_LIFECYCLE_STORE_INVALID','Codex lifecycle evidence is invalid; original records retained');
+    }
+    if (data.legacyBootWitnesses !== undefined && (!Array.isArray(data.legacyBootWitnesses)
+      || data.legacyBootWitnesses.length > MAX_SESSIONS || !data.legacyBootWitnesses.every(validWitness)
+      || new Set(data.legacyBootWitnesses.map(row => row.sessionId)).size !== data.legacyBootWitnesses.length)) {
+      throw fault('CODEX_LIFECYCLE_STORE_INVALID', 'Historical process recovery evidence is invalid; original records retained');
     }
     return structuredClone(data);
   }
@@ -54,6 +86,67 @@ export function createCodexSessionLifecycle({ stateDir, now = Date.now } = {}) {
     save(data); return structuredClone(row);
   }
   return Object.freeze({
+    // Creation fences cover awaits before a native lifecycle row can be written.
+    // A pending witness is re-anchored before admission of any new execution.
+    beginCreation({ taskId } = {}) {
+      if (!text(taskId)) return () => {};
+      const data = load(), pending = (data.legacyBootWitnesses ?? []).filter(row => row.taskId === taskId && !row.afterBoot);
+      if (pending.length) {
+        const boot = currentBoot();
+        if (!validBoot(boot)) throw fault('CODEX_HOST_RESTART_UNVERIFIED', 'Cannot verify the host boundary for historical execution');
+        for (const row of pending) { row.beforeBoot = boot; row.observedAt = now(); }
+        save(data);
+      }
+      creating.set(taskId, (creating.get(taskId) ?? 0) + 1);
+      let released = false;
+      return () => {
+        if (released) return;
+        released = true;
+        const count = creating.get(taskId) - 1;
+        if (count) creating.set(taskId, count); else creating.delete(taskId);
+      };
+    },
+    hasPendingCreation: taskId => (creating.get(taskId) ?? 0) > 0,
+    observeLegacy(binding) {
+      if (!file || !['taskId', 'workspaceId', 'sessionId'].every(key => text(binding?.[key]))
+        || !Number.isSafeInteger(binding.attachedAt) || binding.attachedAt < 0 || creating.has(binding.taskId)) return null;
+      const data = load();
+      if (data.sessions.some(row => row.sessionId === binding.sessionId)) return null;
+      const previous = data.legacyBootWitnesses?.find(row => row.sessionId === binding.sessionId);
+      if (previous) return previous.scopeSha256 === scopeHash(binding) ? structuredClone(previous) : null;
+      const boot = currentBoot();
+      if (!validBoot(boot)) return null;
+      const rows = data.legacyBootWitnesses ??= [];
+      if (rows.length >= MAX_SESSIONS) return null; // Never evict pending ownership.
+      const row = { ...binding, id: crypto.randomUUID(), scopeSha256: scopeHash(binding),
+        beforeBoot: boot, afterBoot: null, observedAt: now() };
+      rows.push(row); save(data);
+      return structuredClone(row);
+    },
+    inspectLegacy(binding) {
+      const unknown = code => ({ stopped: false, code: code ?? 'CODEX_HOST_RESTART_REQUIRED' });
+      if (!file || creating.has(binding?.taskId)) return unknown('SESSION_EXECUTION_UNCONFIRMED');
+      const data = load(), row = data.legacyBootWitnesses?.find(item => item.sessionId === binding?.sessionId);
+      if (!row || row.scopeSha256 !== scopeHash(binding)) return unknown('CODEX_LEGACY_STOP_EVIDENCE_MISSING');
+      const boot = currentBoot();
+      if (!validBoot(boot) || boot.hostId !== row.beforeBoot.hostId) return unknown('CODEX_HOST_RESTART_UNVERIFIED');
+      if (!row.afterBoot) {
+        if (!laterBoot(row.beforeBoot, boot)) return unknown();
+        row.afterBoot = boot; save(data);
+      } else if (boot.bootedAt < row.afterBoot.bootedAt || boot.eventRecordId < row.afterBoot.eventRecordId) {
+        return unknown('CODEX_HOST_RESTART_UNVERIFIED');
+      }
+      return { stopped: true, provider: 'codex', taskId: row.taskId, workspaceId: row.workspaceId,
+        sessionId: row.sessionId, evidence: 'process-tree-exit', source: 'windows-restart-witness',
+        legacyExecutionIdentity: 'unknown', receiptId: row.id,
+        // v1 reader compatibility only; this is NOT a native generation claim.
+        // Native generation/run/transport/snapshot evidence was never retained.
+        generation: 0, runId: null, transport: null, snapshotId: null, attemptId: null,
+        witness: { id: row.id, taskId: row.taskId, workspaceId: row.workspaceId, sessionId: row.sessionId,
+          scopeSha256: row.scopeSha256, attachedAt: row.attachedAt,
+          beforeBoot: row.beforeBoot, afterBoot: row.afterBoot, observedAt: row.observedAt } };
+    },
+    legacyForTask: taskId => load().legacyBootWitnesses?.filter(row => row.taskId === taskId) ?? [],
     create(binding) {
       const data=load();
       if (data.sessions.some(row=>row.sessionId===binding.sessionId)) throw fault('SESSION_ID_COLLISION','Codex lifecycle already owns this session');

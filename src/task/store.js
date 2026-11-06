@@ -52,6 +52,25 @@ function validRecoveryRecord(record, task, intent = false) {
   if (agent?.provider === 'codex' && (!recoveryText(proof.receiptId) || !recoveryTime(proof.generation)
     || !['never-started', 'process-tree-exit', 'supervisor-close'].includes(proof.evidence)
     || (proof.generation > 0 && !recoveryText(proof.runId)))) return false;
+  if (agent?.provider === 'codex' && (proof.source !== undefined || proof.witness !== undefined || proof.legacyExecutionIdentity !== undefined)) {
+    const witness = proof.witness;
+    const boot = value => value?.kind === 'windows-kernel-boot-v1' && recoveryHash(value.hostId)
+      && recoveryTime(value.bootedAt) && value.bootedAt > 0 && recoveryTime(value.eventRecordId)
+      && value.eventRecordId > 0 && value.bootMode === 0 && value.bootType === 0;
+    // generation=0 is required only for the v1 reader compatibility envelope.
+    // It carries no native execution identity or never-started assertion.
+    if (proof.source !== 'windows-restart-witness' || proof.legacyExecutionIdentity !== 'unknown'
+      || proof.evidence !== 'process-tree-exit' || proof.generation !== 0 || proof.runId !== null
+      || proof.transport !== null || proof.snapshotId !== null || proof.attemptId !== null
+      || witness?.id !== proof.receiptId || witness?.taskId !== task.id
+      || witness?.workspaceId !== task.workspaceId || witness?.sessionId !== agent.sessionId
+      || !recoveryHash(witness?.scopeSha256)
+      || !recoveryTime(witness?.observedAt) || !recoveryTime(witness?.attachedAt)
+      || !boot(witness.beforeBoot) || !boot(witness.afterBoot)
+      || witness.beforeBoot.hostId !== witness.afterBoot.hostId
+      || witness.afterBoot.bootedAt <= witness.beforeBoot.bootedAt
+      || witness.afterBoot.eventRecordId <= witness.beforeBoot.eventRecordId) return false;
+  }
   if (!agent && (!['no-prior-session', 'owner-retired-session'].includes(proof.evidence)
     || (proof.evidence === 'owner-retired-session' && !recoveryText(proof.receiptId)))) return false;
   if (intent) return recoveryIds(record.reviewIds) && record.reviewIds.length > 0 && record.reviewIds.length <= 32;

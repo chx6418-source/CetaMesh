@@ -133,6 +133,16 @@ export function createCetaMeshServices(options = {}) {
     isTaskHandoffInFlight: taskId => continuityService?.runtime.isInFlight(taskId) === true,
     dshOptions: agentTaskOptions, dshPresetConfig: options.dshPresetConfig, dshConfiguration: options.dshConfiguration,
     codexOptions: { ...agentTaskOptions, stateDir,
+      legacyRecoveryTasks: () => {
+        const tasks = [];
+        let offset = 0, page;
+        do {
+          page = taskService.runtime.list({ statuses: ['blocked', 'paused', 'waiting'], limit: 500, offset });
+          tasks.push(...page.tasks.filter(task => task.currentAgent?.provider === 'codex'));
+          offset = page.nextOffset;
+        } while (offset !== null);
+        return tasks;
+      },
       authorizeOpenAiEnvironment: () => settingsService.store.get().settings.agents.codexOpenAiEnvironmentAuthorized === true },
     acpOptions: { taskOptions: agentTaskOptions, nativeApprovalBridge,
       runtimeConfiguration: options.agentAcpOptions?.runtimeResolver ? undefined : agentRuntimeConfiguration, ...options.agentAcpOptions,

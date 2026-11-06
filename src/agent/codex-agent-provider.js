@@ -304,11 +304,12 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   listWorkspaceRoots = () => [], excludedRoots = [], stagingRoot = null, createStage = createStagingWorkspace,
   applyChanges = async () => { throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', 'Capability Broker import adapter is unavailable'); },
   environment = process.env, codexHome = null, securityMode = 'native', authorizeOpenAiEnvironment = () => false,
-  approvalStatus = () => null, cancelApproval = () => ({ cancelled: false }), timeoutMs = 10 * 60 * 1000, log = () => {}, stateDir, sessionLifecycle } = {}) {
+  approvalStatus = () => null, cancelApproval = () => ({ cancelled: false }), timeoutMs = 10 * 60 * 1000, log = () => {}, stateDir, sessionLifecycle,
+  legacyRecoveryTasks = () => [], probeHostBoot } = {}) {
   const resolvedCodexHome = codexHome || environment.CODEX_HOME || path.join(environment.USERPROFILE || os.homedir(), '.codex');
   const cli = cliProcess ?? new CliAgentProcess({ name: 'codex', executable,
     envSource: () => ({ ...environment, CODEX_HOME: resolvedCodexHome }), ownedTreeStateDir:stateDir });
-  const lifecycle = sessionLifecycle ?? createCodexSessionLifecycle({stateDir});
+  const lifecycle = sessionLifecycle ?? createCodexSessionLifecycle({stateDir, probeHostBoot});
   let inspection = inspectCodexCli(cli);
   let authenticated = inspection.available ? loginState(cli) : false;
   let lastProbeAt = Date.now();
@@ -318,6 +319,22 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   let inspectionGeneration = 0;
   let inspectedIdentity = JSON.stringify([cli.executable(), inspection.version]);
   const sessions = new Map();
+  function legacyScope(task) {
+    const last = task?.agentHistory?.at(-1), agent = task?.currentAgent;
+    if (!['blocked', 'paused', 'waiting'].includes(task?.status) || agent?.provider !== 'codex'
+      || last?.provider !== agent.provider || last?.sessionId !== agent.sessionId || last.detachedAt !== null
+      || !Number.isSafeInteger(last.attachedAt) || last.attachedAt < 0) return null;
+    return { taskId: task.id, workspaceId: task.workspaceId, sessionId: agent.sessionId, attachedAt: last.attachedAt };
+  }
+  // Bootstrap records a present-tense host boundary for legacy assignments.
+  // No Task timestamp is treated as proof that an old process has ended.
+  for (const task of legacyRecoveryTasks()) {
+    const scope = legacyScope(task);
+    if (scope && !lifecycle.read(scope.sessionId)) {
+      try { lifecycle.observeLegacy(scope); }
+      catch (error) { log('Codex legacy recovery observation unavailable: ' + (error.code ?? 'CODEX_LIFECYCLE_WRITE_FAILED')); }
+    }
+  }
   const providerConfig = { model: null, reasoningEffort: null };
   // Exec has no session configuration ACK. These values are requests for a
   // future process invocation; argv observation does not prove model access.
@@ -654,6 +671,8 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     },
     methods: {
       async createSession({ taskId, workspaceId, modelProvider, model, reasoningEffort } = {}) {
+        const finishCreation = lifecycle.beginCreation({ taskId });
+        try {
         refreshInspection();
         if (securityMode !== 'native') throw agentProviderError('ISOLATED_ENVIRONMENT_UNVERIFIED', 'Isolated Workspace has no verified execution environment');
         if (process.platform === 'win32' && selectedWindowsSandbox(resolvedCodexHome) !== 'unelevated') throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Selected Windows backend requires independent verification; no fallback is allowed');
@@ -711,6 +730,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           closed: false
         });
         return { sessionId: id, provider: 'codex', taskId: binding.task.id, workspaceId: binding.workspace.id, cwd: stage.root, versionContext: stage.versionContext };
+        } finally { finishCreation(); }
       },
 
       async send({ sessionId, content, runId = null, phase = 'user', nativeReadinessToken = null } = {}) {
@@ -965,17 +985,43 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     // Trusted Core recovery only. Human prose, lost routing and PID probes cannot mint receipts.
     async verifyTaskQuiescence({ taskId, workspaceId, allowEmpty = false } = {}) {
       if (!taskId || !workspaceId || typeof lifecycle.forTask !== 'function') return { stopped: false };
+      if (lifecycle.hasPendingCreation(taskId)) return { stopped: false };
       const rows = lifecycle.forTask(taskId);
+      const legacy = lifecycle.legacyForTask(taskId);
       // Include sessions created before attachment: failed startup can leave an
       // orphan process that is absent from Task history but still owns this scope.
-      return { stopped: (allowEmpty || rows.length > 0) && rows.every(row => row.workspaceId === workspaceId
+      return { stopped: (allowEmpty || rows.length > 0 || legacy.length > 0) && rows.every(row => row.workspaceId === workspaceId
         && row.receipt && ['idle', 'stopped', 'closed'].includes(row.state)
-        && !sessions.get(row.sessionId)?.activeRun) };
+        && !sessions.get(row.sessionId)?.activeRun)
+        && legacy.every(row => row.workspaceId === workspaceId
+          // An exact native lifecycle receipt is stronger evidence than an
+          // earlier missing-receipt observation. All native rows still pass the
+          // current generation/activity check above; other legacy sessions do not.
+          && (rows.some(native => native.sessionId === row.sessionId && native.workspaceId === row.workspaceId)
+            || lifecycle.inspectLegacy(row).stopped === true)) };
     },
     async verifyStoppedTask({ taskId, workspaceId, sessionId } = {}) {
       if (!taskId || !workspaceId || !sessionId || sessions.get(sessionId)?.activeRun
-          || typeof resolveTaskWorkspace !== 'function') return { stopped: false };
+          || lifecycle.hasPendingCreation(taskId) || typeof resolveTaskWorkspace !== 'function') return { stopped: false };
       const row=lifecycle.read(sessionId);
+      if (!row) {
+        const binding = await resolveTaskWorkspace({ taskId, workspaceId });
+        const scope = legacyScope(binding?.task);
+        if (!scope || scope.taskId !== taskId || scope.workspaceId !== workspaceId || scope.sessionId !== sessionId
+          || binding?.workspace?.id !== workspaceId || sessions.has(sessionId) || lifecycle.hasPendingCreation(taskId)) return { stopped: false };
+        lifecycle.observeLegacy(scope);
+        const proof = lifecycle.inspectLegacy(scope);
+        if (!proof.stopped) return proof;
+        if (!(await this.verifyTaskQuiescence({ taskId, workspaceId })).stopped) return { stopped: false };
+        const latest = await resolveTaskWorkspace({ taskId, workspaceId });
+        if (latest?.task?.rev !== binding.task.rev || JSON.stringify(legacyScope(latest?.task)) !== JSON.stringify(scope)
+          || latest?.workspace?.id !== workspaceId || lifecycle.hasPendingCreation(taskId) || lifecycle.read(sessionId)
+          || sessions.has(sessionId)) return { stopped: false };
+        // No async gap between the final scope/lifecycle check and this proof.
+        const active = lifecycle.forTask(taskId).some(item => item.workspaceId !== workspaceId || !item.receipt
+          || !['idle', 'stopped', 'closed'].includes(item.state) || sessions.get(item.sessionId)?.activeRun);
+        return active ? { stopped: false } : lifecycle.inspectLegacy(scope);
+      }
       if(!row?.receipt || !['idle','stopped','closed'].includes(row.state)
         || row.taskId!==taskId || row.workspaceId!==workspaceId) return {stopped:false};
       if (!(await this.verifyTaskQuiescence({ taskId, workspaceId })).stopped) return { stopped: false };

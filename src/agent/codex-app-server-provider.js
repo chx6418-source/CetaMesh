@@ -134,6 +134,12 @@ export function createCodexAppServerProvider({launch,taskOptions = {},requestNat
       return supervised;
     }});
   return Object.freeze({...base,
+    async createSession(params = {}) {
+      sessionCreationStarted = true;
+      const finish = lifecycle?.beginCreation(params);
+      try { return await base.createSession(params); }
+      finally { finish?.(); }
+    },
     bindSessionLifecycle(value) {
       if(sessionCreationStarted && lifecycle!==value)throw fault('CODEX_LIFECYCLE_CONFLICT','Cannot replace active Codex lifecycle ownership');
       lifecycle=value;

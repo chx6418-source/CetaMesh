@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -10,6 +11,80 @@ import { createTaskRuntime } from '../src/task/runtime.js';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-codex-lifecycle-'));
 const binding = {sessionId:'session-a',taskId:'task-a',workspaceId:'workspace-a',transport:'exec',snapshotId:'snapshot-a',attemptId:null};
 try {
+  // A historical Task predating native receipts must first be witnessed in one
+  // real host boot. Old Task timestamps alone never establish termination.
+  const legacyDir = path.join(root, 'legacy-boot');
+  const hostA = { kind: 'windows-kernel-boot-v1', hostId: 'a'.repeat(64),
+    bootedAt: 100000, eventRecordId: 10, bootMode: 0, bootType: 0 };
+  const hostB = { ...hostA, bootedAt: 200000, eventRecordId: 20 };
+  const legacyScope = { taskId: 'legacy-task', workspaceId: 'legacy-workspace',
+    sessionId: 'legacy-session', attachedAt: 1 };
+  let host = hostA;
+  const legacy = () => createCodexSessionLifecycle({ stateDir: legacyDir, probeHostBoot: () => host });
+  legacy().observeLegacy(legacyScope);
+  assert.equal(legacy().inspectLegacy(legacyScope).stopped, false, 'Core-only restart and very old Task timestamps do not prove exit');
+  host = hostB;
+  const legacyProof = legacy().inspectLegacy(legacyScope);
+  assert.equal(legacyProof.stopped, true, 'a witnessed later kernel boot closes the historical local process boundary');
+  assert.equal(legacyProof.source, 'windows-restart-witness');
+  assert.equal(legacyProof.legacyExecutionIdentity, 'unknown');
+  assert.equal(legacyProof.runId, null);
+  assert.equal(legacyProof.transport, null);
+  assert.deepEqual(legacy().inspectLegacy(legacyScope), legacyProof, 'proof identity is stable across repeated inspection and Core reload');
+  assert.equal(legacy().forTask(legacyScope.taskId).length, 0, 'never synthesize a native execution generation or snapshot');
+  assert.equal(legacy().inspectLegacy({ ...legacyScope, sessionId: 'other' }).stopped, false);
+  for (const invalid of [hostA, { ...hostB, hostId: 'b'.repeat(64) }, { ...hostB, eventRecordId: 9 },
+    { ...hostB, bootMode: 1 }, { ...hostB, bootType: 1 }, { ...hostB, bootType: 2 }, null]) {
+    const isolated = path.join(root, 'legacy-negative-' + crypto.randomUUID());
+    const a = createCodexSessionLifecycle({ stateDir: isolated, probeHostBoot: () => hostA });
+    a.observeLegacy(legacyScope);
+    const b = createCodexSessionLifecycle({ stateDir: isolated, probeHostBoot: () => invalid });
+    assert.equal(b.inspectLegacy(legacyScope).stopped, false, 'missing, changed-host, non-restart and log rollback evidence stays blocked');
+  }
+  const liveLifecycle = legacy();
+  const pending = liveLifecycle.beginCreation({ taskId: legacyScope.taskId });
+  assert.equal(liveLifecycle.hasPendingCreation(legacyScope.taskId), true);
+  pending();
+  assert.equal(liveLifecycle.hasPendingCreation(legacyScope.taskId), false);
+  const copiedDir = path.join(root, 'copied-state');
+  fs.mkdirSync(path.join(copiedDir, 'agent'), { recursive: true });
+  fs.copyFileSync(path.join(legacyDir, 'agent/codex-session-lifecycle.json'), path.join(copiedDir, 'agent/codex-session-lifecycle.json'));
+  assert.equal(createCodexSessionLifecycle({ stateDir: copiedDir, probeHostBoot: () => hostB })
+    .inspectLegacy(legacyScope).stopped, false, 'a copied StateDir cannot borrow another state owner witness');
+  const reanchoredDir = path.join(root, 'pending-creation');
+  createCodexSessionLifecycle({ stateDir: reanchoredDir, probeHostBoot: () => hostA }).observeLegacy(legacyScope);
+  const postBootCreation = createCodexSessionLifecycle({ stateDir: reanchoredDir, probeHostBoot: () => hostB });
+  const finishPendingCreation = postBootCreation.beginCreation({ taskId: legacyScope.taskId });
+  assert.equal(postBootCreation.inspectLegacy(legacyScope).stopped, false, 'creation before any persisted native row invalidates the earlier boot boundary');
+  finishPendingCreation();
+  assert.equal(postBootCreation.inspectLegacy(legacyScope).stopped, false, 'creation admission is durable across the awaiting stage window');
+  let bootProbeCalls = 0, bootClock = 1000;
+  const noBoot = createCodexSessionLifecycle({ stateDir: path.join(root, 'boot-unavailable'), now: () => bootClock,
+    probeHostBoot: () => { bootProbeCalls++; return null; } });
+  for (let i = 0; i < 100; i++) noBoot.observeLegacy({ ...legacyScope, sessionId: 'unavailable-' + i });
+  assert.equal(bootProbeCalls, 1, 'one failed host probe is shared by the whole bootstrap batch');
+  bootClock += 30_001;
+  noBoot.observeLegacy(legacyScope);
+  assert.equal(bootProbeCalls, 2, 'an explicit later check can retry unavailable OS evidence');
+  const receiptDir = path.join(root, 'legacy-with-native-receipt');
+  const receiptLifecycle = createCodexSessionLifecycle({ stateDir: receiptDir, probeHostBoot: () => hostA });
+  receiptLifecycle.observeLegacy(legacyScope);
+  const receiptProvider = createCodexAgentProvider({ stateDir: receiptDir, sessionLifecycle: receiptLifecycle,
+    cliProcess: { executable: () => null, probe: () => ({ available: false, stdout: '', stderr: '' }), async shutdown() {} } });
+  const quiescent = () => receiptProvider.verifyTaskQuiescence(legacyScope);
+  assert.equal((await quiescent()).stopped, false, 'an observed historical session has no stop receipt');
+  const nativeReceiptBinding = { ...legacyScope, transport: 'exec', snapshotId: 'trusted-receipt', attemptId: null };
+  receiptLifecycle.create(nativeReceiptBinding);
+  assert.equal((await quiescent()).stopped, true, 'an exact trusted native receipt supersedes the earlier missing-receipt observation');
+  assert.equal(receiptLifecycle.legacyForTask(legacyScope.taskId).length, 1, 'the historical observation is retained');
+  const receiptRun = receiptLifecycle.begin({ ...nativeReceiptBinding, runId: 'live-receipt-run', turnId: 'live-receipt-turn' });
+  assert.equal((await quiescent()).stopped, false, 'an old observation never bypasses a new active native generation');
+  receiptLifecycle.settle({ ...nativeReceiptBinding, generation: receiptRun.generation, runId: receiptRun.runId, proof: 'process-tree-exit' });
+  assert.equal((await quiescent()).stopped, true, 'the current native stop receipt restores quiescence');
+  receiptLifecycle.observeLegacy({ ...legacyScope, sessionId: 'other-unconfirmed-session' });
+  assert.equal((await quiescent()).stopped, false, 'one proven session cannot retire another unknown historical session');
+  console.log('PASS historical boot witness requires a real later host boundary and retains stable exact-scope evidence');
+
   let lifecycle = createCodexSessionLifecycle({stateDir:root});
   lifecycle.create(binding);
   assert.equal(lifecycle.read(binding.sessionId).receipt.evidence,'never-started');
