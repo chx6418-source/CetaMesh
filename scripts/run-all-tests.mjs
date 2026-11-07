@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-task-child-result-projection.mjs': { category: 'security', timeoutMs: 120000, note: 'Bounded parent-child Task facts with exact Attempt and Run provenance, separated host evidence and attributed reports' },
   'test-model-post-write-verification.mjs': { category: 'security', timeoutMs: 180000, note: 'Owner configured fresh checks through existing write/test approvals, actual failed-test feedback and recovery' },
   'test-settings-feature-compatibility.mjs': { category: 'security', timeoutMs: 120000, note: 'Inactive feature v1 serialization, preserved prior configuration and non-destructive isolated rollback' },
   'test-model-configuration-core.mjs': { category: 'integration', timeoutMs: 120000, note: 'Ordinary composed Core Owner model settings, local requests and all-disabled recovery' },

@@ -1,4 +1,5 @@
 import { redactText } from '../logging/redact.js';
+import { projectChildResultFacts } from '../task/child-result-projection.js';
 
 const MAX_MEMORY_REFERENCES = 200;
 
@@ -34,6 +35,21 @@ function projectTask(task) {
     const checkpoint = {};
     textField(checkpoint, 'summary', task.checkpoint.summary, Infinity);
     if (Object.keys(checkpoint).length) projected.checkpoint = checkpoint;
+  }
+
+  if (!task.parentTaskId && Array.isArray(task.children)) {
+    const linked = task.children.filter(child => child?.parentTaskId === task.id && child.workspaceId === task.workspaceId);
+    const children = linked.slice(0, 6);
+    const superseded = new Set(children.map(child => child.supersedesChildId).filter(Boolean));
+    const ordered = [...children.filter(child => !superseded.has(child.id)), ...children.filter(child => superseded.has(child.id))];
+    let budget = 6000;
+    projected.childResults = [];
+    for (const child of ordered) {
+      if (budget < 2400) break;
+      const result = projectChildResultFacts(child, { parent: task, limit: 4, maxChars: Math.min(2800, budget) });
+      if (result) { projected.childResults.push(result); budget -= JSON.stringify(result).length; }
+    }
+    projected.childResultsOmitted = Math.max(0, linked.length - projected.childResults.length);
   }
 
   return projected;
