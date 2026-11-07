@@ -226,6 +226,10 @@ export function createCetaMeshServices(options = {}) {
       if (!toolExecutionCoordinator) throw new Error('Model tool execution is unavailable');
       return toolExecutionCoordinator.run(request);
     },
+    readHistory: request => {
+      if (!toolExecutionCoordinator) throw new Error('Model history source is unavailable');
+      return toolExecutionCoordinator.readHistory(request);
+    },
     resumeApproval: request => {
       if (!toolExecutionCoordinator) throw new Error('Model tool execution is unavailable');
       return toolExecutionCoordinator.resumeApproval(request);
@@ -395,6 +399,10 @@ export function createCetaMeshServices(options = {}) {
     onUsage: payload => usageLedger.record(payload),
     modelRuntime,
     capabilityBroker: capabilityService.broker,
+    resolveHistoryContext: request => request.targetKind === 'chat'
+      ? chatService.resolveModelHistoryContext(request) : { authorized: false },
+    onMessagesCheckpoint: payload => payload.targetKind === 'chat'
+      ? chatService.checkpointModelHistory(payload) : undefined,
     resolvePostWriteVerification: ({ scope, signal }) => scope?.workspaceId
       ? workspaceService.resolvePostWriteVerification({ workspaceId: scope.workspaceId, signal }) : null,
     stateDir,
@@ -422,6 +430,7 @@ export function createCetaMeshServices(options = {}) {
     }
   });
   capabilityService.setReadBatchExecutor(toolExecutionCoordinator.executeReadBatch);
+  capabilityService.setHistorySourceReader(toolExecutionCoordinator.readHistory);
   for (const row of taskService.runtime.recoveryCandidates()) {
     const recovery = toolExecutionCoordinator.recoveryForTask(row.id)
       ?? capabilityService.recoveryForTask(row.id);

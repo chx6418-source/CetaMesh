@@ -39,6 +39,8 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-chat-history-context.mjs': { category: 'integration', timeoutMs: 180000, note: 'Existing Chat private history owner, atomic transcript checkpoints and source-bound coordinator retrieval without account generation' },
+  'test-chat-history-product.mjs': { category: 'integration', timeoutMs: 180000, note: 'Ordinary composed Core Chat, real loopback model wire, source Broker read, file receipt and restart without replay' },
   'test-managed-configuration-observation.mjs': { category: 'integration', timeoutMs: 180000, note: 'Actual Managed loopback wire model/effort through approval continuation, Agent Follow, persisted Chat observations and restart' },
   'test-context-history-core.mjs': { category: 'security', timeoutMs: 180000, note: 'Actual bounded history projection, frame-authorized source paging and settled transcript checkpoints through existing Model and Broker' },
   'test-agent-native-model-control.mjs': { category: 'runtime', timeoutMs: 180000, note: 'Provider-specific advertised native model controls, exact protocol profiles and acknowledged configuration without account generation' },

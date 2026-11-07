@@ -40,6 +40,7 @@ import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-fil
 import { blocksToText } from '../dsh-client.js';
 import { selectDshSessionModel } from '../dsh-model-selection.js';
 import { projectMessageBudget } from '../context/message-budget.js';
+import { fingerprintHistorySource } from '../context/history-synopsis.js';
 import { PRODUCT_IDENTITY_PROMPT } from '../context/product-context.js';
 import { normalizeSkillReferences } from '../context/skill-references.js';
 import { OWNER_ACTOR } from '../capability/types.js';
@@ -69,6 +70,7 @@ const DEFAULT_HISTORY_PAGE_SIZE = 100;
 const MODEL_CATALOG_CACHE_MS = 30_000;
 const MAX_MESSAGES_RETURNED = 200;
 const MAX_MESSAGE_CHARS_RETURNED = 32 * 1024;
+const MAX_PRIVATE_MODEL_HISTORY_BYTES = 1024 * 1024;
 const FOLLOW_RECONNECT_MS = 2000;
 const FOLLOW_MAX_RETRIES = 5;
 
@@ -227,9 +229,10 @@ export function createChatService({
       if (historyStore?.activeTurn?.turnId && historyStore.activeTurn.id) {
         const interrupted = interruptedChatActivity(historyStore.activeTurn, now());
         Object.assign(interrupted, chatConfigurationObservations(historyStore.activeTurn));
+        if (interrupted.modelHistory) interrupted.modelHistory = { ...interrupted.modelHistory, available: false, unavailableReason: 'interrupted-turn' };
         const messages = Array.isArray(historyStore.messages) ? historyStore.messages : [];
         if (!messages.some(message => message.id === interrupted.id)) messages.push(interrupted);
-        writeJsonAtomic(historyFile(record.id), { schemaVersion: SCHEMA_VERSION, messages });
+        writeJsonAtomic(historyFile(record.id), { schemaVersion: SCHEMA_VERSION, ...historyMetadata(historyStore), messages });
         restored.interruptedAt = now();
         invalidated = true;
       }
@@ -395,6 +398,123 @@ export function createChatService({
     return Array.isArray(store?.messages) ? store.messages : [];
   }
 
+  const historyHash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  function boundedSynopsis(value) {
+    return value?.version === 1 && value.representation === 'extractive-context-synopsis'
+      && JSON.stringify(value).length <= 8000 ? structuredClone(value) : null;
+  }
+  function historyMetadata(store) {
+    const synopsis = boundedSynopsis(store?.contextSynopsis);
+    return synopsis ? { contextSynopsis: synopsis, contextSynopsisSourceAvailable: false } : {};
+  }
+  function ownerHistoryBase(record, ownerMessageId) {
+    const messages = readHistory(record.id), ownerIndex = messages.findIndex(row => row.id === ownerMessageId && row.role === 'user');
+    if (ownerIndex < 0) throw chatError('CONTEXT_HISTORY_UNAVAILABLE', 'Original Owner message is unavailable');
+    return { messages, owner: messages[ownerIndex], fingerprint: historyHash(messages.slice(0, ownerIndex + 1)) };
+  }
+  function encodeOwnerContent(content) {
+    let image = 0;
+    return Array.isArray(content) ? content.map(part => part?.type === 'image_url' ? { type: 'owned-image-reference', index: image++ } : structuredClone(part)) : content;
+  }
+  function decodeOwnerContent(record, envelope) {
+    if (!Array.isArray(envelope.ownerContent)) return envelope.ownerContent;
+    const images = attachmentStore.modelParts(record.id, envelope.attachmentRefs ?? [], { detail: envelope.imageDetail ?? 'low' }).filter(part => part.type === 'image_url');
+    return envelope.ownerContent.map(part => part.type === 'owned-image-reference' ? images[part.index] : structuredClone(part));
+  }
+  function reconstructModelHistory(record, turn, envelope) {
+    if (envelope?.version !== 1 || typeof envelope.ownerMessageId !== 'string'
+      || !(typeof envelope.ownerContent === 'string' || Array.isArray(envelope.ownerContent))
+      || !Array.isArray(envelope.headers) || !Array.isArray(envelope.protocol)
+      || !/^[a-f0-9]{64}$/.test(envelope.baseFingerprint ?? '') || !/^[a-f0-9]{64}$/.test(envelope.ownerContentFingerprint ?? '')
+      || Buffer.byteLength(JSON.stringify(envelope)) > MAX_PRIVATE_MODEL_HISTORY_BYTES) throw chatError('CONTEXT_HISTORY_UNAVAILABLE', 'The bounded original private source is unavailable');
+    const base = ownerHistoryBase(record, envelope.ownerMessageId);
+    if (base.fingerprint !== envelope.baseFingerprint) throw chatError('CONTEXT_SYNOPSIS_STALE', 'Original Chat history changed; rebuild from retained originals');
+    const content = decodeOwnerContent(record, envelope);
+    if (historyHash(content) !== envelope.ownerContentFingerprint) throw chatError('CONTEXT_SYNOPSIS_STALE', 'Original Owner content or attachment changed');
+    const raw = buildModelMessages(record.id, '', null, envelope.ownerMessageId, { raw: true });
+    // The caller's current prompt is restored exactly below; only the existing
+    // prior public/private history is reused, never a cached full transcript.
+    return [...structuredClone(envelope.headers), ...raw.slice(1, -1), { role: 'user', content }, ...structuredClone(envelope.protocol)];
+  }
+  function modelHistoryOwner(request, checkpoint = false) {
+    const binding = checkpoint ? request?.binding : { actorKind: request?.actorKind, actorId: request?.actorId, sessionId: request?.sessionId,
+      taskId: request?.scope?.taskId ?? null, workspaceId: request?.scope?.workspaceId ?? null };
+    const record = sessions.get(binding?.sessionId), state = record && runtime.get(record.id), turn = state?.turn;
+    if (!record || record.archived || !turn || state.modelTurn?.kind !== 'model' || state.modelTurn.controller.signal.aborted
+      || binding.actorKind !== OWNER_ACTOR.kind || binding.actorId !== OWNER_ACTOR.id || request.targetKind !== 'chat'
+      || request.turnId !== turn.id || (request.runId ?? null) !== null || binding.taskId !== (record.taskId ?? null)
+      || binding.workspaceId !== (record.config.workspaceId ?? null) || record.configurationRevision !== turn.configurationRevision
+      || record.pendingConfiguration || ['error', 'cancelled', 'done', 'idle-done'].includes(turn.state)) {
+      throw chatError('CONTEXT_HISTORY_DENIED', 'Current Owner Chat turn, configuration and source binding are required');
+    }
+    const finish = catalogRevision => {
+      // The existing Core Task owner supplies a synchronous current snapshot.
+      // Read it after any metadata await, without yielding before validation.
+      const task = record.taskId && typeof resolveTask === 'function' ? resolveTask(record.taskId) : null;
+      if (task && typeof task.then === 'function') throw chatError('CONTEXT_HISTORY_UNAVAILABLE', 'History requires the current synchronous Core Task snapshot');
+      if (record.taskId && (!task || task.id !== record.taskId || (task.workspaceId ?? null) !== (record.config.workspaceId ?? null))) throw chatError('CONTEXT_HISTORY_DENIED', 'Current Task and Workspace binding changed');
+      if (runtime.get(record.id) !== state || state.turn !== turn || record.archived || record.configurationRevision !== turn.configurationRevision
+        || state.modelTurn?.kind !== 'model' || state.modelTurn.controller.signal.aborted || record.pendingConfiguration
+        || ['error', 'cancelled', 'cancelling', 'done', 'idle-done'].includes(turn.state)
+        || binding.taskId !== (record.taskId ?? null) || binding.workspaceId !== (record.config.workspaceId ?? null)) throw chatError('CONTEXT_HISTORY_DENIED', 'Chat source owner changed during validation');
+      const revision = historyHash({ chatId: record.id, turnId: turn.id, ownerMessageId: turn.ownerMessageId,
+        configurationRevision: record.configurationRevision, config: record.config, taskId: record.taskId ?? null,
+        authorizationRevision: task?.authorizationRevision ?? task?.rev ?? null, catalogRevision });
+      return { record, state, turn, task, binding, revision };
+    };
+    const metadata = typeof modelCatalogRevision === 'function' ? modelCatalogRevision() : null;
+    return metadata && typeof metadata.then === 'function' ? Promise.resolve(metadata).then(finish) : finish(metadata);
+  }
+  async function resolveModelHistoryContext(request = {}) {
+    const owner = await modelHistoryOwner(request);
+    const envelope = owner.turn.modelHistory;
+    if (!envelope || envelope.available !== true) return { authorized: false };
+    reconstructModelHistory(owner.record, owner.turn, envelope);
+    return { authorized: true, revision: owner.revision, task: owner.task,
+      resolveMessages: () => {
+        const read = current => {
+          if (current.record !== owner.record || current.state !== owner.state || current.turn !== owner.turn
+            || current.revision !== owner.revision) throw chatError('CONTEXT_SYNOPSIS_STALE', 'Current history source authority changed');
+          const store = loadChatFile(historyFile(owner.record.id), null);
+          const saved = store?.activeTurn?.modelHistory;
+          if (store?.activeTurn?.turnId !== owner.turn.id || !saved || saved.available !== true
+            || saved.sourceFingerprint !== owner.turn.modelHistory?.sourceFingerprint) throw chatError('CONTEXT_HISTORY_UNAVAILABLE', 'The original current-turn checkpoint is unavailable');
+          return reconstructModelHistory(owner.record, owner.turn, saved);
+        };
+        const current = modelHistoryOwner(request);
+        return current && typeof current.then === 'function' ? Promise.resolve(current).then(read) : read(current);
+      } };
+  }
+  async function checkpointModelHistory(payload = {}) {
+    if (!['settled-transcript', 'request-projection', 'tool-calls'].includes(payload.phase) || !Array.isArray(payload.messages)) throw chatError('CONTEXT_HISTORY_DENIED', 'Trusted coordinator checkpoint required');
+    const owner = await modelHistoryOwner(payload, true), { record, turn, binding } = owner;
+    if (!turn.modelHistory) throw chatError('CONTEXT_HISTORY_UNAVAILABLE', 'Original model source was not initialized');
+    const prior = turn.modelHistory;
+    if (ownerHistoryBase(record, prior.ownerMessageId).fingerprint !== prior.baseFingerprint) throw chatError('CONTEXT_SYNOPSIS_STALE', 'Original Chat history changed during the turn');
+    if (payload.phase !== 'settled-transcript' && payload.revision !== owner.revision) throw chatError('CONTEXT_SYNOPSIS_STALE', 'Chat source authorization/configuration changed');
+    const sourceFingerprint = fingerprintHistorySource({ messages: payload.messages, sourceBinding: binding });
+    if (payload.sourceFingerprint !== sourceFingerprint) throw chatError('CONTEXT_SYNOPSIS_STALE', 'Coordinator checkpoint fingerprint does not match original messages');
+    const ownerIndex = payload.messages.findLastIndex(row => row.role === 'user');
+    let headersEnd = payload.messages.findIndex(row => row.role !== 'system'); if (headersEnd < 0) headersEnd = payload.messages.length;
+    const original = reconstructModelHistory(record, turn, prior), originalOwnerIndex = original.findLastIndex(row => row.role === 'user');
+    if (ownerIndex < headersEnd || historyHash(payload.messages[ownerIndex].content) !== prior.ownerContentFingerprint
+      || historyHash(payload.messages.slice(headersEnd, ownerIndex)) !== historyHash(original.slice(prior.headers.length, originalOwnerIndex))) throw chatError('CONTEXT_SYNOPSIS_STALE', 'Checkpoint cannot replace original previous history or Owner instruction');
+    const protocol = payload.messages.slice(ownerIndex + 1);
+    if (historyHash(protocol.slice(0, prior.protocol.length)) !== historyHash(prior.protocol)) throw chatError('CONTEXT_HISTORY_UNAVAILABLE', 'Changed or sanitized continuation cannot replace original protocol history');
+    const synopsis = payload.phase === 'request-projection' ? boundedSynopsis(payload.synopsis) : prior.synopsis ?? null;
+    if (synopsis && payload.phase === 'request-projection' && synopsis.sourceFingerprint !== sourceFingerprint) throw chatError('CONTEXT_SYNOPSIS_STALE', 'Synopsis is not bound to current originals');
+    const next = { ...prior, binding: structuredClone(binding), revision: owner.revision, headers: structuredClone(payload.messages.slice(0, headersEnd)),
+      protocol: structuredClone(protocol), synopsis, sourceFingerprint, available: true };
+    if (Buffer.byteLength(JSON.stringify(next)) > MAX_PRIVATE_MODEL_HISTORY_BYTES) throw chatError('CONTEXT_HISTORY_LIMIT', 'Current private transcript exceeds its bounded envelope; original history and execution receipts are retained');
+    const store = loadChatFile(historyFile(record.id), null);
+    if (store?.activeTurn && store.activeTurn.turnId !== turn.id) throw chatError('CONTEXT_HISTORY_DENIED', 'Another turn owns the active Chat checkpoint');
+    turn.modelHistory = next;
+    turn.modelMessages = protocol.filter(row => ['assistant', 'tool'].includes(row.role)).map(row => structuredClone(row));
+    try { retainActivity(record, turn, { configurationOnly: true }); }
+    catch (error) { turn.modelHistory = { ...next, available: false, unavailableReason: 'checkpoint-write-failed' }; throw error; }
+    return { saved: true };
+  }
+
   function attachmentSessionDirectory(id) {
     const key = crypto.createHash('sha256').update(String(id)).digest('hex');
     return path.join(dir, 'attachment-payloads', key);
@@ -491,7 +611,7 @@ export function createChatService({
     const next = { ...message, sourceWorkspaceId: sessions.get(id)?.config?.workspaceId ?? null };
     const existing = messages.findIndex(row => row.id === message.id);
     if (existing >= 0) messages[existing] = next; else messages.push(next);
-    writeJsonAtomic(historyFile(id), { schemaVersion: SCHEMA_VERSION, messages,
+    writeJsonAtomic(historyFile(id), { schemaVersion: SCHEMA_VERSION, ...historyMetadata(store), messages,
       ...(store?.activeTurn && store.activeTurn.turnId !== message.turnId ? { activeTurn: store.activeTurn } : {}) });
     return messages.length;
   }
@@ -508,13 +628,15 @@ export function createChatService({
       sessionId: record.dshSessionId, ...details });
     turn.activityMessageId ??= `activity-${turn.id}`;
     const store = loadChatFile(historyFile(record.id), null);
-    writeJsonAtomic(historyFile(record.id), { schemaVersion: SCHEMA_VERSION,
+    writeJsonAtomic(historyFile(record.id), { schemaVersion: SCHEMA_VERSION, ...historyMetadata(store),
+      ...(turn.modelHistory?.synopsis ? { contextSynopsis: turn.modelHistory.synopsis } : {}),
       messages: Array.isArray(store?.messages) ? store.messages : [],
       activeTurn: { id: turn.activityMessageId, role: 'assistant', text: (turn.displayText ?? '').slice(0, MAX_MESSAGE_CHARS_RETURNED),
         ...(turn.displayText?.length > MAX_MESSAGE_CHARS_RETURNED ? { textTruncated: true } : {}),
         at: turn.activityTimeline?.entries?.[0]?.at ?? now(),
         turnId: turn.id, requestId: turn.requestId ?? null, sourceWorkspaceId: record.config.workspaceId ?? null,
         configurationRevision: turn.configurationRevision ?? record.configurationRevision,
+        ...(turn.modelHistory ? { modelHistory: turn.modelHistory } : store?.activeTurn?.turnId === turn.id && store.activeTurn.modelHistory ? { modelHistory: store.activeTurn.modelHistory } : {}),
         ...chatConfigurationObservations(turn),
         toolActivity: (turn.toolActivity ?? []).map(projectChatToolActivity).filter(Boolean),
         ...(turn.agentActivity ? { agentActivity: { providerId: turn.agentActivity.providerId, label: turn.agentActivity.label, status: turn.agentActivity.status } } : {}),
@@ -696,7 +818,7 @@ export function createChatService({
       if (endIndex < 0) throw chatError('INVALID_CURSOR', '历史消息游标不存在');
       startIndex = Math.max(0, endIndex - count);
     }
-    const page = all.slice(startIndex, endIndex).map(({ modelContinuation, modelMessages, configurationObservation, configurationObservations, ...message }) => ({
+    const page = all.slice(startIndex, endIndex).map(({ modelContinuation, modelMessages, modelHistory, contextSynopsis, configurationObservation, configurationObservations, ...message }) => ({
       ...message,
       ...chatConfigurationObservations({ configurationObservation, configurationObservations }),
       text: typeof message.text === 'string' && message.text.length > MAX_MESSAGE_CHARS_RETURNED
@@ -1670,7 +1792,8 @@ export function createChatService({
         ...(turn.context ? {context:projectChatContext(turn.context)} : {}),
         accountingSessionId: turn.accountingSessionId ?? record.id,
         ...(turn.state === 'done' && turn.modelContinuation ? { modelContinuation: turn.modelContinuation } : {}),
-        ...(turn.state === 'done' && turn.modelMessages?.length ? { modelMessages: turn.modelMessages } : {}),
+        ...(turn.modelMessages?.length ? { modelMessages: turn.modelMessages } : {}),
+        ...(turn.state !== 'done' && turn.modelHistory ? { modelHistory: { ...turn.modelHistory, available: false, unavailableReason: turn.modelHistory.unavailableReason ?? 'turn-interrupted' } } : {}),
         toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
         ...activityProjection(turn),
         ...(turn.agentActivity ? { agentActivity: { ...turn.agentActivity } } : {}),
@@ -1920,7 +2043,7 @@ export function createChatService({
    * 半截回复不进入上下文；不含任何凭据材料。send/retry 前刚落盘（或待重发）的
    * 尾部 user 消息就是当前 prompt，需去重，避免同一消息在载荷里出现两次。
    */
-  function buildModelMessages(recordId, promptText, productContext = null, omitHistoryMessageId = null) {
+  function buildModelMessages(recordId, promptText, productContext = null, omitHistoryMessageId = null, { raw = false } = {}) {
     const record=sessionOrThrow(recordId);
     const imageDetail=modelRuntime?.imageInputCapabilities?.(record.config.modelProvider,modelForRuntime(record))?.preferredDetail??'low';
     const history = readHistory(recordId);
@@ -1954,7 +2077,7 @@ export function createChatService({
     const current=history.find(m=>m.id===omitHistoryMessageId)??history.findLast(m=>m.role==='user');
     const parts=current?.attachmentRefs?.length?attachmentStore.modelParts(recordId,current.attachmentRefs.map(r=>r.ref),{detail:imageDetail}):[];
     messages.push({ role: 'user', content: parts.length?[{type:'text',text:promptText},...parts]:promptText });
-    return projectMessageBudget(messages).messages;
+    return raw ? messages : projectMessageBudget(messages).messages;
   }
 
   function retainModelProtocol(turn, result) {
@@ -2029,8 +2152,21 @@ export function createChatService({
     const done = (async () => {
       try {
         let productContext = await buildTurnContext(record, routing, resolved, model);
-        const messages = buildModelMessages(record.id, promptText, productContext.context, retryMessageId);
         const supportsTools = modelRuntime.supportsToolCalling?.(resolved.id, model) === true;
+        const ownsHistory = supportsTools && typeof toolExecutionCoordinator?.readHistory === 'function';
+        const messages = buildModelMessages(record.id, promptText, productContext.context, retryMessageId, { raw: ownsHistory });
+        if (ownsHistory && state.turn === originatingTurn) {
+          const ownerMessageId = originatingTurn.ownerMessageId ?? readHistory(record.id).findLast(row => row.role === 'user')?.id;
+          const base = ownerHistoryBase(record, ownerMessageId);
+          originatingTurn.ownerMessageId = ownerMessageId;
+          const ownerIndex = messages.findLastIndex(row => row.role === 'user');
+          let headersEnd = messages.findIndex(row => row.role !== 'system'); if (headersEnd < 0) headersEnd = messages.length;
+          originatingTurn.modelHistory = { version: 1, ownerMessageId, baseFingerprint: base.fingerprint, available: true,
+            ownerContent: encodeOwnerContent(messages[ownerIndex].content), ownerContentFingerprint: historyHash(messages[ownerIndex].content),
+            attachmentRefs: (base.owner.attachmentRefs ?? []).map(row => row.ref),
+            imageDetail: messages[ownerIndex].content?.find?.(part => part.type === 'image_url')?.image_url?.detail ?? 'low',
+            headers: structuredClone(messages.slice(0, headersEnd)), protocol: [], synopsis: null };
+        }
         if (supportsTools && toolExecutionCoordinator?.run) {
           const turnId = state.turn?.id ?? crypto.randomUUID();
           const result = await toolExecutionCoordinator.run({
@@ -3045,6 +3181,7 @@ export function createChatService({
   };
 
   return {
+    resolveModelHistoryContext, checkpointModelHistory,
     ownerSourceForTaskRun({ chatId, taskId, workspaceId, provider, sessionId, runId } = {}) {
       const record = sessions.get(chatId);
       if (!record || record.archived || record.taskId !== taskId || record.config.workspaceId !== workspaceId

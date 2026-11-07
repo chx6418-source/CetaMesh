@@ -346,9 +346,19 @@ export function createToolExecutionCoordinator({
     return { ...resolved, actor, binding, descriptor };
   }
 
+  async function acquireHistorySource(state, context, purpose, signal) {
+    // Read only after the caller has checked the expected authority revision.
+    // This snapshot belongs to one invocation, never stored or reused as a grant.
+    let sourceMessages = state.messages, sourceError = null;
+    try { if (typeof context.resolveMessages === 'function') sourceMessages = await context.resolveMessages(); }
+    catch (error) { if (purpose !== 'projection') throw error; sourceMessages = null; sourceError = error; }
+    if (signal?.aborted) fail('INVOKE_CANCELLED', 'History access cancelled');
+    return { ...context, sourceMessages, sourceError };
+  }
+
   function sourcePage(state, context, input) {
     return readHistorySource({ ...input, sourceBinding: context.binding,
-      resolveMessages: () => typeof context.resolveMessages === 'function' ? context.resolveMessages() : state.messages,
+      resolveMessages: () => { if (context.sourceError) throw context.sourceError; return context.sourceMessages; },
       authorizeSource: () => context.authorized === true });
   }
 
@@ -370,11 +380,11 @@ export function createToolExecutionCoordinator({
     // Leave room for JSON escaping and source metadata in the existing bounded
     // tool-result envelope. maxChars is an upper bound, not an exact page size.
     const input = { ...request.input, maxChars: Math.min(request.input.maxChars ?? 4000, 4000) };
-    const page = sourcePage(accepted.state, current, input);
+    const page = sourcePage(accepted.state, await acquireHistorySource(accepted.state, current, 'read', accepted.signal), input);
     const final = await historyContext(accepted.state, 'read', accepted.signal);
     if (!final || final.revision !== current.revision || final.descriptor !== current.descriptor
       || JSON.stringify(final.actor) !== JSON.stringify(current.actor)) fail('CONTEXT_SYNOPSIS_STALE', 'History authorization changed during retrieval');
-    const verified = sourcePage(accepted.state, final, input);
+    const verified = sourcePage(accepted.state, await acquireHistorySource(accepted.state, final, 'read', accepted.signal), input);
     if (verified.sourceFingerprint !== page.sourceFingerprint || verified.publicSha256 !== page.publicSha256 || verified.content !== page.content) fail('CONTEXT_SYNOPSIS_STALE', 'History source changed during retrieval');
     return verified;
   }
@@ -1174,8 +1184,9 @@ export function createToolExecutionCoordinator({
       if (!resumingToolBatch) {
         await messagesCheckpoint(state, 'settled-transcript');
         const history = await historyContext(state, 'projection', signal);
+        const historySource = history ? await acquireHistorySource(state, history, 'projection', signal) : null;
         const projectionOptions = { evidenceStore, binding: evidenceBinding(state), canRetrieveEvidence: state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false),
-          ...(history ? { synopsis: true, task: history.task ?? null, sourceBinding: history.binding, sourceResolver: input => sourcePage(state, history, input) } : {}) };
+          ...(history ? { synopsis: true, task: history.task ?? null, sourceBinding: history.binding, sourceResolver: input => sourcePage(state, historySource, input) } : {}) };
         // Projection authority is independent of permission to dispatch another
         // tool. Bind source refs only to actual retained originals; the final
         // no-tool instruction is request-only and has no owner history row.

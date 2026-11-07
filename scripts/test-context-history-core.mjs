@@ -2,7 +2,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createCetaMeshServices } from '../src/app/service-container.js';
+import { createWorkspaceService } from '../src/workspace/service.js';
+import { createTaskService } from '../src/task/service.js';
+import { createCapabilityService } from '../src/capability/service.js';
+import { createModelProviderRegistry, createModelRuntimeService } from '../src/model/index.js';
+import { createProviderSecrets } from '../src/providers/secrets.js';
 import { createToolExecutionCoordinator } from '../src/model/tool-execution.js';
 import { OWNER_ACTOR } from '../src/capability/types.js';
 import { readJsonFile, writeJsonAtomic } from '../src/storage/json-file.js';
@@ -11,7 +15,15 @@ const base = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cetam
 const project = path.join(base, 'project'); fs.mkdirSync(project);
 fs.writeFileSync(path.join(project, 'proof.txt'), 'REAL-CORE-FILE-RECEIPT');
 const stateDir = path.join(base, 'state');
-const services = createCetaMeshServices({ stateDir, dataRoot: path.join(base, 'data'), resourceRoot: base, sourceRoot: base });
+// Compose the real Core owners around this explicit test source. The product
+// composition binds its own reader once; this fixture must not replace it.
+const workspaceService = createWorkspaceService({ stateDir });
+const taskService = createTaskService({ stateDir, resolveWorkspace: id => workspaceService.describeWorkspace(id) });
+const capabilityService = createCapabilityService({ stateDir, workspaceService, taskRuntime: taskService.runtime });
+const modelRegistry = createModelProviderRegistry(), providerSecrets = createProviderSecrets({ root: path.join(base, 'data') });
+const modelRuntime = createModelRuntimeService({ registry: modelRegistry, secrets: providerSecrets });
+const services = { workspaceService, taskService, capabilityService, modelRegistry, providerSecrets, modelRuntime,
+  close: () => capabilityService.close() };
 const checkpoints = [], requests = [], requestControls = [];
 let coordinator, historyRevision = 1, readCalls = 0, mode = 'positive', requestCycle = 0, readResolutions = 0, readSourceAccesses = 0;
 let failCheckpoint = false;
@@ -20,10 +32,11 @@ try {
   const workspace = (await services.workspaceService.execute({ method: 'workspace.create', params: { name: 'History source fixture', root: project } })).workspace;
   const task = services.taskService.runtime.create({ goal: 'Retrieve retained history, then read the actual owned fixture.', workspaceId: workspace.id });
   const broker = services.capabilityService.broker;
-  broker.register({ id: 'context.history.read', permission: 'context.evidence.read', provider: 'context', risk: 'low', readOnly: true, effect: 'read-only',
-    description: 'Read only the current accepted Core history source in bounded pages.',
-    inputSchema: { type: 'object', properties: { sourceId: { type: 'string' }, offset: { type: 'integer', minimum: 0 }, maxChars: { type: 'integer', minimum: 1, maximum: 8000 } }, required: ['sourceId'], additionalProperties: false },
-    execute: request => { readCalls++; return coordinator.readHistory(request); } });
+  const historyDescriptor = broker.list().find(row => row.id === 'context.history.read');
+  assert.ok(historyDescriptor, 'the ordinary Core owns the retained-source descriptor; fixture registration cannot replace product wiring');
+  assert.equal(historyDescriptor.provider, 'context'); assert.equal(historyDescriptor.readOnly, true);
+  assert.equal(historyDescriptor.effect, 'read-only'); assert.equal(historyDescriptor.requiresApproval, false);
+  services.capabilityService.setHistorySourceReader(request => { readCalls++; return coordinator.readHistory(request); });
   services.modelRegistry.register({ id: 'history-local', label: 'Deterministic local history model leaf', defaultModel: 'fixture', supportsTools: true,
     contextCapabilities: () => ({ status: 'declared', contextWindowTokens: 48000, maxOutputTokens: 2048, defaultOutputTokens: 1000, source: 'owned-fixture', version: '1' }),
     health: async () => ({ available: true }), listModels: async () => [{ id: 'fixture' }], chat: async () => { throw Error('Unexpected non-streaming request'); },

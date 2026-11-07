@@ -66,7 +66,30 @@ instruction is appended independently and included in the complete budget; it
 does not become an invented retained-source or checkpoint message. Tool limits,
 permission checks and unknown-effect protection are unchanged.
 
-The registered Core fixture supplies an owned source and atomic writer through
-these interfaces. Product Chat/Managed owners must wire their actual private
-history and existing persistence before advertising retained-source retrieval;
-the presence of these constructor interfaces alone does not enable it globally.
+Ordinary Core Chat wires its actual existing history owner and atomic writer
+through these interfaces. The current-turn envelope retains only the Owner
+content or attachment references, headers, protocol tail, source fingerprints
+and optional synopsis; previous history is reconstructed from its existing rows,
+not duplicated into each checkpoint. Final, failed and interrupted writers retain
+the private protocol and mark unavailable sources explicitly. Public Chat history,
+status and events exclude private protocol bodies and continuation metadata.
+
+The owner getter may return messages directly or a Promise. Each invocation
+rechecks the actual current Owner/Chat/Turn/Task/Workspace/configuration/catalog
+identity and compares its original authorization revision. Catalog metadata may
+be asynchronous; the current Core Task snapshot is read synchronously after that
+wait. An asynchronous replacement Task resolver without a current snapshot
+contract is unavailable for this optional source feature. The coordinator awaits
+each acquisition and supplies its result only to that invocation's pure budget
+or page helper. It does not cache source authority, persist a second transcript
+or turn an unavailable optional projection into short-request admission.
+
+`context.history.read` is a low-risk read-only Core descriptor under the existing
+context permission. Its one-time source reader binding cannot be replaced. Normal
+parent Task grants include it; read-only child grants retain their original two
+file tools. Exact admitted Broker frames remain required even for the Owner.
+
+Managed retained raw-source persistence and other Task/Continuity synopsis
+consumers require their own existing owner integration before advertising this
+retrieval. Cold private sources remain unavailable; loading Chat history never
+replays a model request, tool operation or uncertain interrupted result.
