@@ -115,10 +115,11 @@ omissions, shadowing and bounded body pages; replacing a stale version requires
 an explicit new selection. These UI selections do not change Task grants,
 approval mode or execution identity.
 
-Missing optional source configuration remains compatible with the current
-reader. A historical strict Settings reader may reject newly persisted fields.
-Loading an old file is not evidence of safe downgrade writes; release validation
-must verify the historical-reader and rollback path separately.
+Inactive source configuration is omitted from disk for historical strict v1
+readers. Before the first enabled source write, Settings retains the prior
+configuration as described in [Settings compatibility](SETTINGS_COMPATIBILITY.md).
+Enabled new fields require the upgraded reader; an isolated historical-reader
+roundtrip is distinct from installed product and release validation.
 
 Update, rollback, disable/re-enable and restart invalidate earlier enabled content
 generations. Catalog revocations add a persisted denial to the existing Extension

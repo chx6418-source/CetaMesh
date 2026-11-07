@@ -19,6 +19,7 @@ export function createSettingsStore({ stateDir, now = () => Date.now() } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createSettingsStore 需要 stateDir');
   const dir = path.join(stateDir, 'settings');
   const file = path.join(dir, 'settings.json');
+  const baselineFile = path.join(dir, 'settings.pre-features-v1.json');
 
   let values = defaultSettings();
   let revision = 0;
@@ -26,9 +27,60 @@ export function createSettingsStore({ stateDir, now = () => Date.now() } = {}) {
   let lastError = null;
   let recoveryRequired = false;
   let backupPath = null;
+  let persisted = null;
   const changeListeners = new Set();
   function notifyChange() {
     for (const listener of changeListeners) listener(JSON.parse(JSON.stringify(values)));
+  }
+
+  // Optional fields are supplied by the current reader. Persisting their inactive
+  // defaults would make an ordinary theme change unreadable by earlier v1 readers.
+  function serializedSettings(settings) {
+    const result = JSON.parse(JSON.stringify(settings));
+    if (result.models.connections === null) delete result.models.connections;
+    if (result.models.modelPreferences.length === 0) delete result.models.modelPreferences;
+    if (result.extensions.skillSources.length === 0) delete result.extensions.skillSources;
+    return result;
+  }
+
+  function featureKinds(settings) {
+    const kinds = [];
+    if (settings?.models?.connections != null) kinds.push('model-connections');
+    if (settings?.models?.modelPreferences?.length) kinds.push('model-preferences');
+    if (settings?.extensions?.skillSources?.length) kinds.push('skill-sources');
+    return kinds;
+  }
+
+  function readBaseline() {
+    try {
+      const stat = fs.lstatSync(baselineFile);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 512 * 1024) throw new Error('配置快照不是有效的有界普通文件');
+      const raw = readJsonFile(baselineFile, { maxBytes: 512 * 1024 });
+      if (raw.schemaVersion !== SETTINGS_SCHEMA_VERSION || !Number.isSafeInteger(raw.revision) || raw.revision < 1) throw new Error('配置快照版本无效');
+      normalizeSettings(raw.settings, { strict: true });
+      if (featureKinds(raw.settings).length || ['connections', 'modelPreferences'].some(key => Object.hasOwn(raw.settings.models, key)) || Object.hasOwn(raw.settings.extensions, 'skillSources')) throw new Error('配置快照需要新版本读取器');
+      return { path: baselineFile, available: true, sha256: crypto.createHash('sha256').update(fs.readFileSync(baselineFile)).digest('hex'), revision: raw.revision };
+    } catch (error) {
+      return { path: baselineFile, available: false, sha256: null, revision: null, reason: error.code === 'ENOENT' ? 'missing' : 'unreadable' };
+    }
+  }
+
+  function preservePreFeatureConfiguration() {
+    const existing = readBaseline();
+    if (existing.available) return;
+    if (existing.reason !== 'missing') throw settingsError('SETTINGS_COMPATIBILITY_UNAVAILABLE', '无法保留启用新功能前的配置，请检查设置目录中的配置快照');
+    const previous = persisted ?? { schemaVersion: SETTINGS_SCHEMA_VERSION, revision: 1, updatedAt: now(), settings: defaultSettings() };
+    const candidate = path.join(dir, `settings.pre-features.${process.pid}.${crypto.randomBytes(8).toString('hex')}.json`);
+    try {
+      writeJsonAtomic(candidate, { ...previous, settings: serializedSettings(normalizeSettings(previous.settings, { strict: true })) });
+      try { fs.copyFileSync(candidate, baselineFile, fs.constants.COPYFILE_EXCL); }
+      catch (error) { if (error.code !== 'EEXIST') throw error; }
+      if (!readBaseline().available) throw new Error('配置快照未能完整保存');
+    } catch (error) {
+      throw settingsError('SETTINGS_COMPATIBILITY_UNAVAILABLE', '无法保留启用新功能前的配置：' + error.message);
+    } finally {
+      try { fs.unlinkSync(candidate); } catch { /* An owned leftover never replaces the active settings or the first snapshot. */ }
+    }
   }
 
   function backupCorruptSource() {
@@ -67,6 +119,7 @@ export function createSettingsStore({ stateDir, now = () => Date.now() } = {}) {
         throw settingsError('SETTINGS_INVALID', '设置文件版本或修订号无效');
       }
       values = normalizeSettings(raw.settings, { strict: true });
+      persisted = raw;
       revision = Number.isSafeInteger(raw.revision) && raw.revision > 0 ? raw.revision : 0;
       loaded = true;
     } catch (error) {
@@ -81,12 +134,15 @@ export function createSettingsStore({ stateDir, now = () => Date.now() } = {}) {
 
   function persist() {
     const nextRevision = revision + 1;
-    writeJsonAtomic(file, {
+    if (featureKinds(values).length && !featureKinds(persisted?.settings).length) preservePreFeatureConfiguration();
+    const next = {
       schemaVersion: SETTINGS_SCHEMA_VERSION,
       revision: nextRevision,
       updatedAt: now(),
-      settings: values
-    });
+      settings: serializedSettings(values)
+    };
+    writeJsonAtomic(file, next);
+    persisted = next;
     revision = nextRevision;
   }
 
@@ -94,6 +150,11 @@ export function createSettingsStore({ stateDir, now = () => Date.now() } = {}) {
     dir,
     file,
     load,
+    compatibility() {
+      load();
+      const features = featureKinds(values);
+      return { requiresUpgradeReader: features.length > 0, features, baseline: readBaseline() };
+    },
     onChange(listener) {
       if (typeof listener !== 'function') throw settingsError('SETTINGS_INVALID', 'change listener must be a function');
       changeListeners.add(listener);
