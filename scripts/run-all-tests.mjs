@@ -235,6 +235,7 @@ const REGISTRY = {
   'test-dsh-sdk-transport.mjs': { category: 'integration', timeoutMs: 120000 },
   'test-dsh-staging-approval.mjs': { category: 'security' },
   'test-dsh-sdk-composition.mjs': { category: 'integration' },
+  'test-dsh-sdk-native-loop.mjs': { category: 'environment', requires: ['dsh-sdk-synthetic'], timeoutMs: 360000 },
   'test-model-continuation.mjs': { category: 'runtime' },
   'test-harbor-agent-setup.mjs': { category: 'runtime' },
   'test-handoff-context-working-memory.mjs': { category: 'runtime', timeoutMs: 120000, note: 'Agent Handoff context and task-scoped working Memory regressions' },
@@ -468,6 +469,7 @@ async function probeAvailability() {
     network: process.env.WHALEBRIDGE_TEST_NETWORK === '1',
     'reference-browser-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_REFERENCE_BROWSER === '1',
     'dsh-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_REAL_DSH === '1',
+    'dsh-sdk-synthetic': Boolean(process.env.CETAMESH_TEST_DSH_RUNTIME && process.env.CETAMESH_TEST_DSH_SUPERVISOR),
     'ui-motion-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_UI_MOTION === '1',
     gateway: gatewayConfigPresent && !!gatewayEndpoint && await probeTcp(Number(gatewayEndpoint.port)||(gatewayEndpoint.protocol==='https:'?443:80),gatewayEndpoint.hostname),
     // A live TCP listener may be the user’s real desktop bridge; this suite mutates roles/allowlists and sends a test QQ message.

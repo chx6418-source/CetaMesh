@@ -13,7 +13,7 @@ const owner = { kind: 'owner', id: 'desktop' };
 const tick = () => new Promise(resolve => setTimeout(resolve, 35));
 const fixtures = [];
 let requestNumber = 0;
-async function fixture(name) {
+async function fixture(name, { providerId = 'private-native-fixture', durable = true } = {}) {
   const stateDir = path.join(root, name);
   const state = { clock: 1000, handoff: false, workspace: { id: 'workspace', root: root, name: 'Fixture' },
     task: { id: 'task', workspaceId: 'workspace', status: 'queued', rev: 1, authorizationRevision: 1, currentAgent: null },
@@ -21,11 +21,15 @@ async function fixture(name) {
       nativeApprovalSupported: true, nativePermissionPolicyVerified: true, allToolsRequireApproval: true,
       nativeSandboxMode: 'none', nativeApprovalPolicy: 'all-tools-prompt', runtimeIdentity: 'fixture-v1' },
     sessionState: 'waiting', nativeRuns: 0 };
-  const base = defineAgentProvider({ id: 'private-native-fixture', label: 'Private native fixture',
+  const base = defineAgentProvider({ id: providerId, label: 'Private native fixture',
     capabilityExtras: { workspaceBoundary: 'native-staged' }, methods: {
       async createSession() { return { sessionId: 'session' }; },
-      async status({ sessionId }) { return { provider: base.id, sessionId, taskId: 'task', workspaceId: 'workspace',
-        state: state.sessionState, running: state.sessionState === 'waiting' || state.sessionState === 'running' }; }
+      async status({ sessionId }) {
+        const status = { provider: base.id, sessionId, taskId: 'task', workspaceId: 'workspace',
+          state: state.sessionState, running: state.sessionState === 'waiting' || state.sessionState === 'running' };
+        await state.onStatus?.();
+        return status;
+      }
     } });
   const provider = { ...base, capabilities: () => ({ ...base.capabilities(), security: state.security }) };
   const agentBroker = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [provider] }),
@@ -35,7 +39,7 @@ async function fixture(name) {
   agentBroker.authorizeExecution(provider.id, 'workspace', scope.fingerprint);
   await agentBroker.createSession(provider.id, { taskId: 'task', workspaceId: 'workspace' });
   state.task = { ...state.task, status: 'running', currentAgent: { provider: provider.id, sessionId: 'session' } };
-  const service = createCapabilityService({ stateDir, agentBroker, now: () => state.clock,
+  const service = createCapabilityService({ stateDir: durable ? stateDir : undefined, agentBroker, now: () => state.clock,
     taskRuntime: { get: ({ id }) => ({ task: state.task?.id === id ? state.task : null }) },
     workspaceService: { describeWorkspace: id => state.workspace?.id === id ? state.workspace : null } });
   service.setTaskHandoffGuard(() => state.handoff);
@@ -47,7 +51,9 @@ async function fixture(name) {
           locations: [{ path: 'package.json' }], rawInput: { command: 'type package.json' } },
         options: [{ optionId: 'allow', kind: 'allow_once' }, { optionId: 'reject', kind: 'reject_once' }], ...extra };
       input.fingerprint = permissionFingerprint({ provider: input.provider, sessionId: input.sessionId,
-        workspaceId: input.workspaceId, taskId: input.taskId, toolCall: input.target, options: input.options });
+        workspaceId: input.workspaceId, taskId: input.taskId, toolCall: input.target, options: input.options,
+        ...(Object.hasOwn(input, 'runId') ? { runId: input.runId, phase: input.phase } : {}),
+        ...(Object.hasOwn(input, 'trackEffect') ? { trackEffect: input.trackEffect } : {}) });
       return input;
     },
     request(input = this.input(), options) {
@@ -205,6 +211,184 @@ try {
   assert.ok(secretRow.request.reason.length <= 1000);
   assert.match(secretRow.request.input.nativeDetails, /package\.json/);
   await redacted.decide(secretRow.id, false); await redactionPromise;
+
+  const runBound = await fixture('run-bound');
+  runBound.state.task.executionObservation = { provider: runBound.provider.id, sessionId: 'session', runId: 'current-run', phase: 'user', state: 'running' };
+  const runPromise = runBound.request(runBound.input({ runId: 'current-run', phase: 'user' }));
+  await tick();
+  assert.equal(runBound.pending().length, 1, 'a matching Core run reaches the existing Owner approval');
+  await runBound.decide(runBound.pending()[0].id);
+  assert.equal((await runPromise).outcome, 'approved');
+
+  for (const duringStatus of [false, true]) {
+    const changedRun = await fixture('run-changed-' + duringStatus);
+    changedRun.state.task.executionObservation = { provider: changedRun.provider.id, sessionId: 'session', runId: 'original-run', phase: 'user', state: 'running' };
+    const promise = changedRun.request(changedRun.input({ runId: 'original-run', phase: 'user' }));
+    await tick();
+    assert.equal(changedRun.pending().length, 1);
+    if (duringStatus) changedRun.state.onStatus = () => { changedRun.state.task.executionObservation.runId = 'later-run'; };
+    else changedRun.state.task.executionObservation.runId = 'later-run';
+    await assert.rejects(() => changedRun.decide(changedRun.pending()[0].id));
+    assert.equal((await promise).outcome, 'cancelled', 'a replaced run cannot consume its predecessor native approval');
+    assert.equal(changedRun.state.nativeRuns, 0);
+  }
+
+  const trustedRun = await fixture('bridge-trusted-run');
+  trustedRun.state.task.executionObservation = { provider: trustedRun.provider.id, sessionId: 'session', runId: 'bridge-run', phase: 'user', state: 'running' };
+  const runBridge = createAgentPermissionBridge({ provider: trustedRun.provider.id, sessionId: 'session', nativeSessionId: 'native',
+    taskId: 'task', workspaceId: 'workspace', runId: 'bridge-run', phase: 'user', requestNativeApproval: trustedRun.service.requestAgentNativeApproval });
+  const runParams = { sessionId: 'native', toolCall: { toolCallId: 'bridge-call', kind: 'read', title: 'Read', rawInput: { path: 'package.json' } },
+    options: [{ optionId: 'allow', kind: 'allow_once' }] };
+  assert.deepEqual(await runBridge.request({ ...runParams, runId: 'peer-injected-run' }), { outcome: { outcome: 'cancelled' } });
+  const bridgePromise = runBridge.request(runParams);
+  await tick();
+  assert.equal(trustedRun.pending().length, 1, 'trusted bridge configuration owns the Core run binding');
+  await trustedRun.decide(trustedRun.pending()[0].id);
+  assert.deepEqual(await bridgePromise, { outcome: { outcome: 'selected', optionId: 'allow' } });
+  runBridge.close();
+
+  for (const state of ['awaiting-review', 'unknown', 'cancelled']) {
+    const inactiveRun = await fixture('inactive-run-' + state);
+    inactiveRun.state.task.executionObservation = { provider: inactiveRun.provider.id, sessionId: 'session', runId: 'ended-run', state };
+    assert.deepEqual(await Promise.race([inactiveRun.request(inactiveRun.input({ runId: 'ended-run', phase: 'user' })), tick().then(() => null)]),
+      { outcome: 'cancelled' }, 'a settled, unknown or cancelled Core run cannot request more native execution');
+  }
+
+  async function trackedFixture(name, { target } = {}) {
+    const tracked = await fixture(name, { providerId: 'dsh' });
+    tracked.state.task.executionObservation = { provider: 'dsh', sessionId: 'session', runId: 'dsh-run', state: 'running' };
+    const input = tracked.input({ runId: 'dsh-run', phase: 'user', trackEffect: true, action: target?.kind ?? 'execute',
+      target: target ?? { toolCallId: 'native-call', title: 'Native command', kind: 'execute',
+        rawInput: { command: 'echo reviewable-command', secret: 'never-persist-effect-secret' } } });
+    return { tracked, input };
+  }
+  async function approveTracked(name, options) {
+    const { tracked, input } = await trackedFixture(name, options);
+    const promise = tracked.request(input); await tick();
+    assert.equal(tracked.pending().length, 1, 'a tracked DSH call reaches the same once-only Owner approval');
+    assert.equal(tracked.state.nativeRuns, 0);
+    assert.equal(tracked.service.broker.uncertainDispatchesForTask({ taskId: 'task', workspaceId: 'workspace' }).length, 0);
+    await tracked.decide(tracked.pending()[0].id);
+    const grant = await promise;
+    assert.equal(grant.outcome, 'approved');
+    assert.match(grant.nativeEffectId, /^[a-f0-9-]{36}$/);
+    assert.equal(grant.inputFingerprint, permissionFingerprint(input.target.rawInput));
+    const binding = { nativeEffectId: grant.nativeEffectId, provider: 'dsh', sessionId: 'session', taskId: 'task',
+      workspaceId: 'workspace', runId: 'dsh-run', toolCallId: 'native-call', inputFingerprint: grant.inputFingerprint };
+    return { tracked, input, grant, binding };
+  }
+  const tracked = await approveTracked('tracked-effect');
+  assert.equal(tracked.tracked.service.completionBlocker('task'), 'TASK_EFFECT_UNCONFIRMED', 'permit release cannot certify native tool completion');
+  const effectFile = path.join(tracked.tracked.stateDir, 'capability', 'dispatches.json');
+  const persistedEffects = fs.readFileSync(effectFile, 'utf8');
+  assert.ok(!persistedEffects.includes('echo reviewable-command') && !persistedEffects.includes('never-persist-effect-secret'), 'effect journal keeps digests, not executable input or secrets');
+  const started = tracked.tracked.service.broker.uncertainDispatchesForTask({ taskId: 'task', workspaceId: 'workspace' });
+  assert.equal(started.length, 1); assert.equal(started[0].status, 'started');
+  assert.deepEqual(await tracked.tracked.request(tracked.tracked.input({ ...tracked.input, requestId: 'different-request-id' })), { outcome: 'cancelled' }, 'a native call cannot obtain another permit by changing requestId');
+  assert.equal(tracked.tracked.pending().length, 0);
+  for (const key of ['provider', 'sessionId', 'taskId', 'workspaceId', 'runId', 'toolCallId', 'inputFingerprint']) {
+    assert.throws(() => tracked.tracked.service.settleAgentNativeEffect({ ...tracked.binding, [key]: 'foreign', outcome: 'completed',
+      evidence: { source: 'native-result', resultSha256: 'a'.repeat(64), eventId: 'result-1' } }), { code: 'AGENT_NATIVE_EFFECT_MISMATCH' }, key);
+  }
+  for (const evidence of [undefined, { source: 'activity-completed', resultSha256: 'a'.repeat(64), eventId: 'result-1' },
+    { source: 'native-result', resultSha256: 'invalid', eventId: 'result-1' }]) {
+    assert.throws(() => tracked.tracked.service.settleAgentNativeEffect({ ...tracked.binding, outcome: 'completed', evidence }),
+      { code: 'AGENT_NATIVE_EFFECT_EVIDENCE_REQUIRED' }, 'activity, permission or missing output never proves completion');
+  }
+  const actualResult = { ...tracked.binding, outcome: 'completed', evidence: { source: 'native-result', resultSha256: 'a'.repeat(64), eventId: 'result-1' } };
+  assert.equal(tracked.tracked.service.settleAgentNativeEffect(actualResult).status, 'completed');
+  assert.equal(tracked.tracked.service.completionBlocker('task'), null);
+  assert.equal(tracked.tracked.service.settleAgentNativeEffect(actualResult).status, 'completed', 'same actual result replay is an observation only');
+  assert.throws(() => tracked.tracked.service.settleAgentNativeEffect({ ...actualResult, evidence: { ...actualResult.evidence, resultSha256: 'b'.repeat(64) } }),
+    { code: 'AGENT_NATIVE_EFFECT_ALREADY_SETTLED' });
+  assert.deepEqual(await tracked.tracked.request(tracked.tracked.input({ ...tracked.input, requestId: 'after-completed-request' })), { outcome: 'cancelled' });
+
+  for (const outcome of ['unknown', 'cancelled', 'disconnected']) {
+    const lost = await approveTracked('tracked-' + outcome);
+    assert.equal(lost.tracked.service.settleAgentNativeEffect({ ...lost.binding, outcome }).status, 'outcome-unknown');
+    assert.equal(lost.tracked.service.completionBlocker('task'), 'TASK_EFFECT_UNCONFIRMED');
+    assert.deepEqual(await lost.tracked.request(lost.tracked.input({ ...lost.input, requestId: 'retry-' + outcome })), { outcome: 'cancelled' });
+  }
+  const failedEffect = await approveTracked('tracked-failed', { target: { toolCallId: 'native-call', title: 'Edit a file', kind: 'edit', rawInput: { path: 'partial.txt', content: 'partial write' } } });
+  assert.equal(failedEffect.tracked.service.settleAgentNativeEffect({ ...failedEffect.binding, outcome: 'failed',
+    evidence: { source: 'native-result', resultSha256: 'f'.repeat(64), eventId: 'failed-result' } }).status, 'outcome-unknown');
+  assert.equal(failedEffect.tracked.service.completionBlocker('task'), 'TASK_EFFECT_UNCONFIRMED', 'failed native writes can leave partial effects and require reconciliation');
+  const failedJournal = JSON.parse(fs.readFileSync(path.join(failedEffect.tracked.stateDir, 'capability', 'dispatches.json'), 'utf8'));
+  assert.equal(Object.values(failedJournal).find(row => row.nativeEffectId === failedEffect.grant.nativeEffectId).nativeEvidence.outcome, 'failed');
+  assert.throws(() => failedEffect.tracked.service.settleAgentNativeEffect({ ...failedEffect.binding, outcome: 'completed',
+    evidence: { source: 'native-result', resultSha256: 'e'.repeat(64), eventId: 'contradictory-success' } }), { code: 'AGENT_NATIVE_EFFECT_ALREADY_SETTLED' });
+
+  const effectCrash = await approveTracked('tracked-restart');
+  const crashEffectFile = path.join(effectCrash.tracked.stateDir, 'capability', 'dispatches.json');
+  const startedJournal = fs.readFileSync(crashEffectFile, 'utf8');
+  await effectCrash.tracked.service.close();
+  fs.writeFileSync(crashEffectFile, startedJournal);
+  const afterEffectRestart = await trackedFixture('tracked-restart');
+  const recoveredEffects = afterEffectRestart.tracked.service.broker.uncertainDispatchesForTask({ taskId: 'task', workspaceId: 'workspace' });
+  assert.equal(recoveredEffects.length, 1); assert.equal(recoveredEffects[0].status, 'outcome-unknown');
+  assert.deepEqual(await afterEffectRestart.tracked.request(afterEffectRestart.input), { outcome: 'cancelled' }, 'restart cannot reauthorize an already released native call');
+  assert.equal(afterEffectRestart.tracked.service.completionBlocker('task'), 'TASK_EFFECT_UNCONFIRMED');
+  assert.equal(afterEffectRestart.tracked.service.settleAgentNativeEffect({ ...effectCrash.binding, outcome: 'completed',
+    evidence: { source: 'native-result', resultSha256: 'e'.repeat(64), eventId: 'late-exact-result' } }).status, 'completed',
+  'an exact actual terminal result can settle the retained original effect after Core restart without replay');
+  assert.equal(afterEffectRestart.tracked.service.completionBlocker('task'), null);
+
+  const trackDenied = await fixture('tracked-other-provider');
+  trackDenied.state.task.executionObservation = { provider: trackDenied.provider.id, sessionId: 'session', runId: 'run', state: 'running' };
+  assert.deepEqual(await trackDenied.request(trackDenied.input({ runId: 'run', phase: 'user', trackEffect: true })), { outcome: 'cancelled' }, 'effect tracking is initially confined to the verified DSH adapter');
+
+  const volatile = await fixture('tracked-without-durable-journal', { providerId: 'dsh', durable: false });
+  volatile.state.task.executionObservation = { provider: 'dsh', sessionId: 'session', runId: 'volatile-run', state: 'running' };
+  const volatilePromise = volatile.request(volatile.input({ runId: 'volatile-run', phase: 'user', trackEffect: true }));
+  await tick();
+  await assert.rejects(() => volatile.decide(volatile.pending()[0].id), { code: 'AGENT_NATIVE_EFFECT_PERSISTENCE_REQUIRED' });
+  assert.equal((await volatilePromise).outcome, 'cancelled');
+  assert.equal(volatile.state.nativeRuns, 0, 'no durable effect journal means no native permit');
+
+  const closingEffect = await approveTracked('tracked-close');
+  await closingEffect.tracked.service.close();
+  assert.equal(closingEffect.tracked.service.broker.uncertainDispatchesForTask({ taskId: 'task', workspaceId: 'workspace' })[0].status, 'outcome-unknown');
+  assert.equal(closingEffect.tracked.service.broker.hasActiveDispatchForTask({ taskId: 'task', workspaceId: 'workspace' }), false);
+
+  const unconsumed = await trackedFixture('tracked-unconsumed-approval');
+  const unconsumedPromise = unconsumed.tracked.request(unconsumed.input); await tick();
+  const unconsumedRow = unconsumed.tracked.pending()[0];
+  assert.throws(() => unconsumed.tracked.service.broker.beginAgentNativeEffect({ ...unconsumedRow.request, approvalId: unconsumedRow.id },
+    unconsumedRow.request.input.nativeBinding), { code: 'PERMISSION_DENIED' }, 'pending approval rows cannot manufacture an external effect permit');
+  await unconsumed.tracked.decide(unconsumedRow.id, false); await unconsumedPromise;
+  assert.equal(unconsumed.tracked.service.broker.uncertainDispatchesForTask({ taskId: 'task', workspaceId: 'workspace' }).length, 0);
+
+  const writeFailure = await trackedFixture('tracked-intent-write-failure');
+  const writeFailurePromise = writeFailure.tracked.request(writeFailure.input); await tick();
+  const blockedIntent = path.join(writeFailure.tracked.stateDir, 'capability', 'dispatches.json');
+  fs.mkdirSync(blockedIntent);
+  await assert.rejects(() => writeFailure.tracked.decide(writeFailure.tracked.pending()[0].id));
+  assert.equal((await writeFailurePromise).outcome, 'cancelled');
+  assert.equal(writeFailure.tracked.state.nativeRuns, 0, 'failure to persist native effect ownership cannot release permission');
+  fs.rmdirSync(blockedIntent);
+
+  const resultWriteFailure = await approveTracked('tracked-result-write-failure');
+  const blockedResult = path.join(resultWriteFailure.tracked.stateDir, 'capability', 'dispatches.json');
+  fs.renameSync(blockedResult, blockedResult + '.retained'); fs.mkdirSync(blockedResult);
+  const writtenResult = { ...resultWriteFailure.binding, outcome: 'completed', evidence: { source: 'native-result', resultSha256: 'c'.repeat(64), eventId: 'actual-result' } };
+  assert.throws(() => resultWriteFailure.tracked.service.settleAgentNativeEffect(writtenResult), { code: 'DISPATCH_RESULT_PERSIST_FAILED', effectStatus: 'unknown' });
+  assert.equal(resultWriteFailure.tracked.service.completionBlocker('task'), 'TASK_EFFECT_UNCONFIRMED');
+  fs.rmdirSync(blockedResult); fs.renameSync(blockedResult + '.retained', blockedResult);
+  assert.equal(resultWriteFailure.tracked.service.settleAgentNativeEffect(writtenResult).status, 'completed', 'the same actual result can settle after storage is repaired without re-executing the tool');
+
+  const selectedReceipt = await trackedFixture('tracked-bridge-receipt');
+  const effectBridge = createAgentPermissionBridge({ provider: 'dsh', sessionId: 'session', nativeSessionId: 'native', taskId: 'task', workspaceId: 'workspace',
+    runId: 'dsh-run', phase: 'user', trackEffect: true, requestNativeApproval: selectedReceipt.tracked.service.requestAgentNativeApproval });
+  const selectedPromise = effectBridge.request({ sessionId: 'native', toolCall: selectedReceipt.input.target, options: selectedReceipt.input.options });
+  await tick(); await selectedReceipt.tracked.decide(selectedReceipt.tracked.pending()[0].id);
+  const selected = await selectedPromise;
+  assert.deepEqual(selected.outcome, { outcome: 'selected', optionId: 'allow' });
+  assert.match(selected.nativeEffectId, /^[a-f0-9-]{36}$/);
+  assert.equal(selected.inputFingerprint, permissionFingerprint(selectedReceipt.input.target.rawInput));
+  assert.equal(selectedReceipt.tracked.service.settleAgentNativeEffect({ nativeEffectId: selected.nativeEffectId, provider: 'dsh', sessionId: 'session', taskId: 'task',
+    workspaceId: 'workspace', runId: 'dsh-run', toolCallId: 'native-call', inputFingerprint: selected.inputFingerprint, outcome: 'completed',
+    evidence: { source: 'native-result', resultSha256: 'd'.repeat(64), eventId: 'bridge-result' } }).status, 'completed');
+  effectBridge.close();
 
   const capacity = await fixture('capacity');
   const capacityRequests = Array.from({ length: 128 }, () => capacity.request()); await tick();

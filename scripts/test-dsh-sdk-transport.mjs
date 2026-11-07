@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { createJsonRpcTransport } from '../src/agent/protocol/json-rpc-transport.js';
 import { createCapabilityService } from '../src/capability/service.js';
 import { isAgentCreationPreflightFailure } from '../src/agent/agent-provider.js';
+import { permissionFingerprint } from '../src/agent/protocol/agent-permission-bridge.js';
 
 // A DSH notification preceding a reverse request must already be authoritative
 // when that request is handled, including frames delivered in one data chunk.
@@ -43,7 +44,7 @@ async function until(check) {
 }
 
 function setup({ version = '0.2.2-rc.1', approval, terminal = true, mismatch = null, stopKnown = true, failedResult = false,
-  delayedTurn = false } = {}) {
+  delayedTurn = false, toolName = 'read', toolInput = { file_path: 'note.txt' } } = {}) {
   const processes = [], reviews = [], settlements = [];
   const runtime = { version, nodePath: process.execPath, dshBin: path.join(root, 'dsh-bin.js'),
     baseUrl: 'https://api.deepseek.com', apiKey: 'fixture-private-api-key', model: 'fixture-model',
@@ -85,13 +86,13 @@ function setup({ version = '0.2.2-rc.1', approval, terminal = true, mismatch = n
         if (frame.method === 'session/prompt') {
           const beginTurn = () => {
           process.emit('turn/start', { turn: 1 });
-          const raw = { file_path: 'note.txt' };
+          const raw = typeof toolInput === 'function' ? toolInput(options) : structuredClone(toolInput);
           const callSeq = seq;
-          process.emit('tool/call', { turn: 1, step: 1, callId: 'call-1', name: 'read', arguments: JSON.stringify(raw) });
+          process.emit('tool/call', { turn: 1, step: 1, callId: 'call-1', name: toolName, arguments: JSON.stringify(raw) });
           const reason = JSON.stringify({ format: 'cetamesh-dsh-tool-v1', processNonce: options.processNonce,
             policyFingerprint: options.profile.policyFingerprint, sessionId: options.sessionId,
-            callId: 'call-1', toolName: 'read', input: mismatch === 'input' ? { file_path: 'other.txt' } : raw });
-          if (mismatch !== 'missing-audit') process.emit('approval/asked', { id: 'audit-1', toolName: 'read', callId: 'call-1', reason });
+            callId: 'call-1', toolName, input: mismatch === 'input' ? { file_path: 'other.txt' } : raw });
+          if (mismatch !== 'missing-audit') process.emit('approval/asked', { id: 'audit-1', toolName, callId: 'call-1', reason });
           pending.set('ask-1', answer => {
             process.lastAnswer = answer;
             process.emit('approval/decided', { id: 'audit-1', outcome: answer.outcome });
@@ -107,7 +108,7 @@ function setup({ version = '0.2.2-rc.1', approval, terminal = true, mismatch = n
             }
           });
           readable.write(JSON.stringify({ jsonrpc: '2.0', id: 'ask-1', method: 'approval/request',
-            params: { sessionId: options.sessionId, toolName: 'read', callId: 'call-1', reason } }) + '\n');
+            params: { sessionId: options.sessionId, toolName, callId: 'call-1', reason } }) + '\n');
           };
           if (delayedTurn) setImmediate(beginTurn); else beginTurn();
         }
@@ -119,11 +120,21 @@ function setup({ version = '0.2.2-rc.1', approval, terminal = true, mismatch = n
     requestNativeApproval: async (request, context) => {
       reviews.push({ request, signal: context.signal });
       return approval ? approval(request, context) : { outcome: 'approved', optionId: 'allow',
-        nativeEffectId: 'effect-1', inputFingerprint: 'ec284dce6489c4a11d53a3f9e2e5b732d780bf1a1f6b0e80bdd64438e2e25bfa' };
+        nativeEffectId: 'effect-1', inputFingerprint: permissionFingerprint(request.target.rawInput) };
     },
     settleNativeEffect: async input => { settlements.push(input); return { status: input.outcome === 'failed' ? 'outcome-unknown' : input.outcome }; }
   });
   return { provider, processes, reviews, settlements, runtime };
+}
+
+let fileCase = 0;
+const fileInput = (tool, file_path) => ({ file_path, ...(tool === 'write' ? { content: 'synthetic file content' }
+  : tool === 'edit' ? { old_string: 'before', new_string: 'after' } : {}) });
+async function startFileCall(h) {
+  const id = ++fileCase;
+  const session = await h.provider.createSession({ cwd: stage, taskId: `file-task-${id}`, workspaceId: 'file-workspace' });
+  await h.provider.send({ sessionId: session.sessionId, content: 'Synthetic file boundary case', runId: `file-run-${id}`, phase: 'user' });
+  return session;
 }
 
 try {
@@ -155,10 +166,88 @@ try {
     assert.equal(h.processes.length, 0, 'unsupported model configuration launches no owned runtime');
     await h.provider.shutdown();
   }
+  for (const toolName of ['read', 'write', 'edit']) {
+    for (const file of ['note.txt', path.join(stage, 'note.txt')]) {
+      const h = setup({ toolName, toolInput: fileInput(toolName, file) });
+      await startFileCall(h);
+      await until(() => h.processes.at(-1).lastAnswer);
+      assert.equal(h.processes.at(-1).lastAnswer.outcome, 'allowed-once', `${toolName} accepts relative and absolute paths inside staging`);
+      assert.equal(h.reviews.length, 1);
+      assert.deepEqual(h.reviews[0].request.target.rawInput, fileInput(toolName, file), 'scope verification never rewrites the approved native input');
+      await until(() => h.settlements.some(row => row.outcome === 'completed'));
+      await h.provider.shutdown();
+    }
+  }
+  const outside = path.join(root, 'outside-files'); fs.mkdirSync(outside);
+  for (const toolName of ['read', 'write', 'edit']) {
+    for (const file of [path.join(outside, 'note.txt'), '../outside-files/note.txt', '\\\\server\\share\\note.txt',
+      'note.txt:policy', options => options.profile.gatePath]) {
+      const h = setup({ toolName, toolInput: options => fileInput(toolName, typeof file === 'function' ? file(options) : file) });
+      await startFileCall(h);
+      await until(() => h.processes.at(-1).lastAnswer);
+      assert.equal(h.reviews.length, 0, `${toolName} outside/UNC/ADS/control-plane paths never reach Core approval`);
+      assert.notEqual(h.processes.at(-1).lastAnswer.outcome, 'allowed-once');
+      assert.equal(h.settlements.length, 0, 'pre-approval path refusal creates no native effect');
+      await h.provider.shutdown();
+    }
+  }
+  for (const toolInput of [{ path: 'note.txt' }, { file_path: null }, { file_path: 7 }]) {
+    const h = setup({ toolInput }); await startFileCall(h);
+    await until(() => h.processes.at(-1).lastAnswer);
+    assert.equal(h.reviews.length, 0, 'the file scope requires the actual documented file_path string; it never guesses another argument');
+    assert.equal(h.settlements.length, 0);
+    await h.provider.shutdown();
+  }
+  const junction = path.join(stage, 'outside-link');
+  fs.symlinkSync(outside, junction, process.platform === 'win32' ? 'junction' : 'dir');
+  try {
+    for (const toolName of ['read', 'write', 'edit']) {
+      const h = setup({ toolName, toolInput: fileInput(toolName, 'outside-link/note.txt') });
+      await startFileCall(h); await until(() => h.processes.at(-1).lastAnswer);
+      assert.equal(h.reviews.length, 0, `${toolName} cannot approve a junction escape`);
+      assert.notEqual(h.processes.at(-1).lastAnswer.outcome, 'allowed-once');
+      assert.equal(h.settlements.length, 0);
+      await h.provider.shutdown();
+    }
+  } finally { fs.unlinkSync(junction); }
+  const inside = path.join(stage, 'inside-target'); fs.mkdirSync(inside);
+  for (const toolName of ['read', 'write', 'edit']) {
+    const lateLink = path.join(stage, 'late-link');
+    fs.symlinkSync(inside, lateLink, process.platform === 'win32' ? 'junction' : 'dir');
+    try {
+      const decision = deferred(), h = setup({ toolName, toolInput: fileInput(toolName, 'late-link/note.txt'), approval: () => decision.promise });
+      const session = await startFileCall(h); await until(() => h.reviews.length);
+      fs.unlinkSync(lateLink); fs.symlinkSync(outside, lateLink, process.platform === 'win32' ? 'junction' : 'dir');
+      decision.resolve({ outcome: 'approved', optionId: 'allow', nativeEffectId: 'late-path-effect',
+        inputFingerprint: permissionFingerprint(h.reviews[0].request.target.rawInput) });
+      await until(() => h.processes.at(-1).lastAnswer);
+      assert.notEqual(h.processes.at(-1).lastAnswer.outcome, 'allowed-once', `${toolName} rechecks the junction after Owner approval`);
+      await until(() => h.settlements.some(row => row.nativeEffectId === 'late-path-effect' && row.outcome === 'unknown'));
+      await until(() => h.provider.status({ sessionId: session.sessionId }).then(row => row.state === 'unknown'));
+      assert.equal(h.settlements.some(row => row.outcome === 'completed'), false);
+      await assert.rejects(h.provider.shutdown(), error => error.code === 'PROVIDER_CLOSE_UNKNOWN', 'late denied grants retain their unknown Core effect');
+    } finally { fs.unlinkSync(lateLink); }
+  }
+  {
+    const decision = deferred(), h = setup({ approval: () => decision.promise });
+    const session = await startFileCall(h); await until(() => h.reviews.length);
+    const heldStage = path.join(root, 'held-stage-root'); fs.renameSync(stage, heldStage); fs.mkdirSync(stage);
+    try {
+      decision.resolve({ outcome: 'approved', optionId: 'allow', nativeEffectId: 'late-root-effect',
+        inputFingerprint: permissionFingerprint(h.reviews[0].request.target.rawInput) });
+      await until(() => h.processes.at(-1).lastAnswer);
+      assert.notEqual(h.processes.at(-1).lastAnswer.outcome, 'allowed-once', 'replacing the canonical staging root cannot inherit its approval');
+      await until(() => h.settlements.some(row => row.nativeEffectId === 'late-root-effect' && row.outcome === 'unknown'));
+      await until(() => h.provider.status({ sessionId: session.sessionId }).then(row => row.state === 'unknown'));
+      await assert.rejects(h.provider.shutdown(), error => error.code === 'PROVIDER_CLOSE_UNKNOWN');
+    } finally { fs.rmdirSync(stage); fs.renameSync(heldStage, stage); }
+  }
   {
     const h = setup(); const health = await h.provider.health();
     assert.equal(health.ready, true); assert.equal(health.taskEligible, true);
     const securityBefore = h.provider.capabilities().security.policyFingerprint;
+    assert.equal(h.provider.capabilities().security.fileScopePolicy, 'task-staging-file-tools-v1');
+    assert.ok(h.provider.capabilities().security.securityLimitations.includes('task-staging-file-tools-v1'));
     assert.equal(h.provider.capabilities().taskTransport, 'sdk');
     assert.equal(h.processes.some(p => p.frames.some(f => f.method === 'session/prompt')), false, 'health sends no model input');
     const session = await h.provider.createSession({ cwd: stage, taskId: 'task-1', workspaceId: 'workspace-1',
@@ -297,7 +386,7 @@ try {
     assert.equal(h.settlements[0].outcome, 'unknown', 'missing terminal output retains unknown effect');
     await assert.rejects(h.provider.shutdown(), error => error.code === 'PROVIDER_CLOSE_UNKNOWN', 'unknown effects retain staging after process stop');
   }
-  console.log('DSH SDK transport: PASS (official envelopes, exact input/audit join, real result settlement and cancellation)');
+  console.log('DSH SDK transport: PASS (official envelopes, staging-only file scope, exact input/audit join, real result settlement and cancellation)');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

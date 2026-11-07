@@ -1390,7 +1390,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (!['paused', 'waiting', 'blocked'].includes(current.status)) throw uiError('TASK_NOT_RESUMABLE', '任务当前不能恢复');
       const provider = current.currentAgent?.provider || current.recoveryReviews?.at(-1)?.previousAgent?.provider;
       return { task: projectTaskWithUsage(await resumeRecoveredTask(current, { provider,
-        requestId: string(p.requestId, 160) || undefined })) };
+        requestId: string(p.requestId, 160) || undefined,
+        content: p.nextInstruction === undefined ? undefined : boundedText(p.nextInstruction, 'nextInstruction', 32_000).trim() })) };
     },
     'ui.task.recovery.inspect': async p => {
       const current = (await task('task.get', {id:idParam(p)})).task;

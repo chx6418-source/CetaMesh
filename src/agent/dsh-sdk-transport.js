@@ -10,9 +10,11 @@ import { createCodexSessionLifecycle } from './codex-session-lifecycle.js';
 import { createAgentEventBuffer } from './protocol/agent-event-buffer.js';
 import { createAgentPermissionBridge, permissionFingerprint } from './protocol/agent-permission-bridge.js';
 import { createJsonRpcTransport } from './protocol/json-rpc-transport.js';
+import { canonicalizeRoot, resolveInside } from '../workspace/boundary.js';
 
 const VERSION = '0.2.2-rc.1';
 const TOOLS = new Set(['read', 'write', 'edit']);
+const FILE_SCOPE_POLICY = 'task-staging-file-tools-v1';
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value);
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -31,6 +33,30 @@ function fileSnapshot(file) {
   const stat = fs.lstatSync(file);
   if (!stat.isFile() || stat.isSymbolicLink()) throw fault('DSH_SDK_PROFILE_CHANGED', 'DSH profile artifact is not a regular owned file');
   return { path: file, dev: stat.dev, ino: stat.ino, sha256: hash(fs.readFileSync(file).toString('base64')) };
+}
+
+function stagingSnapshot(directory) {
+  const canonical = canonicalizeRoot(directory), stat = fs.lstatSync(canonical, { bigint: true });
+  if (!stat.isDirectory() || stat.isSymbolicLink()) throw fault('DSH_SDK_STAGING_CHANGED', 'DSH requires the exact canonical Task staging directory');
+  return { path: canonical, dev: stat.dev, ino: stat.ino };
+}
+
+function assertStagingRoot(s) {
+  const stat = fs.lstatSync(s.cwd, { bigint: true });
+  if (!s.staging || !stat.isDirectory() || stat.isSymbolicLink() || stat.dev !== s.staging.dev || stat.ino !== s.staging.ino
+    || fs.realpathSync(s.cwd) !== s.cwd) throw fault('DSH_SDK_STAGING_CHANGED', 'The owned Task staging directory changed');
+}
+
+function resolveStagedFile(s, toolName, input) {
+  if (typeof input.file_path !== 'string' || !input.file_path) throw fault('DSH_SDK_FILE_SCOPE_INVALID', 'DSH file tools require their exact file_path string');
+  assertStagingRoot(s);
+  const resolved = resolveInside(s.cwd, input.file_path, { forWrite: toolName !== 'read' });
+  // The shared boundary resolves lexical/real paths; this file-tool scope also
+  // excludes ADS segments while preserving an absolute Windows path's drive.
+  if (path.relative(s.cwd, resolved.absolute).split(/[\\/]/).some(segment => segment.includes(':'))) {
+    throw fault('DSH_SDK_FILE_SCOPE_INVALID', 'DSH Task file tools do not accept alternate data streams');
+  }
+  return resolved;
 }
 
 /** Official SDK JSON-RPC over one supervised, private runtime per Core Task. */
@@ -191,7 +217,7 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
       const evidence = { source: 'native-result', resultSha256: hash(message.content), eventId: `dsh:${s.id}:${event.seq}` };
       queue(s, async () => {
         const effect = s.effects.get(call.id);
-        if (effect && !effect.terminal) await settle(s, effect, message.isError ? 'failed' : 'completed', evidence);
+        if (effect?.released && !effect.terminal) await settle(s, effect, message.isError ? 'failed' : 'completed', evidence);
         activity(s, call, message.isError ? 'failed' : 'completed');
         emit(s, event, { ...evidence, capability: `dsh.native.${call.name}`, status: message.isError ? 'failed' : 'completed',
           runId: call.run.runId, phase: call.run.phase });
@@ -238,10 +264,12 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
       || !record(reason.input)
       || permissionFingerprint(reason.input) !== permissionFingerprint(call.input) || matches.length !== 1) return { outcome: 'rejected' };
     const audit = matches[0]; audit.claimed = true;
+    let effect = null;
     s.waiting++; s.state = 'waiting'; activity(s, call, 'waiting-approval');
     try {
       await validateSession(s);
       if (!active() || !audit.pending) return { outcome: 'cancelled' };
+      resolveStagedFile(s, call.name, reason.input);
       const result = await s.permissions.request({ sessionId: s.id,
         toolCall: { toolCallId: call.id, kind: call.name === 'read' ? 'read' : 'edit', title: call.name,
           rawInput: structuredClone(reason.input), locations: typeof reason.input.file_path === 'string' ? [{ path: reason.input.file_path }] : [] },
@@ -250,13 +278,20 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
         return { outcome: active() ? 'rejected' : 'cancelled' };
       }
       if (result.inputFingerprint !== permissionFingerprint(reason.input)) return { outcome: 'rejected' };
-      const effect = { nativeEffectId: result.nativeEffectId, inputFingerprint: result.inputFingerprint, callId: call.id, runId: run.runId };
+      effect = { nativeEffectId: result.nativeEffectId, inputFingerprint: result.inputFingerprint, callId: call.id, runId: run.runId };
       s.effects.set(call.id, effect);
       await validateSession(s);
       if (!active() || !audit.pending) { await settle(s, effect, 'unknown'); return { outcome: 'cancelled' }; }
+      resolveStagedFile(s, call.name, reason.input);
       effect.released = true;
       return { outcome: 'allowed-once' };
-    } catch (error) { safeLog(error?.code); return { outcome: 'rejected' }; }
+    } catch (error) {
+      if (effect && !effect.released && !effect.unknown) {
+        try { await settle(s, effect, 'unknown'); }
+        catch (failure) { s.effectFailure = true; safeLog(failure?.code); }
+      }
+      safeLog(error?.code); return { outcome: 'rejected' };
+    }
     finally { s.waiting--; if (active()) s.state = s.waiting ? 'waiting' : 'running'; }
   }
 
@@ -330,7 +365,8 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
       modelProvider: 'deepseek-official', model: runtime.model, baseUrl: runtime.baseUrl,
       allowLoopbackHttpForTests: allowLoopbackHttpForTests || runtime.allowLoopbackHttpForTests === true });
     const s = { id, controlDir, processNonce, profile, runtime, identity: runtimeIdentity(runtime),
-      taskId: invocation.taskId ?? null, workspaceId: invocation.workspaceId ?? null, cwd: invocation.cwd,
+      taskId: invocation.taskId ?? null, workspaceId: invocation.workspaceId ?? null,
+      cwd: creation.staging?.path ?? invocation.cwd, staging: creation.staging,
       state: 'starting', sequence: 0, nativeSequence: -1, buffer: createAgentEventBuffer({ limit: 1024 }),
       calls: new Map(), audits: new Map(), effects: new Map(), work: Promise.resolve(), waiting: 0 };
     for (const dir of ['os-home', 'appdata', 'localappdata', 'tmp']) fs.mkdirSync(path.join(controlDir, dir));
@@ -339,6 +375,7 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
       TEMP: path.join(controlDir, 'tmp'), TMP: path.join(controlDir, 'tmp'),
       DSH_HOME: profile.homeDir, CETAMESH_DSH_TASK_API_KEY: runtime.apiKey };
     try {
+      if (!healthOnly) assertStagingRoot(s);
       await profile.verify();
       if (shuttingDown) throw fault('PROVIDER_SHUTTING_DOWN', 'DSH SDK Provider is shutting down');
       if (!healthOnly) {
@@ -356,7 +393,7 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
         onNotification: (method, params) => receive(s, method, params),
         onRequest: (method, params) => approval(s, method, params), onClose: error => disconnected(s, error) });
       Promise.resolve(s.handle.done).then(() => disconnected(s, fault('DSH_SDK_EXITED', 'DSH SDK exited')), error => disconnected(s, error));
-      const initialized = await s.rpc.request('initialize', { cwd: invocation.cwd ?? controlDir, provider: 'deepseek-official',
+      const initialized = await s.rpc.request('initialize', { cwd: s.cwd ?? controlDir, provider: 'deepseek-official',
         model: runtime.model, approvalRequests: true }, { timeoutMs: 15000 });
       if (initialized?.serverInfo?.name !== 'deepseek-harness-sdk-runtime' || initialized.serverInfo.version !== '0.0.1') {
         throw fault('DSH_SDK_PROTOCOL_INVALID', 'Unsupported DSH SDK handshake');
@@ -364,11 +401,12 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
       captureBootstrap(s); await validateSession(s);
       if (!healthOnly) {
         const directory = await s.rpc.request('session/working-directory/get', { sessionId: id });
-        if (directory?.cwd !== invocation.cwd) throw fault('TASK_WORKSPACE_MISMATCH', 'DSH SDK did not confirm the exact staging directory');
+        if (directory?.cwd !== s.cwd) throw fault('TASK_WORKSPACE_MISMATCH', 'DSH SDK did not confirm the exact staging directory');
       }
       if (shuttingDown) throw fault('PROVIDER_SHUTTING_DOWN', 'DSH SDK Provider is shutting down');
       s.state = 'ready'; verified = { identity: s.identity, version: VERSION,
-        policyFingerprint: hash({ runtime: s.identity, policyVersion: DSH_GATE_POLICY_VERSION, source: hash(DSH_TOOL_GATE_SOURCE) }) };
+        policyFingerprint: hash({ runtime: s.identity, policyVersion: DSH_GATE_POLICY_VERSION,
+          fileScopePolicy: FILE_SCOPE_POLICY, source: hash(DSH_TOOL_GATE_SOURCE) }) };
       return s;
     } catch (error) {
       if (creation.processAttempted) {
@@ -415,6 +453,7 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
           if (shuttingDown) throw fault('PROVIDER_SHUTTING_DOWN', 'DSH SDK Provider is shutting down');
           if (!text(invocation.taskId) || !text(invocation.workspaceId) || !path.isAbsolute(invocation.cwd ?? '')
             || !fs.statSync(invocation.cwd).isDirectory()) throw fault('TASK_WORKSPACE_MISMATCH', 'DSH SDK requires an exact Task, Workspace and staging directory');
+          creation.staging = stagingSnapshot(invocation.cwd);
           const runtime = await resolveRuntime();
           if (invocation.modelProvider != null && invocation.modelProvider !== 'deepseek-official'
             || invocation.model != null && invocation.model !== runtime.model
@@ -480,6 +519,8 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
       nativeSandboxSupported: false, strictIsolationVerified: false, nativeApprovalSupported: true,
       nativePermissionPolicyVerified: Boolean(verified), allToolsRequireApproval: true, nativeSandboxMode: 'none',
       nativeApprovalPolicy: 'host-approval-every-tool', policyVersion: DSH_GATE_POLICY_VERSION,
+      fileScopePolicy: FILE_SCOPE_POLICY,
+      securityLimitations: [FILE_SCOPE_POLICY, 'Only read, write and edit paths inside the current Task staging root are accepted; no OS sandbox.'],
       identity: verified?.policyFingerprint ?? null, policyFingerprint: verified?.policyFingerprint ?? null } }; },
     async verifyTaskQuiescence({ taskId, workspaceId, allowEmpty = false } = {}) {
       if (!text(taskId) || !text(workspaceId) || lifecycle.hasPendingCreation(taskId)) return { stopped: false };
