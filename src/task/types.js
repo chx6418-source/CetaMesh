@@ -126,6 +126,22 @@ export function normalizeProvider(value) {
   return text;
 }
 
+/** Task stores opaque Provider identities; this never authorizes a selection. */
+export function normalizeTaskModelConfig({ agentProvider = 'cetamesh', modelProvider, model, reasoningEffort } = {}) {
+  const provider = normalizeProvider(agentProvider) || 'cetamesh';
+  const external = !['none', 'cetamesh'].includes(provider);
+  const identity = (value, label, limit) => {
+    if (!external) return normalizeText(value, label, limit) || null;
+    if (value === null || value === undefined || value === '') return null;
+    if (typeof value !== 'string' || value.length > limit || !value.trim() || /[\x00-\x1f\x7f]/.test(value))
+      throw taskError('INVALID_PARAMS', label + ' must be a bounded native identity');
+    return value; // Preserve the exact advertised/acknowledged identity.
+  };
+  return { agentProvider: provider, modelProvider: identity(modelProvider, 'modelProvider', 80),
+    model: identity(model, 'model', external ? 256 : 160),
+    reasoningEffort: identity(reasoningEffort, 'reasoningEffort', external ? 256 : 40) };
+}
+
 export function normalizePercent(value) {
   if (value === undefined || value === null) return null;
   const n = Number(value);

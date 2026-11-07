@@ -309,6 +309,30 @@ try {
   const changedIdentity = capture(() => identityRuntime.create({ goal: 'Changed request', workspaceId: 'ws-chat-identity', requestId: 'chat-identity', deduplicateGoal: false }));
   check('精确请求不能换目标', changedIdentity.code === 'REQUEST_ID_CONFLICT');
   check('内部去重选项不写入产品结构', !Object.hasOwn(freshGoal, 'deduplicateGoal'));
+  const nativeModels = createTaskRuntime({ stateDir: path.join(root, 'native-model-identities'), now });
+  let nativeTask = nativeModels.create({ goal: 'Retain exact external Agent model identities' });
+  nativeTask = nativeModels.attachAgent({ id: nativeTask.id, expectedRev: nativeTask.rev, provider: 'codex', sessionId: 'native-model-source' }).task;
+  const longModel = 'm'.repeat(256), longEffort = 'e'.repeat(256);
+  const nativeSaved = capture(() => nativeModels.setModelConfig({ id: nativeTask.id, expectedRev: nativeTask.rev,
+    model: longModel, reasoningEffort: longEffort }));
+  check('外部Agent精确256模型/强度标识可由Task原owner保存', !nativeSaved.threw, nativeSaved.code);
+  equal('外部Agent模型/强度身份不截断且重启保留', createTaskRuntime({ stateDir: path.join(root, 'native-model-identities'), now }).get({ id: nativeTask.id }).task.modelConfig,
+    { agentProvider: 'codex', modelProvider: null, model: longModel, reasoningEffort: longEffort });
+  for (const field of ['model', 'reasoningEffort']) {
+    const current = nativeModels.get({ id: nativeTask.id }).task;
+    const rejected = capture(() => nativeModels.setModelConfig({ id: current.id, expectedRev: current.rev, [field]: 'x'.repeat(257) }));
+    check('超界原生' + field + '被拒绝', rejected.code === 'INVALID_PARAMS');
+    equal('拒绝原生' + field + '后Task/历史不变', nativeModels.get({ id: current.id }).task, current);
+  }
+  for (const agentProvider of ['none', 'cetamesh']) {
+    const current = nativeModels.get({ id: nativeTask.id }).task;
+    check(agentProvider + '原模型160边界保留', capture(() => nativeModels.setModelConfig({ id: current.id, expectedRev: current.rev, agentProvider, model: 'm'.repeat(161) })).code === 'INVALID_PARAMS');
+    check(agentProvider + '原强度40边界保留', capture(() => nativeModels.setModelConfig({ id: current.id, expectedRev: current.rev, agentProvider, reasoningEffort: 'e'.repeat(41) })).code === 'INVALID_PARAMS');
+    equal('普通路径拒绝后Task不变', nativeModels.get({ id: current.id }).task, current);
+  }
+  const beforeExact = nativeModels.get({ id: nativeTask.id }).task;
+  nativeModels.setModelConfig({ id: beforeExact.id, expectedRev: beforeExact.rev, agentProvider: 'codex', model: ' exact advertised identity ', reasoningEffort: ' exact effort ' });
+  equal('Task原生身份不以文本trim变成另一模型', nativeModels.get({ id: beforeExact.id }).task.modelConfig.model, ' exact advertised identity ');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

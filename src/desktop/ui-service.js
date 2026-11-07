@@ -113,7 +113,9 @@ function projectSession(value) {
     config: {
       mode: string(config.mode, 40), modelProvider: string(config.modelProvider, 80) || null,
       reasoning: typeof config.reasoning==='string'&&!/[\x00-\x1f\x7f]/.test(config.reasoning)?string(config.reasoning,256):null,
-      model: string(config.model, 200), agentProvider: string(config.agentProvider, 80) || null,
+      // Saved requested metadata is not a claim that a live Agent confirmed it.
+      // Keep its exact bounded identity even while runtime binding is unknown.
+      model: string(config.model, 256), agentProvider: string(config.agentProvider, 80) || null,
       workspaceId: string(config.workspaceId, 128) || null
     }
   };

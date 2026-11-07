@@ -183,3 +183,30 @@ blocked; none of these projections supplies replay authority. See
 Tests distinguish controlled protocol fixtures, installed CLIs with synthetic model servers,
 authorized remote models, actual Core services, rendered browser UI and native Desktop
 acceptance. Success at one layer never satisfies a missing layer's release gate.
+
+## Selecting a complete native model configuration
+
+When a Provider advertises model-specific reasoning options, the Picker keeps a
+draft model and its own advertised choices. It submits the complete pair once
+through the existing Chat configuration transaction. A default belongs only to
+that model; absent defaults require an explicit choice. The current-model display
+continues to depend on the runtime ACK, including while saving or after refusal.
+
+Task-bound changes that require a new Session use existing Continuity. Explicit
+no-reasoning is distinct from an omitted setting: a null request cannot inherit
+the source effort, and its target must acknowledge null before the source is
+stopped. Known invalid storage identities refuse before checkpoint or Agent
+effects. An invalid target default is discarded before stopping the source.
+Taskless fresh-session replacement is not provided by this control path.
+
+Task retains exact native model/reasoning identities up to 256 characters;
+ordinary Task limits remain unchanged. These are bounded stored identifiers, not
+an allowed-model catalog or execution grant. Saved Chat request metadata keeps
+its complete bounded identity during restart while the live model may be unknown.
+It does not create a second persisted Provider binding. A native no-op still
+checks current Task ownership, state, actual ACK and advertised writable options.
+
+The complete native control and its display projection share the 128 KiB UTF-8
+budget. Missing optional selector IDs do not become synthetic null metadata that
+would make a valid native catalog disappear. Real selector IDs remain intact;
+over-budget or malformed advertisements never become silently partial choices.

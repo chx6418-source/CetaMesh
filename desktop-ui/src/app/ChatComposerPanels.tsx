@@ -1,4 +1,4 @@
-import {useState} from 'react';
+import {useEffect,useState} from 'react';
 import type {ChatContextObservation, ChatModelProvider, ModelUsage, ChatModelCapabilities, AgentModelControl, ChatConfigurationState, ChatConfigurationObservation} from '../bridge/typed-client';
 import {Popover} from '../components/primitives/overlays';
 import {Icon} from '../components/icons';
@@ -90,24 +90,47 @@ function ChatConfigurationDetails({configuration,configurationObservation,saving
     {pendingConfiguration(configuration)&&onReconcile&&<button className="chat-panel-settings" type="button" disabled={saving} onClick={onReconcile}>核对当前配置</button>}
     <ChatConfigurationObservationDetails observation={configurationObservation}/></>;
 }
-export type ChatModelPickerProps={models:ChatModelProvider[];selectedModelKey:string;selectedAgent:string;agentLabel:string;modelControl?:AgentModelControl|null;selectedReasoning?:string;configuration?:ChatConfigurationState|null;configurationObservation?:ChatConfigurationObservation|null;saving?:boolean;onReconcile?():void;disabledReason?:string|null;query:string;onQueryChange(value:string):void;onModelChange(value:string):void;onReasoningChange(value:string):void;onConfigure():void;onClose():void;onOpenTask?():void};
+export type AgentConfigurationChange={model:string;modelProvider?:string;reasoning?:string};
+export type ChatModelPickerProps={models:ChatModelProvider[];selectedModelKey:string;selectedAgent:string;agentLabel:string;modelControl?:AgentModelControl|null;selectedReasoning?:string;configuration?:ChatConfigurationState|null;configurationObservation?:ChatConfigurationObservation|null;saving?:boolean;onReconcile?():void;disabledReason?:string|null;query:string;onQueryChange(value:string):void;onModelChange(value:string):void;onReasoningChange(value:string):void;onAgentConfigurationChange?(value:AgentConfigurationChange):void;onConfigure():void;onClose():void;onOpenTask?():void};
 function AgentModelPickerContent(props:ChatModelPickerProps){
-  const {modelControl,agentLabel,disabledReason,query,onQueryChange,onModelChange,onReasoningChange,onClose,onOpenTask}=props;
+  const {modelControl,agentLabel,disabledReason,query,onQueryChange,onAgentConfigurationChange,onClose,onOpenTask}=props;
   const confirmed=modelControl?.status==='available'&&modelControl.application==='runtime-confirmed'&&!pendingConfiguration(props.configuration)&&!props.saving;
   const selection=modelControl?.selection;
   const models=modelControl?.model?.options??[];
-  const reasoning=modelControl?.reasoning?.options??[];
+  const [draft,setDraft]=useState({model:selection?.model??'',reasoning:selection?.reasoningEffort??null});
+  useEffect(()=>{setDraft({model:selection?.model??'',reasoning:selection?.reasoningEffort??null});},[selection?.model,selection?.reasoningEffort,selection?.modelProvider]);
+  const target=models.find(option=>option.value===draft.model);
+  const reasoning=target?.reasoningOptions??modelControl?.reasoning?.options??[];
   const current=models.find(option=>option.value===selection?.model);
+  const freshSessionBlocked=modelControl?.changeApplication==='requires-new-session'&&!onOpenTask;
+  const changed=draft.model!==selection?.model||(reasoning.length>0&&draft.reasoning!==selection?.reasoningEffort);
+  const applyDisabled=!!disabledReason||freshSessionBlocked||!onAgentConfigurationChange||!target||!changed
+    ||reasoning.length>0&&!reasoning.some(option=>option.value===draft.reasoning);
+  function selectTarget(option:NonNullable<AgentModelControl['model']>['options'][number]){
+    const choices=option.reasoningOptions??modelControl?.reasoning?.options??[];
+    const effort=option.value===selection?.model&&choices.some(choice=>choice.value===selection.reasoningEffort)?selection.reasoningEffort
+      :option.reasoningOptions?option.defaultReasoningEffort??null
+      :choices.some(choice=>choice.value===selection?.reasoningEffort)?selection?.reasoningEffort??null:null;
+    setDraft({model:option.value,reasoning:effort});
+  }
+  function applyDraft(){
+    if(applyDisabled||!target||!onAgentConfigurationChange)return;
+    onAgentConfigurationChange({model:target.value,...(selection?.modelProvider?{modelProvider:selection.modelProvider}:{}),
+      ...(reasoning.length&&draft.reasoning?{reasoning:draft.reasoning}:target.reasoningOptions?{reasoning:''}:{})});
+  }
   const unavailable=modelControl?.application==='next-turn'?'设置将在下一回合应用，当前模型尚未确认。':modelControl?.application==='requires-new-session'?'模型变更需要新会话，请在任务详情通过交接或恢复继续。':modelControl?.status==='unsupported'?'当前 Agent 未提供模型或推理控制。':'Agent 会话尚未连接或模型状态尚未确认。';
   return <div className="chat-model-panel"><div className="chat-panel-heading"><h3>模型与推理</h3><span className="chat-evidence-label">{agentLabel}</span></div>
-    <div className="chat-current-model"><small>{confirmed?'当前 Agent 模型':'模型状态'}</small><strong>{confirmed?(current?.label||selection?.model||'运行时默认模型'):'尚未确认'}</strong><small>{confirmed?'Agent 运行时已确认':unavailable}</small></div>
+    <div className="chat-current-model"><small>{confirmed?'当前 Agent 模型':'模型状态'}</small><strong>{confirmed?(current?.label||selection?.model||'运行时默认模型'):'尚未确认'}</strong><small>{confirmed?`Agent 运行时已确认${selection?.reasoningEffort?` · 推理 ${selection.reasoningEffort}`:''}`:unavailable}</small></div>
     <ChatConfigurationDetails {...props}/>
     {!confirmed&&selection?.model&&modelControl?.application==='runtime-confirmed'&&<p className="chat-context-caption">最近确认：{current?.label||selection.model}{selection.reasoningEffort?` · 推理 ${selection.reasoningEffort}`:''}。当前状态待核验。</p>}
     {!confirmed&&modelControl?.application==='next-turn'&&modelControl.requested?.model&&<p className="chat-context-caption">下一回合请求：{modelControl.requested.model}{modelControl.requested.reasoningEffort?` · 推理 ${modelControl.requested.reasoningEffort}`:''}。实际模型仍需运行时确认。</p>}
     {disabledReason&&<p className="chat-panel-lock" role="status">{disabledReason}</p>}
     {confirmed&&<><label className="chat-model-search"><Icon name="search" size={15}/><input aria-label="搜索 Agent 模型" value={query} placeholder="搜索 Agent 模型" onChange={event=>onQueryChange(event.target.value)}/></label>
-      <div className="chat-model-options" role="listbox" aria-label="可用 Agent 模型">{models.filter(option=>`${option.label} ${option.value}`.toLowerCase().includes(query.toLowerCase())).map(option=><button type="button" role="option" aria-selected={option.value===selection?.model} disabled={!!disabledReason} key={option.value} onClick={()=>{onModelChange(JSON.stringify([selection?.modelProvider??'',option.value]));onClose();}}><span className="chat-model-option-name"><strong>{option.label}</strong>{option.value===selection?.model&&<Icon name="check" size={15}/>}</span></button>)}</div>
-      <section className="chat-reasoning"><div className="chat-panel-heading"><h4>推理强度</h4><small>{reasoning.length?'Agent 声明':'不可配置'}</small></div>{reasoning.length?<div className="chat-reasoning-levels">{reasoning.map(option=><button type="button" key={option.value} aria-label={`推理强度 ${option.value}`} aria-pressed={selection?.reasoningEffort===option.value} disabled={!!disabledReason} onClick={()=>onReasoningChange(option.value)}>{option.label}</button>)}</div>:<p className="chat-context-caption">此 Agent 当前未提供可配置的推理选项。</p>}</section></>}
+      <div className="chat-model-options" role="listbox" aria-label="可用 Agent 模型">{models.filter(option=>`${option.label} ${option.value}`.toLowerCase().includes(query.toLowerCase())).map(option=><button type="button" role="option" aria-selected={option.value===draft.model} disabled={!!disabledReason} key={option.value} onClick={()=>selectTarget(option)}><span className="chat-model-option-name"><strong>{option.label}</strong>{option.value===draft.model&&<Icon name="check" size={15}/>}</span></button>)}</div>
+      <section className="chat-reasoning"><div className="chat-panel-heading"><h4>推理强度</h4><small>{reasoning.length?'Agent 声明':'不可配置'}</small></div>{reasoning.length?<div className="chat-reasoning-levels">{reasoning.map(option=><button type="button" key={option.value} aria-label={`推理强度 ${option.value}`} aria-pressed={draft.reasoning===option.value} disabled={!!disabledReason} onClick={()=>setDraft(value=>({...value,reasoning:option.value}))}>{option.label}</button>)}</div>:<p className="chat-context-caption">此 Agent 当前未提供可配置的推理选项。</p>}</section>
+      <p className="chat-context-caption">待应用：{target?.label||draft.model||'请选择模型'}{draft.reasoning?` · 推理 ${draft.reasoning}`:''}。选择后点击应用，当前模型以 Agent 回执为准。</p>
+      {modelControl?.changeApplication==='requires-new-session'&&<p className="chat-context-caption">{freshSessionBlocked?'模型变更需要新会话。请先建立或打开任务，在任务详情通过交接或恢复继续。':'模型变更需要新会话，将通过当前任务的交接应用。'}</p>}
+      <button className="chat-panel-settings" type="button" disabled={applyDisabled} onClick={applyDraft}>应用模型与推理</button></>}
     <p className="chat-context-caption">连接信息可在 Agent 页面查看。</p>
     {onOpenTask&&<button className="chat-panel-settings" type="button" onClick={()=>{onClose();onOpenTask();}}>查看任务</button>}
   </div>;
@@ -115,7 +138,7 @@ function AgentModelPickerContent(props:ChatModelPickerProps){
 export function ChatModelPickerContent(props:ChatModelPickerProps){
   props={...props,disabledReason:props.disabledReason||(props.saving?'配置正在保存，请稍候':pendingConfiguration(props.configuration)?'先核对当前配置后再更改':null)};
   const {models,selectedModelKey,selectedAgent,agentLabel,selectedReasoning,disabledReason,query,onQueryChange,onModelChange,onReasoningChange,onConfigure,onClose}=props;
-  if(usesAgentModelControls(selectedAgent))return AgentModelPickerContent(props);
+  if(usesAgentModelControls(selectedAgent))return <AgentModelPickerContent {...props}/>;
   let providerId='',currentModel='';try{[providerId,currentModel]=JSON.parse(selectedModelKey);}catch{/* Unknown selections are displayed without inventing an alternative. */}
   const selectedProvider=models.find(provider=>provider.id===providerId);
   const selected=selectedProvider?.models.find(model=>modelId(model)===currentModel);

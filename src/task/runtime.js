@@ -29,6 +29,7 @@ import {
   normalizeStatus,
   normalizeStringList,
   normalizeText,
+  normalizeTaskModelConfig,
   normalizeWorkspaceId,
   taskError
 } from './types.js';
@@ -672,13 +673,11 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   function setModelConfig({ id, expectedRev, modelProvider, model, reasoningEffort, agentProvider } = {}) {
-    const modelConfig = {
-      modelProvider: normalizeText(modelProvider, 'modelProvider', 80) || null,
-      model: normalizeText(model, 'model', 160) || null,
-      reasoningEffort: normalizeText(reasoningEffort, 'reasoningEffort', 40) || null
-    };
+    const current = requireTask(id);
+    const modelConfig = normalizeTaskModelConfig({ modelProvider, model, reasoningEffort,
+      agentProvider: agentProvider || current.currentAgent?.provider || current.requestedAgentProvider || 'cetamesh' });
     return mutate(id, expectedRev, (task) => {
-      task.modelConfig = { ...modelConfig, agentProvider: normalizeProvider(agentProvider || task.currentAgent?.provider || task.requestedAgentProvider || 'cetamesh') };
+      task.modelConfig = modelConfig;
       return task;
     });
   }

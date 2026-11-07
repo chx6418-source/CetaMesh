@@ -55,10 +55,11 @@ export interface ChatModelProvider { id: string; label: string; configured: bool
 export interface AgentModelControl {
   status: 'available' | 'unsupported' | 'unknown'; source: string | null; runtimeVersion?: string | null;
   application: 'runtime-confirmed' | 'next-turn' | 'requires-new-session' | null;
+  changeApplication?: 'runtime-confirmed' | 'next-turn' | 'requires-new-session';
   selection: {model:string|null;reasoningEffort:string|null;modelProvider?:string|null}|null;
   requested?: {model:string|null;reasoningEffort:string|null;modelProvider?:string|null}|null;
   lastRequest?: {model:string|null;reasoningEffort:string|null;modelProvider?:string|null;source:'cli-argv';turnId:string|null};
-  model: {configId?:string|null;options:{value:string;label:string}[]}|null;
+  model: {configId?:string|null;options:{value:string;label:string;reasoningOptions?:{value:string;label:string}[];defaultReasoningEffort?:string}[]}|null;
   reasoning: {configId?:string|null;options:{value:string;label:string}[]}|null;
 }
 export interface ModelUsage {

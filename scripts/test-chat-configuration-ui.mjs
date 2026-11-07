@@ -16,12 +16,25 @@ let failed = true, server, browser, browserClosed, socket, closeBrowser;
 try {
   const { build } = require('esbuild');
   const bundle = await build({ stdin: { resolveDir: root, loader: 'tsx', contents: `
-import React from 'react';import{createRoot}from'react-dom/client';import{ChatPage}from'./src/app/HarborApp';import'./src/theme/tokens.css';import'./src/theme/global.css';
+import React from 'react';import{createRoot}from'react-dom/client';import{ChatPage}from'./src/app/HarborApp';import{ChatModelPickerContent}from'./src/app/ChatComposerPanels';import'./src/theme/tokens.css';import'./src/theme/global.css';
 window.fixture={calls:[],errors:[]};window.addEventListener('error',e=>window.fixture.errors.push(e.message));
 const skillRef={skillId:'skill:'+'a'.repeat(40),sourceRevision:'b'.repeat(64)};
 const saved={revision:1,changeId:'saved',state:'saved',application:'next-turn',durable:true,runtime:'not-required',at:1,errorCode:null};
 const session={id:'fixture-chat',title:'Fixture',taskId:null,configuration:saved,config:{mode:'chat',agentProvider:'none',workspaceId:null,modelProvider:null,model:'',reasoning:'off'}};
+const nativeModels=[{value:'model-a',label:'Native A',reasoningOptions:[{value:'low',label:'Low'}],defaultReasoningEffort:'low'},
+{value:'model-b',label:'Native B',reasoningOptions:[{value:'high',label:'High'},{value:'maximum',label:'Maximum'}],defaultReasoningEffort:'high'},
+{value:'model-c',label:'Native C',reasoningOptions:[{value:'focused',label:'Focused'}]}];
+const nativeControl={status:'available',source:'codex-app-server',application:'runtime-confirmed',changeApplication:'requires-new-session',selection:{model:'model-a',reasoningEffort:'low',modelProvider:'fixture-native'},model:{options:nativeModels},reasoning:{options:nativeModels[0].reasoningOptions}};
+const nativeSaved={...saved,application:'runtime-confirmed',runtime:'confirmed'};
+let nativeSession={id:'native-chat',title:'Native fixture',taskId:'native-task',configuration:nativeSaved,config:{mode:'chat',agentProvider:'codex',workspaceId:null,modelProvider:'fixture-native',model:'model-a',reasoning:'low'}};
 function reply(r){window.fixture.calls.push(structuredClone(r));if(r.method==='ui.events.next')return{events:[],instanceId:'fixture',cursor:0};
+if(r.params?.id==='native-chat'){
+if(r.method==='ui.chat.catalog')return{models:[],modelProviders:[],agentProviders:[{id:'codex',name:'Codex',available:true,eligible:true}],modes:['chat'],sessionId:'native-chat',agentProvider:'codex',modelControl:structuredClone(nativeControl),available:true,reason:null};
+if(r.method==='ui.chat.history')return{id:'native-chat',total:0,messages:[],hasMore:false,hasMoreAfter:false};
+if(r.method==='ui.chat.status')return{id:'native-chat',taskId:'native-task',state:'idle',requestId:null,followState:'idle',toolActivity:[],routing:{},configuration:nativeSaved};
+if(r.method==='ui.chat.config.set')return new Promise((resolve,reject)=>{window.fixture.nativePending={reject:()=>{window.fixture.nativePending=null;reject({code:'FIXTURE_PAIR_REFUSED',message:'Native pair refusal retains the confirmed model'});},ack:()=>{const config=r.params.config;nativeControl.selection={model:config.model,reasoningEffort:config.reasoning,modelProvider:config.modelProvider??'fixture-native'};nativeControl.reasoning={options:nativeModels.find(row=>row.value===config.model).reasoningOptions};nativeSession={...nativeSession,config:{...nativeSession.config,...config}};window.fixture.nativePending=null;resolve(structuredClone(nativeSession));}};});
+}
+if(r.method==='ui.task.get')return{task:{id:'native-task',title:'Native pair fixture',goal:'Native pair fixture',status:'running',progress:{percent:null,note:''},artifacts:[],currentAgent:{provider:'codex',sessionId:'owned-native'},execution:{state:'completed'}}};
 if(r.method==='ui.chat.catalog')return{models:[],modelProviders:[],agentProviders:[],modes:['chat'],defaultModelProvider:null,available:true,reason:null};
 if(r.method==='ui.chat.history')return{id:session.id,total:1,messages:[{id:'historic-reference',role:'user',text:'Earlier selected reference',at:1,attachments:[],toolActivity:[],skillRefs:[{...skillRef}],error:null,cancelled:false}],hasMore:false,hasMoreAfter:false};
 if(r.method==='ui.chat.status')return{id:session.id,taskId:null,state:'idle',requestId:null,statusMessage:null,retryCount:0,followState:'idle',followError:null,displayText:'',toolActivity:[],agentActivity:null,error:null,errorCode:null,approvalId:null,routing:{},configuration:saved};
@@ -31,8 +44,13 @@ if(r.method==='ui.skills.list')return{indexRevision:'c'.repeat(64),entries:[{...
 if(r.method==='ui.skills.read')return{content:'LOW_TRUST_REFERENCE_BODY',sourceRevision:skillRef.sourceRevision,nextOffset:null,truncated:false};
 if(r.method==='ui.chat.send'){if(window.fixture.rejectNextSend){window.fixture.rejectNextSend=false;throw{code:'FIXTURE_SEND_REFUSED',message:'Keep selected references and draft'};}return{userMessageId:r.params.clientMessageId};}
 return r.method.includes('limits')?{limits:{}}:r.method.includes('capabilities')?{supported:false,status:'unknown'}:{};}
-window.ipc={postMessage(raw){const r=JSON.parse(raw);setTimeout(()=>{try{window.__cetameshReceive({id:r.id,ok:true,result:reply(r)});}catch(e){window.__cetameshReceive({id:r.id,ok:false,error:e});}},r.method==='ui.events.next'?200:0);}};
-createRoot(document.getElementById('root')).render(<main className='harbor-main fixture'><ChatPage session={session} workspaces={[{id:'ws-2',name:'Second',status:'ready'}]} activeWorkspaceId={null} onSessionUpdate={()=>{}} onNew={async()=>{}} onNewChat={async()=>{}} onOpenMemory={()=>{}} onConfigureModels={()=>{}} onReviewTask={()=>{}}/></main>);
+window.ipc={postMessage(raw){const r=JSON.parse(raw);setTimeout(async()=>{try{window.__cetameshReceive({id:r.id,ok:true,result:await reply(r)});}catch(e){window.__cetameshReceive({id:r.id,ok:false,error:e});}},r.method==='ui.events.next'?200:0);}};
+const fixtureRoot=createRoot(document.getElementById('root'));
+function NativePage(){const[value,setValue]=React.useState(nativeSession);return<main className='harbor-main fixture'><ChatPage session={value} workspaces={[]} activeWorkspaceId={null} onSessionUpdate={setValue} onNew={async()=>{}} onNewChat={async()=>{}} onOpenMemory={()=>{}} onConfigureModels={()=>{}} onReviewTask={()=>window.fixture.taskOpened=(window.fixture.taskOpened??0)+1}/></main>;}
+window.fixture.openNativePage=()=>fixtureRoot.render(<NativePage/>);
+function IndependentPicker(){const[native,setNative]=React.useState(true);return<><button onClick={()=>setNative(value=>!value)}>Toggle native picker</button><ChatModelPickerContent models={[]} selectedModelKey='["fixture-native","model-a"]' selectedAgent={native?'codex':'none'} agentLabel='Codex' modelControl={nativeControl} query='' onQueryChange={()=>{}} onModelChange={()=>window.fixture.legacyModelCall=true} onReasoningChange={()=>window.fixture.legacyReasoningCall=true} onAgentConfigurationChange={value=>(window.fixture.independentPairs??=[]).push(value)} onConfigure={()=>{}} onClose={()=>{}}/></>;}
+window.fixture.openIndependentPicker=()=>fixtureRoot.render(<IndependentPicker/>);
+fixtureRoot.render(<main className='harbor-main fixture'><ChatPage session={session} workspaces={[{id:'ws-2',name:'Second',status:'ready'}]} activeWorkspaceId={null} onSessionUpdate={()=>{}} onNew={async()=>{}} onNewChat={async()=>{}} onOpenMemory={()=>{}} onConfigureModels={()=>{}} onReviewTask={()=>{}}/></main>);
   ` }, bundle: true, write: false, outfile: 'fixture.js', format: 'iife', platform: 'browser', jsx: 'automatic', plugins: [{ name: 'production-chat-export', setup(build) { build.onLoad({ filter: /[\\/]HarborApp\.tsx$/ }, args => ({ contents: fs.readFileSync(args.path, 'utf8') + '\nexport {ChatPage};', loader: 'tsx', resolveDir: path.dirname(args.path) })); } }] });
   const js = bundle.outputFiles.find(file => file.path.endsWith('.js')).text, css = bundle.outputFiles.find(file => file.path.endsWith('.css')).text;
   server = http.createServer((request, response) => { response.writeHead(200, { 'content-type': 'text/html;charset=utf-8' }); response.end('<!doctype html><meta charset="utf-8"><style>' + css + 'html,body,#root{height:100%;margin:0}.fixture{height:100%;grid-row:auto;grid-column:auto}</style><div id="root"></div><script>' + js.replaceAll('</script', '<\\/script') + '</script>'); });
@@ -95,6 +113,54 @@ createRoot(document.getElementById('root')).render(<main className='harbor-main 
     assert.equal(await evaluate('document.querySelectorAll("input[aria-label=\\"选择 Skill fixture-reference\\"]").length'),1);
     assert.deepEqual(await evaluate('window.fixture.errors'),[]);
     console.log('PASS production Chat add/slash Skill entry, exact typed references, refused-send draft preservation and same-id retry');
+    await evaluate('window.fixture.openNativePage()');
+    await until('document.querySelector("button.composer-model-trigger")?.textContent.includes("Native A")','native confirmed model');
+    await evaluate('document.querySelector("button.composer-model-trigger").click()');
+    await until('!!document.querySelector("[role=listbox][aria-label=\\"可用 Agent 模型\\"]")','native model options');
+    const nativeConfigs=()=>evaluate('window.fixture.calls.filter(r=>r.method==="ui.chat.config.set"&&r.params.id==="native-chat").map(r=>r.params.config)');
+    const chooseNative=value=>evaluate('Array.from(document.querySelectorAll("[role=option]")).find(option=>option.textContent.includes('+JSON.stringify(value)+'))?.click()');
+    await chooseNative('Native B');await delay(80);
+    assert.deepEqual(await nativeConfigs(),[],'choosing a target model is a local draft and dispatches no model-only transaction');
+    await until('!!document.querySelector("button[aria-label=\\"推理强度 maximum\\"]")','target-specific reasoning advertisement');
+    assert.equal(await evaluate('!!document.querySelector("button[aria-label=\\"推理强度 low\\"]")'),false,'target model never borrows the current model effort');
+    assert.equal(await evaluate('document.querySelector("button[aria-label=\\"推理强度 high\\"]")?.getAttribute("aria-pressed")'),'true','only the target model advertised default can seed its draft');
+    assert.equal(await evaluate('document.querySelector(".chat-current-model strong")?.textContent'),'Native A','draft target never replaces actual current model');
+    await chooseNative('Native C');
+    await until('!!document.querySelector("button[aria-label=\\"推理强度 focused\\"]")','model without advertised default');
+    assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="应用模型与推理")?.disabled'),true,'missing native default requires an explicit target effort');
+    await evaluate('document.querySelector("button[aria-label=\\"推理强度 focused\\"]").click()');
+    assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="应用模型与推理")?.disabled'),false);
+    await chooseNative('Native B');
+    await evaluate('document.querySelector("button[aria-label=\\"推理强度 maximum\\"]").click()');await click('应用模型与推理');
+    await until('!!window.fixture.nativePending','atomic native pair pending');
+    assert.deepEqual(await nativeConfigs(),[{model:'model-b',modelProvider:'fixture-native',reasoning:'maximum'}]);
+    assert.equal(await evaluate('document.querySelector("button.composer-model-trigger")?.textContent.includes("Native B")'),false,'pending transaction cannot display draft model as current');
+    assert.equal(await evaluate('document.querySelector(".chat-current-model strong")?.textContent.includes("Native B")'),false);
+    await evaluate('window.fixture.nativePending.reject()');
+    await until('document.body.innerText.includes("Native pair refusal retains the confirmed model")','pair refusal retained');
+    await until('document.querySelector("button.composer-model-trigger")?.textContent.includes("Native A")','known refusal retains old native ACK');
+    assert.equal((await nativeConfigs()).length,1,'failure refresh never replays the pair');
+    if(!await evaluate('!!document.querySelector("[role=listbox][aria-label=\\"可用 Agent 模型\\"]")'))await evaluate('document.querySelector("button.composer-model-trigger").click()');
+    await until('!!document.querySelector("[role=listbox][aria-label=\\"可用 Agent 模型\\"]")','retry picker remains available');
+    await chooseNative('Native B');await evaluate('document.querySelector("button[aria-label=\\"推理强度 high\\"]").click()');await click('应用模型与推理');
+    await until('!!window.fixture.nativePending','second explicit pair pending');
+    assert.deepEqual((await nativeConfigs())[1],{model:'model-b',modelProvider:'fixture-native',reasoning:'high'});
+    await evaluate('window.fixture.nativePending.ack()');
+    await until('document.querySelector("button.composer-model-trigger")?.textContent.includes("Native B")','matching native ACK refreshes current display');
+    assert.equal((await nativeConfigs()).length,2);assert.deepEqual(await evaluate('window.fixture.errors'),[]);
+    if(!await evaluate('Array.from(document.querySelectorAll("button")).some(button=>button.textContent==="查看任务")'))await evaluate('document.querySelector("button.composer-model-trigger").click()');
+    await until('Array.from(document.querySelectorAll("button")).some(button=>button.textContent==="查看任务")','existing Task review action');
+    await click('查看任务');assert.equal(await evaluate('window.fixture.taskOpened'),1,'fresh-session recovery retains the actual existing Task callback');
+    console.log('PASS production native Picker target draft/default, one atomic pair, pending/refusal old ACK and matching ACK display');
+    await evaluate('window.fixture.openIndependentPicker()');await until('document.body.innerText.includes("Toggle native picker")','independent native picker');
+    await click('Toggle native picker');await until('document.body.innerText.includes("模型与服务设置")','ordinary picker shares a stable parent Hooks boundary');
+    await click('Toggle native picker');await until('document.body.innerText.includes("当前 Agent 模型")','native picker remount');
+    await chooseNative('Native A');await delay(60);
+    assert.equal(await evaluate('window.fixture.legacyModelCall??false'),false);assert.deepEqual(await evaluate('window.fixture.independentPairs??[]'),[]);
+    assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).find(button=>button.textContent==="应用模型与推理")?.disabled'),true,'Taskless fresh-session change cannot bypass the existing Task handoff entry');
+    assert.equal(await evaluate('document.body.innerText.includes("需要新会话")'),true,'Taskless fresh-session boundary remains actionable and visible');
+    assert.deepEqual(await evaluate('window.fixture.errors'),[]);
+    console.log('PASS independent Picker Hooks boundary and truthful Taskless fresh-session refusal');
     failed=false;
   }
 } finally {

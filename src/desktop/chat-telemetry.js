@@ -26,26 +26,51 @@ export function projectModelCapabilities(value){
 // permission selectors are deliberately absent; native values retain identity.
 export function projectAgentModelControl(value){
  if(!value||typeof value!=='object'||Array.isArray(value))return null;
- const selector=value=>{
+ const exact=(value,max=256)=>typeof value==='string'&&value.length<=max&&!/[\x00-\x1f\x7f]/.test(value)?value:null;
+ let invalidAdvertisement=false;
+ const selector=(value,perModel=false)=>{
   if(!value||!Array.isArray(value.options))return null;
+  const strict=perModel&&value.options.some(option=>option&&typeof option==='object'
+    &&(Object.hasOwn(option,'reasoningOptions')||Object.hasOwn(option,'defaultReasoningEffort')));
+  if(strict&&value.options.length>256){invalidAdvertisement=true;return null;}
   const seen=new Set();const options=[];
   for(const option of value.options.slice(0,256)){
-   const id=label(option?.value,256);
-   if(!id||id!==option.value||seen.has(id))continue;
-   seen.add(id);options.push({value:id,label:label(option.label??option.name,200)||id});
+   const id=exact(option?.value);
+   if(!id||id!==option.value||seen.has(id)){
+    if(strict){invalidAdvertisement=true;return null;}
+    continue;
+   }
+   const projected={value:id,label:label(option.label??option.name,256)||id};
+   if(perModel&&Object.hasOwn(option,'reasoningOptions')){
+    const choices=option.reasoningOptions;
+    if(!Array.isArray(choices)||choices.length>32){invalidAdvertisement=true;return null;}
+    const efforts=new Set();projected.reasoningOptions=[];
+    for(const choice of choices){
+     const effort=exact(choice?.value),name=exact(choice?.label);
+     if(!effort||!name||efforts.has(effort)){invalidAdvertisement=true;return null;}
+     efforts.add(effort);projected.reasoningOptions.push({value:effort,label:name});
+    }
+    if(Object.hasOwn(option,'defaultReasoningEffort')){
+     if(!efforts.has(exact(option.defaultReasoningEffort))){invalidAdvertisement=true;return null;}
+     projected.defaultReasoningEffort=option.defaultReasoningEffort;
+    }
+   }else if(perModel&&Object.hasOwn(option,'defaultReasoningEffort')){invalidAdvertisement=true;return null;}
+   seen.add(id);options.push(projected);
   }
-  return{configId:label(value.configId,80),options};
+  return{...(Object.hasOwn(value,'configId')?{configId:label(value.configId,80)}:{}),options};
  };
  const projectSelection=selection=>selection&&typeof selection==='object'?{
-  model:label(selection.model,256),reasoningEffort:label(selection.reasoningEffort,256),
-  modelProvider:label(selection.modelProvider,80)}:null;
+  model:exact(selection.model),reasoningEffort:exact(selection.reasoningEffort),
+  modelProvider:exact(selection.modelProvider,80)}:null;
  const selection=projectSelection(value.selection);
- return{status:['available','unsupported','unknown'].includes(value.status)?value.status:'unknown',
+ const projected={status:['available','unsupported','unknown'].includes(value.status)?value.status:'unknown',
   source:label(value.source,80),runtimeVersion:label(value.runtimeVersion,80),
   application:['runtime-confirmed','next-turn','requires-new-session'].includes(value.application)?value.application:null,
-  selection,model:selector(value.model),reasoning:selector(value.reasoning),
+  ...(['runtime-confirmed','next-turn','requires-new-session'].includes(value.changeApplication)?{changeApplication:value.changeApplication}:{}),
+  selection,model:selector(value.model,true),reasoning:selector(value.reasoning),
   ...(value.requested?{requested:projectSelection(value.requested)}:{}),
   ...(value.lastRequest?.source==='cli-argv'?{lastRequest:{...projectSelection(value.lastRequest),source:'cli-argv',turnId:label(value.lastRequest.turnId,160)}}:{})};
+ return invalidAdvertisement||Buffer.byteLength(JSON.stringify(projected))>128*1024?null:projected;
 }
 import { safeRequestDiagnostics, MAX_REQUEST_DIAGNOSTICS } from '../model/request-diagnostics.js';
 

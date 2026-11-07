@@ -103,6 +103,53 @@ function setup({ policy, gate, failSendProvider, alphaStatusError, sourceProvide
   return { service, runtime: service.runtime, broker, registry, taskRuntime, log, rev, dir };
 }
 
+for (const invalid of [{ model: 'm'.repeat(257) }, { reasoningEffort: 'e'.repeat(257) }, { modelProvider: 'p'.repeat(81) }]) {
+  const { runtime, taskRuntime, rev, log } = setup();
+  const task = taskRuntime.create({ goal: 'Reject unsupported Task model identity before Handoff effects', workspaceId: 'ws-model-preflight' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  const before = taskRuntime.get({ id: task.id }).task;
+  await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'alpha', ...invalid }), { code: 'INVALID_PARAMS' });
+  assert.deepEqual(log, [], 'known invalid model metadata must not create/cancel/bootstrap either Agent');
+  assert.deepEqual(taskRuntime.get({ id: task.id }).task, before, 'known invalid request preserves the existing Task and Checkpoint before any effects');
+  assert.equal(runtime.isInFlight(task.id), false);
+}
+for (const acknowledged of [null, 'low']) {
+  const { runtime, taskRuntime, broker, rev, log } = setup();
+  const task = taskRuntime.create({ goal: 'Switch from native reasoning to a model with no reasoning', workspaceId: 'ws-clear-reasoning' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  broker.status = async () => ({ running: false, modelControl: { status: 'available', application: 'runtime-confirmed', selection: { model: 'model-a', reasoningEffort: 'low' } } });
+  const create = broker.createSession;
+  broker.createSession = async (...args) => ({ ...await create(...args), modelControl: { status: 'available', application: 'runtime-confirmed', selection: { model: 'model-b', reasoningEffort: acknowledged } } });
+  if (acknowledged === null) {
+    const result = await runtime.rollover({ taskId: task.id, targetProvider: 'alpha', model: 'model-b', reasoningEffort: null });
+    assert.equal(result.task.modelConfig.reasoningEffort, null);
+    assert.equal(log.find(row => row.kind === 'create').options.reasoningEffort, null, 'explicit no-effort survives the Core bridge instead of inheriting source reasoning');
+  } else {
+    await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'alpha', model: 'model-b', reasoningEffort: null }), { code: 'MODEL_ACK_MISMATCH' });
+    assert.equal(log.filter(row => row.kind === 'cancel' && row.sessionId === 'alpha-old').length, 0, 'wrong no-effort ACK cannot stop the source');
+    assert.equal(taskRuntime.get({ id: task.id }).task.currentAgent.sessionId, 'alpha-old');
+  }
+}
+for (const oversized of [false, true]) {
+  const { runtime, taskRuntime, broker, rev, log } = setup();
+  const task = taskRuntime.create({ goal: 'Preserve exact native model ACK in the same Task', workspaceId: 'ws-native-model-ack' });
+  taskRuntime.attachAgent({ id: task.id, expectedRev: rev(task.id), provider: 'alpha', sessionId: 'alpha-old' });
+  const before = taskRuntime.get({ id: task.id }).task, create = broker.createSession;
+  const model = 'm'.repeat(oversized ? 257 : 256), effort = 'e'.repeat(64);
+  broker.createSession = async (...args) => ({ ...await create(...args), modelControl: { status: 'available', application: 'runtime-confirmed', selection: { model, reasoningEffort: effort, modelProvider: null } } });
+  if (oversized) {
+    await assert.rejects(runtime.rollover({ taskId: task.id, targetProvider: 'alpha' }), { code: 'INVALID_PARAMS' });
+    assert.equal(log.filter(row => row.kind === 'create').length, 1);
+    assert.equal(log.filter(row => row.kind === 'cancel' && row.sessionId === 'alpha-old').length, 0, 'unpersistable native default ACK refuses before stopping the old executor');
+    const after = taskRuntime.get({ id: task.id }).task;
+    assert.deepEqual(after.currentAgent, before.currentAgent); assert.deepEqual(after.checkpoint, before.checkpoint);
+    assert.deepEqual(after.executionEvidence, before.executionEvidence); assert.equal(after.modelConfig, null);
+  } else {
+    const result = await runtime.rollover({ taskId: task.id, targetProvider: 'alpha', model, reasoningEffort: effort });
+    assert.equal(result.taskId, task.id); assert.equal(result.task.modelConfig.model, model);
+    assert.equal(result.task.modelConfig.reasoningEffort, effort);
+  }
+}
 {
   const { runtime, taskRuntime, rev, log } = setup({ alphaStatusError: 'SESSION_NOT_FOUND' });
   const task = taskRuntime.create({ goal: 'Do not replace unconfirmed external execution', workspaceId: 'ws-missing-native' });

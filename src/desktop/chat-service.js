@@ -760,8 +760,10 @@ export function createChatService({
     if (config?.mode !== undefined && !CHAT_MODES.includes(config.mode)) {
       throw chatError('INVALID_PARAMS', `mode 必须是 ${CHAT_MODES.join('/')}`);
     }
-    if (config?.model !== undefined && (typeof config.model !== 'string' || config.model.length > 200)) {
-      throw chatError('INVALID_PARAMS', 'model 必须是不超过 200 字符的字符串');
+    const modelLimit = externalAgent(requestedAgent) ? 256 : 200;
+    if (config?.model !== undefined && (typeof config.model !== 'string' || config.model.length > modelLimit
+      || externalAgent(requestedAgent) && !boundedModelValue(config.model))) {
+      throw chatError('INVALID_PARAMS', `model 必须是不超过 ${modelLimit} 字符的字符串`);
     }
     if (config?.modelProvider !== undefined) {
       // Model Provider（Model Runtime）：null = 自动（按已配置 Key 的 Provider 解析）。
@@ -824,7 +826,9 @@ export function createChatService({
       const capabilities=modelRuntime.modelCapabilities(nextConfig.modelProvider,nextConfig.model);
       if (!capabilities?.reasoning?.levels?.includes(nextConfig.reasoning)) throw chatError('MODEL_REASONING_UNSUPPORTED','当前模型未声明支持所选推理强度');
     }
-    const modelConfigChanged = nextConfig.model !== previousConfig.model
+    const nativeSelectionRequested = Boolean(record.dshSessionId && externalAgent(requestedAgent)
+      && ['model', 'reasoning', 'modelProvider'].some(key => config[key] !== undefined));
+    const modelConfigChanged = nativeSelectionRequested || nextConfig.model !== previousConfig.model
       || nextConfig.reasoning !== previousConfig.reasoning
       || nextConfig.modelProvider !== previousConfig.modelProvider;
     const workspaceChanged = nextConfig.workspaceId !== previousConfig.workspaceId;
@@ -897,22 +901,37 @@ export function createChatService({
       const sourceSessionId = record.dshSessionId ?? (agentProviderChanged && record.taskId ? linkedTask?.currentAgent?.sessionId : null);
       const native = externalAgent(provider);
       if (typeof agentExecute !== 'function') throw chatError('PROVIDER_ERROR', 'Agent 运行时不可用，无法应用模型设置');
-      let before = null;
+      let before = null, nativeSelection = null, nativePerModel = false;
       if (!agentProviderChanged && native) {
         const observed = await agentExecute({ method: 'agent.status', params: { provider, sessionId: record.dshSessionId } });
         assertConfigurationOwner(record, state);
         assertConfigurationStatus(observed);
         before = projectAgentModelControl(observed.modelControl);
-        if (before?.status !== 'available') throw chatError('AGENT_MODEL_UNSUPPORTED', '当前 Agent 未提供已确认的模型控制能力');
+        if (before?.status !== 'available' || !before.selection?.model) throw chatError('AGENT_MODEL_UNSUPPORTED', '当前 Agent 未提供已确认的模型控制能力');
         if (before.application !== 'runtime-confirmed') throw chatError('TASK_HANDOFF_REQUIRED', '此 Agent 的配置需要通过任务交接或新会话应用');
-        if (nextConfig.modelProvider !== previousConfig.modelProvider && nextConfig.modelProvider
+        if (config.modelProvider !== undefined && nextConfig.modelProvider
           && before.selection?.modelProvider !== nextConfig.modelProvider) throw chatError('AGENT_MODEL_UNSUPPORTED', '所选模型提供方不属于当前 Agent 的已确认连接');
-        if (nextConfig.model !== previousConfig.model && !before.model?.options.some(option => option.value === nextConfig.model)) {
+        const targetModel = config.model !== undefined ? nextConfig.model : before.selection?.model;
+        const targetReasoning = config.reasoning !== undefined ? nextConfig.reasoning || null : before.selection?.reasoningEffort ?? null;
+        const advertised = before.model?.options.find(option => option.value === targetModel);
+        if (config.model !== undefined && !advertised) {
           throw chatError('AGENT_MODEL_UNSUPPORTED', '所选模型不在当前 Agent 的目录中');
         }
-        if (nextConfig.reasoning !== previousConfig.reasoning && !before.reasoning?.options.some(option => option.value === nextConfig.reasoning)) {
+        if (advertised?.reasoningOptions) {
+          if (targetReasoning === null ? advertised.reasoningOptions.length > 0
+            : !advertised.reasoningOptions.some(option => option.value === targetReasoning)) {
+            throw chatError('MODEL_REASONING_UNSUPPORTED', '目标模型未声明所选推理选项，请同时选择该模型支持的推理强度');
+          }
+        } else if (before.model?.options.some(option => option.reasoningOptions)
+          || config.reasoning !== undefined && !before.reasoning?.options.some(option => option.value === nextConfig.reasoning)) {
           throw chatError('MODEL_REASONING_UNSUPPORTED', '当前 Agent 未声明所选推理选项');
         }
+        // The native ACK, rather than stale persisted defaults, supplies omitted
+        // fields. Carry this validated tuple through one existing transaction.
+        nativeSelection = { model: targetModel, reasoningEffort: targetReasoning,
+          modelProvider: (config.modelProvider !== undefined ? nextConfig.modelProvider : before.selection?.modelProvider)
+            || before.selection?.modelProvider || null };
+        nativePerModel = Array.isArray(advertised?.reasoningOptions);
       }
       let configurationTask = linkedTask;
       if (record.taskId && (native || agentProviderChanged)) {
@@ -925,6 +944,11 @@ export function createChatService({
         if (configurationTask?.id !== record.taskId || configurationTask.currentAgent?.provider !== provider || configurationTask.currentAgent.sessionId !== sourceSessionId
           || record.config.workspaceId && configurationTask.workspaceId !== record.config.workspaceId) throw chatError('TASK_SESSION_MISMATCH', '准备配置期间任务执行归属已变化');
       }
+      if (nativeSelection && sameConfigurationSelection(nativeSelection, before.selection)
+        && nativeSelection.model === previousConfig.model
+        && (nativeSelection.reasoningEffort ?? '') === previousConfig.reasoning
+        && nativeSelection.modelProvider === (previousConfig.modelProvider ?? null)
+        && Object.entries(nextConfig).every(([key, value]) => value === previousConfig[key])) return publicSession(record);
       let pending = beginConfiguration(record, state, nextConfig, configurationTask, {
         application: externalAgent(nextConfig.agentProvider || provider) ? 'runtime-confirmed' : 'next-turn',
         kind: record.taskId && (native || agentProviderChanged) ? 'handoff' : 'native', before });
@@ -945,9 +969,10 @@ export function createChatService({
             expectedConfigurationSource: { taskId: record.taskId, taskRevision: pending.sourceBinding.taskRevision,
               workspaceId: pending.sourceBinding.workspaceId, provider: pending.sourceBinding.provider, sessionId: pending.sourceBinding.sessionId },
             targetProvider: nextConfig.agentProvider || provider,
-            model: nextConfig.model !== previousConfig.model ? nextConfig.model || undefined : before?.selection?.model,
-            modelProvider: nextConfig.modelProvider || before?.selection?.modelProvider || undefined,
-            reasoningEffort: nextConfig.reasoning !== previousConfig.reasoning ? nextConfig.reasoning || undefined : before?.selection?.reasoningEffort ?? undefined });
+            model: nativeSelection?.model ?? (nextConfig.model !== previousConfig.model ? nextConfig.model || undefined : before?.selection?.model),
+            modelProvider: nativeSelection?.modelProvider ?? (nextConfig.modelProvider || before?.selection?.modelProvider || undefined),
+            reasoningEffort: nativeSelection ? nativeSelection.reasoningEffort
+              : nextConfig.reasoning !== previousConfig.reasoning ? nextConfig.reasoning || undefined : before?.selection?.reasoningEffort ?? undefined });
           assertConfigurationOwner(record, state, pending);
           if (transferred?.to?.provider !== (nextConfig.agentProvider || provider) || !transferred.to.sessionId) {
             throw chatError('TASK_SESSION_MISMATCH', '任务交接未返回确认的目标会话');
@@ -964,10 +989,14 @@ export function createChatService({
           applied = transferred.modelControl ? transferred : await agentExecute({ method: 'agent.status', params: transferred.to });
         } else {
           applied = await agentExecute({ method: 'agent.selectModel', params: { provider, sessionId: record.dshSessionId,
-            ...(native ? {
-              ...(nextConfig.model !== previousConfig.model ? { model: nextConfig.model } : {}),
-              ...(nextConfig.modelProvider !== previousConfig.modelProvider ? { modelProvider: nextConfig.modelProvider } : {}),
-              ...(nextConfig.reasoning !== previousConfig.reasoning ? { reasoningEffort: nextConfig.reasoning } : {})
+            ...(native ? nativePerModel ? {
+              model: nativeSelection.model,
+              ...(nativeSelection.modelProvider ? { modelProvider: nativeSelection.modelProvider } : {}),
+              reasoningEffort: nativeSelection.reasoningEffort
+            } : {
+              ...(config.model !== undefined && nativeSelection.model !== before.selection?.model ? { model: nativeSelection.model } : {}),
+              ...(config.modelProvider !== undefined && nativeSelection.modelProvider !== before.selection?.modelProvider ? { modelProvider: nativeSelection.modelProvider } : {}),
+              ...(config.reasoning !== undefined && nativeSelection.reasoningEffort !== before.selection?.reasoningEffort ? { reasoningEffort: nativeSelection.reasoningEffort } : {})
             } : { model: nextConfig.model, modelProvider: nextConfig.modelProvider, reasoningEffort: nextConfig.reasoning }) } });
         }
         assertConfigurationOwner(record, state, pending);
@@ -980,9 +1009,9 @@ export function createChatService({
           // the Agent assignment, while its model remains explicitly unknown.
           pending = { ...pending, application: 'requires-new-session', sessionCreated: true };
         } else if (targetNative) {
-          const expectedModel = agentProviderChanged ? null : nextConfig.model !== previousConfig.model ? nextConfig.model : before?.selection?.model;
-          const expectedReasoning = nextConfig.reasoning !== previousConfig.reasoning ? nextConfig.reasoning : before?.selection?.reasoningEffort;
-          const expectedModelProvider = nextConfig.modelProvider || before?.selection?.modelProvider || null;
+          const expectedModel = agentProviderChanged ? null : nativeSelection?.model ?? (nextConfig.model !== previousConfig.model ? nextConfig.model : before?.selection?.model);
+          const expectedReasoning = nativeSelection ? nativeSelection.reasoningEffort : nextConfig.reasoning !== previousConfig.reasoning ? nextConfig.reasoning : before?.selection?.reasoningEffort;
+          const expectedModelProvider = nativeSelection?.modelProvider ?? (nextConfig.modelProvider || before?.selection?.modelProvider || null);
           if (confirmed?.status !== 'available' || confirmed.application !== 'runtime-confirmed' || !confirmed.selection?.model
             || expectedModel && confirmed.selection.model !== expectedModel
             || !agentProviderChanged && (confirmed.selection.reasoningEffort ?? null) !== (expectedReasoning ?? null)

@@ -31,6 +31,7 @@ import { inspectTaskSession } from '../agent/session-recovery.js';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { renderOwnerContext } from '../task/owner-context.js';
+import { normalizeTaskModelConfig } from '../task/types.js';
 import fs from 'node:fs';
 import { StorageError, discardFile, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import {
@@ -544,6 +545,9 @@ export function createContinuityRuntime({
    */
   async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, modelProvider, model, reasoningEffort, automatic = false, requireNativeReadiness = false, authorizationGuard = null, onBeforeEffects = null } = {}) {
     const task = requireTask(taskId);
+    // Refuse a known unstorable request before checkpoint, transaction or Agent
+    // effects. Provider catalogs/ACKs still own whether the tuple is supported.
+    normalizeTaskModelConfig({ agentProvider: targetProvider || task.currentAgent?.provider || 'cetamesh', modelProvider, model, reasoningEffort });
     let missingSourceProof = null;
     async function requireMissingSourceStopped(snapshot) {
       // The source was proven stopped before target creation. Re-running a
@@ -756,10 +760,11 @@ export function createContinuityRuntime({
         modelProvider: modelProvider ?? (confirmedModel ? confirmedModel.modelProvider ?? undefined
           : inheritedModel.modelProvider ?? (target.id === previousAgent.provider ? previousStatus?.modelProvider : null) ?? target.defaults?.modelProvider),
         model: model ?? confirmedModel?.model ?? inheritedModel.model ?? (target.id === previousAgent.provider ? previousStatus?.model : null) ?? target.defaults?.model,
-        reasoningEffort: reasoningEffort ?? (confirmedModel ? confirmedModel.reasoningEffort ?? undefined
+        reasoningEffort: reasoningEffort !== undefined ? reasoningEffort : (confirmedModel ? confirmedModel.reasoningEffort ?? undefined
           : inheritedModel.reasoningEffort ?? (target.id === previousAgent.provider ? previousStatus?.reasoningEffort : null) ?? target.defaults?.reasoningEffort)
       };
       try {
+        normalizeTaskModelConfig({ ...selectedModelConfig, agentProvider: target.id });
         authorizationGuard?.({provider:target.id});
         creationEntered = true;
         created = await agentBroker.createSession(target.id, {
@@ -773,8 +778,9 @@ export function createContinuityRuntime({
         if (created.modelControl || confirmedModel) {
           const control = created.modelControl;
           const requested = Object.entries(selectedModelConfig).filter(([,value])=>value!==undefined&&value!==null&&value!=='');
-          if (requested.length && (control?.status!=='available' || control.application!=='runtime-confirmed'
-            || requested.some(([key,value])=>control.selection?.[key]!==value))) {
+          if ((requested.length || reasoningEffort === null) && (control?.status!=='available' || control.application!=='runtime-confirmed'
+            || requested.some(([key,value])=>control.selection?.[key]!==value)
+            || reasoningEffort === null && control.selection?.reasoningEffort !== null)) {
             throw continuityError('MODEL_ACK_MISMATCH','目标 Agent 尚未确认模型配置；原执行者保持绑定，请核验目标运行时');
           }
           if (control?.status==='available' && control.application==='runtime-confirmed' && control.selection?.model) {
@@ -783,6 +789,9 @@ export function createContinuityRuntime({
             selectedModelConfig.reasoningEffort=control.selection.reasoningEffort??null;
           }
         }
+        // A default selected by the target must also fit Task before the old
+        // executor is stopped; a bad target can be discarded independently.
+        normalizeTaskModelConfig({ ...selectedModelConfig, agentProvider: target.id });
         authorizationGuard?.({provider:target.id,sessionId:created.sessionId});
         transaction.to = { provider: target.id, sessionId: created.sessionId };
         writeTransaction(transaction);
@@ -848,7 +857,7 @@ export function createContinuityRuntime({
           }
         }
         if (Object.values(selectedModelConfig).some(value => value !== null && value !== undefined && value !== '')) {
-          taskRuntime.setModelConfig({ id: task.id, expectedRev: currentRev(), ...selectedModelConfig });
+          taskRuntime.setModelConfig({ id: task.id, expectedRev: currentRev(), ...selectedModelConfig, agentProvider: target.id });
         }
       } catch (error) {
         // ACP preserves a supervised session when startup cleanup is unknown.
