@@ -15,7 +15,7 @@ const provider=createAcpAgentProvider({descriptor:{id:'opencode',label:'OpenCode
  launch(){const readable=new PassThrough(),writable=new PassThrough();let stopped;const done=new Promise(resolve=>{stopped=resolve;});
   peer={frames:[],config:options(),readable,send:frame=>readable.write(JSON.stringify({jsonrpc:'2.0',...frame})+'\n')};
   writable.on('data',chunk=>{for(const line of String(chunk).trim().split('\n')){const frame=JSON.parse(line);peer.frames.push(frame);
-   if(frame.method==='initialize')peer.send({id:frame.id,result:{protocolVersion:1}});
+   if(frame.method==='initialize')peer.send({id:frame.id,result:{protocolVersion:1,agentInfo:{name:'OpenCode',version:'2.1.4'}}});
    if(frame.method==='session/new')peer.send({id:frame.id,result:{sessionId:'native',configOptions:peer.config}});
    if(frame.method==='session/set_config_option'){
     if(behavior==='reject'){peer.send({id:frame.id,error:{code:-32602,message:'unsupported'}});continue;}

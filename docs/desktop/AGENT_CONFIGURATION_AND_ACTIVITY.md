@@ -27,6 +27,54 @@ retain the last known selection and block prompts. No shared default reasoning l
 injected. Claude's pinned bridge currently accepts its Owner-configured model and refuses
 unverified Task overrides or reasoning settings before launching a process.
 
+The ACP configuration method is enabled only for the verified native profiles
+(OpenCode 2.1.4 and Qwen Code 0.26.1), matching `agentInfo` identity/version and the
+configured runtime version where supplied. An option advertisement on an unknown
+version does not establish method support. The native option IDs/categories remain
+allowlisted; permission and mode controls do not become model controls.
+
+Codex App Server model control has a separate protocol profile for
+`0.167.0-alpha.3.2`. That profile does not grant execution eligibility: verified
+runtime identity and all existing native policy/approval gates are still required.
+The older `0.163.0-alpha.11.1` execution adapter has no verified model-control
+profile and rejects explicit overrides before launch. Codex exec is unchanged and
+continues to distinguish next-turn requests and argv submission from native ACKs.
+
+The App Server profile reads its own bounded `model/list` advertisements, retaining
+wire model values rather than catalog record IDs. Each model option may carry
+`reasoningOptions` and an advertised `defaultReasoningEffort`; a missing default is
+not filled from the current model or a shared enumeration. A default must belong
+to the same model's advertised options. Current selection still comes only from a
+matching complete native receipt, not from these suggested defaults.
+The catalog is bounded by page/entry/option counts. The complete serialized
+`modelControl` envelope, including selection and current reasoning options, has a
+128 KiB UTF-8 budget. An oversized projection is refused as
+`CODEX_MODEL_CATALOG_INVALID` before publishing its native Session; the unused
+target is closed and the existing source is retained. Identities, native ACKs,
+allowed options and defaults are never truncated or silently omitted.
+
+Initial configuration is sent with `thread/start` and checked against its complete
+model/provider/reasoning and native-policy receipt. This version has no resumable
+rollout before its first turn, and resuming an already loaded thread does not prove
+that model-setting overrides applied. Model/reasoning changes therefore return
+`AGENT_CONFIGURATION_REQUIRES_NEW_SESSION`; the existing Continuity handoff creates
+and confirms the configured target before stopping the source. `thread/resume`
+only confirms restoration of the original tuple. Missing/mismatched restore ACKs
+retain the last known tuple, mark it unknown and fence further prompts. Outgoing
+`turn/start` carries the acknowledged model/effort, but turn acceptance alone is not
+proof of the remote inference model or entitlement.
+
+Claude's configured model is exposed as a `requested` value with
+`application: requires-new-session` and `selection: null`. SDK initialization and
+model configuration are not native model acknowledgement. No reasoning choices are
+invented when the pinned bridge has not advertised model-specific native choices
+and confirmed their application.
+
+The protocol shapes are described in the official [Codex App Server documentation](https://learn.chatgpt.com/docs/app-server),
+[ACP configuration contract](https://agentclientprotocol.com/protocol/v1/session-config-options)
+and [Claude Agent SDK reference](https://code.claude.com/docs/en/agent-sdk/typescript).
+Current general documentation does not override a pinned runtime's verified behavior.
+
 For a Task-bound Chat, a configuration change reuses the existing same-provider Continuity
 handoff. The target's required acknowledgement must be verified before stopping the source.
 Busy or unknown execution cannot be switched. Existing non-Git review requirements continue

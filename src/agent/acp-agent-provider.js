@@ -5,13 +5,14 @@ import { agentProviderError as fault, defineAgentProvider, normalizePromptConten
 import { createJsonRpcTransport } from './protocol/json-rpc-transport.js';
 import { createAgentEventBuffer } from './protocol/agent-event-buffer.js';
 import { createAgentPermissionBridge } from './protocol/agent-permission-bridge.js';
-import { acpSessionConfiguration } from './protocol/acp-session-configuration.js';
+import { acpSessionConfiguration, acpConfigurationVersion } from './protocol/acp-session-configuration.js';
 import { createStagingWorkspace, collectStagedChanges, refreshStagingBaseline, cleanupStagingWorkspace } from '../workspace/staging.js';
 
 /** ACP v1 only. launch is a trusted process supervisor, never an RPC supplied command. */
 export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace, applyChanges,
   cleanupStage = cleanupStagingWorkspace, stagingRoot, excludedRoots = [], listWorkspaceRoots = async () => [], snapshotExcludedPaths = [], validateRuntime = async () => {},
-  approvalStatus = () => null, cancelApproval = async () => {}, requestNativeApproval, log = () => {}, getSessionLifecycle = () => null} = {}) {
+  approvalStatus = () => null, cancelApproval = async () => {}, requestNativeApproval, log = () => {}, getSessionLifecycle = () => null,
+  validateCreatedSession = () => {}} = {}) {
   if (!descriptor?.id || !descriptor?.label) throw new TypeError('ACP descriptor required');
   const policy = structuredClone(descriptor), sessions = new Map();
   let creating = 0, shuttingDown = false;
@@ -69,7 +70,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
         if(!confirmed[key]?.options.some(item=>item.value===value))throw fault('AGENT_CONFIGURATION_UNSUPPORTED','The selected model changed its available controls');
         attempted=true;
         const reply=await s.rpc.request('session/set_config_option',{sessionId:s.nativeId,configId:confirmed[key].configId,value},{timeoutMs:15000});
-        confirmed=acpSessionConfiguration(policy.id,reply?.configOptions);
+        confirmed=acpSessionConfiguration(policy.id,reply?.configOptions,s.configurationVersion);
         if(confirmed.status!=='available' || confirmed.selection[field]!==value)throw fault('AGENT_CONFIGURATION_UNCONFIRMED','Agent did not confirm the requested configuration');
       }
       // ACP returns the complete option set. A later selection can change an
@@ -305,7 +306,7 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
               const update = params.update, run = s.run;
               try {
                 if(update?.sessionUpdate==='config_option_update') {
-                  if(!s.configuring && !s.configurationUnknown)s.modelControl=acpSessionConfiguration(policy.id,update.configOptions);
+                  if(!s.configuring && !s.configurationUnknown)s.modelControl=acpSessionConfiguration(policy.id,update.configOptions,s.configurationVersion);
                   return;
                 }
                 if(!run || run.cancelled)return;
@@ -341,10 +342,12 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
           Promise.resolve(s.handle.done).then(lost,lost);
           const initialized = await s.rpc.request('initialize',{protocolVersion:1,clientCapabilities:{},clientInfo:{name:'CetaMesh',version:'1'}},{timeoutMs:15000});
           if (initialized?.protocolVersion !== 1) throw fault('ACP_VERSION_UNSUPPORTED','ACP version negotiation failed');
+          s.configurationVersion=acpConfigurationVersion(policy.id,initialized,policy.runtimeVersion);
           const created = await s.rpc.request('session/new',{cwd:stage.root,mcpServers:[]});
+          validateCreatedSession(created);
           if (s.disconnected || typeof created?.sessionId !== 'string' || !created.sessionId || created.sessionId.length > 1024) throw fault('ACP_SESSION_INVALID','ACP session creation failed');
           s.nativeId = created.sessionId;
-          s.modelControl=acpSessionConfiguration(policy.id,created.configOptions);
+          s.modelControl=acpSessionConfiguration(policy.id,created.configOptions,s.configurationVersion);
           s.permissions = createAgentPermissionBridge({provider:policy.id,sessionId:s.id,nativeSessionId:s.nativeId,taskId,workspaceId,requestNativeApproval});
           if (shuttingDown) throw fault('PROVIDER_SHUTTING_DOWN','ACP provider is shutting down');
           s.state = 'ready';

@@ -63,7 +63,7 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
         || isNativePermissionSecurity(runtime.security)) && (launchSdkRunner == null || typeof launchSdkRunner === 'function')
       && (['provider-login','native-cli'].includes(taskOptions.authMode) || typeof resolveCredential === 'function') && typeof taskOptions.resolveTaskWorkspace === 'function') {
     const launcher = launchSdkRunner ?? createClaudeSdkRunnerLauncher();
-    return createAcpAgentProvider({
+    const provider = createAcpAgentProvider({
       descriptor: { id: 'claude', label: 'Claude', protocolVersion: 1, verifiedRuntime: true, security: runtime.security },
       resolveTaskWorkspace: taskOptions.resolveTaskWorkspace, applyChanges: taskOptions.applyChanges,
       approvalStatus: taskOptions.approvalStatus, cancelApproval: taskOptions.cancelApproval,
@@ -96,6 +96,18 @@ export function createClaudeAgentProvider({ launchSdkRunner, taskOptions, resolv
           await new Promise(resolve => setImmediate(resolve));
           return handle;
         } finally { bootstrap.close(); }
+      }
+    });
+    const modelControl = () => ({status:'unsupported',source:'claude-sdk-config',
+      runtimeVersion:runtime.version??runtime.security?.runtimeVersion??null,application:'requires-new-session',selection:null,
+      requested:{model:runtime.model??null,reasoningEffort:null,modelProvider:null},model:null,reasoning:{options:[]}});
+    return Object.freeze({...provider,
+      async createSession(params) {return {...await provider.createSession(params),modelControl:modelControl()};},
+      async status(params) {return {...await provider.status(params),modelControl:modelControl()};},
+      async selectModel(params) {
+        const state=await provider.status(params);
+        if(state.state!=='ready')throw agentProviderError('TURN_BUSY','Wait for the current Claude operation');
+        throw agentProviderError('AGENT_CONFIGURATION_UNSUPPORTED','Change the Owner-configured Claude model and create a fresh Session; dynamic model and reasoning acknowledgement is not verified');
       }
     });
   }

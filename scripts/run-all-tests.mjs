@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-agent-native-model-control.mjs': { category: 'runtime', timeoutMs: 180000, note: 'Provider-specific advertised native model controls, exact protocol profiles and acknowledged configuration without account generation' },
   'test-context-memory-admission.mjs': { category: 'security', timeoutMs: 120000, note: 'Actual Core Chat and Managed contexts re-admit current Memory after asynchronous Workspace and Skill reads' },
   'test-memory-experience-core.mjs': { category: 'integration', timeoutMs: 180000, note: 'Composed Core settled Task learning, current conditional model context, recall provenance and failure-safe restart; local synthetic model only' },
   'test-memory-experience-signals.mjs': { category: 'security', timeoutMs: 120000, note: 'Finite trusted local experience signals and bounded durable candidate deduplication without model requests' },

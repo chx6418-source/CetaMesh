@@ -3,12 +3,20 @@ import {agentProviderError as fault} from '../agent-provider.js';
 // Only controls observed in the pinned native providers are exposed. ACP modes
 // and arbitrary vendor options may change permissions and are never forwarded.
 const CONTROL_IDS = Object.freeze({opencode:{model:'model',reasoning:'effort'},qwen:{model:'model'}});
+const CONTROL_VERSIONS = Object.freeze({opencode:'2.1.4',qwen:'0.26.1'});
 const bounded = value => typeof value==='string' && value.length>0 && value.length<=256 && !/[\u0000-\u001f\u007f]/.test(value);
-export function acpSessionConfiguration(provider, options) {
+const versionValue = value => typeof value==='string' ? value.replace(/^opencode v/i,'') : null;
+export function acpConfigurationVersion(provider, initialized, expectedVersion) {
+  const actual=initialized?.agentInfo;
+  const name=provider==='opencode'?'OpenCode':provider==='qwen'?'qwen-code':null;
+  if(!name || actual?.name!==name || !bounded(actual.version) || expectedVersion && versionValue(expectedVersion)!==actual.version)return null;
+  return actual.version;
+}
+export function acpSessionConfiguration(provider, options, runtimeVersion = null) {
   const ids=CONTROL_IDS[provider];
-  const control={status:'unsupported',source:'acp-session',application:'requires-new-session',
+  const control={status:'unsupported',source:'acp-session',runtimeVersion,application:'requires-new-session',
     selection:{model:null,reasoningEffort:null},model:{options:[]},reasoning:{options:[]}};
-  if(!ids || options===undefined) return control;
+  if(!ids || runtimeVersion!==CONTROL_VERSIONS[provider] || options===undefined) return control;
   if(!Array.isArray(options) || options.length>64)throw fault('ACP_CONFIGURATION_INVALID','Invalid ACP session configuration');
   for(const [key,id] of Object.entries(ids)) {
     const matching=options.filter(item=>item?.id===id);

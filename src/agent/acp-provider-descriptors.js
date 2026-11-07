@@ -86,7 +86,7 @@ export function createAcpProviders({runtimeResolver=discoverAcpRuntime,launchFac
     const reason=!runtime?.executable ? runtime?.reason ?? 'not_installed' : !commandVerified ? 'acp_launch_unverified'
       : !versionVerified ? runtime.reason ?? 'acp_version_unverified' : !nativeVerified ? 'native_policy_unverified'
       : typeof taskOptions.resolveTaskWorkspace!=='function' ? 'task_binding_unavailable' : null;
-    const provider=createAcpAgentProvider({descriptor:{id:spec.id,label:spec.label,protocolVersion:1,verifiedRuntime:verified,security},
+    const provider=createAcpAgentProvider({descriptor:{id:spec.id,label:spec.label,protocolVersion:1,runtimeVersion:runtime?.version??null,verifiedRuntime:verified,security},
       launch:verified ? launchFactory({executable:runtime.executable,argv:spec.argv}) : undefined,
       resolveTaskWorkspace:taskOptions.resolveTaskWorkspace,applyChanges:taskOptions.applyChanges,
       approvalStatus:taskOptions.approvalStatus,cancelApproval:taskOptions.cancelApproval,
@@ -120,7 +120,7 @@ function configuredProvider(spec,{runtimeConfiguration,launchFactory,taskOptions
       runtime=detected;
       reason=effectiveReason(detected);
       provider=createAcpAgentProvider({descriptor:{id:spec.id,label:spec.label,protocolVersion:1,
-        verifiedRuntime:!reason && detected.compatible===true && detected.securityVerified===true,security:detected.security},
+        runtimeVersion:detected.version,verifiedRuntime:!reason && detected.compatible===true && detected.securityVerified===true,security:detected.security},
         launch:detected.launch,validateRuntime:detected.validateRuntime,
         snapshotExcludedPaths:detected.snapshotExcludedPaths,stagingRoot:taskOptions.stagingRoot,
         excludedRoots:taskOptions.excludedRoots,listWorkspaceRoots:taskOptions.listWorkspaceRoots,
