@@ -39,6 +39,8 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-git-index-actions.mjs': { category: 'security', timeoutMs: 180000, note: 'Exact normal Git index staging and unstaging with source, repository metadata and lock checks' },
+  'test-git-staged-commit.mjs': { category: 'security', timeoutMs: 240000, note: 'Commit reviewed staged OIDs while preserving unrelated index and working bytes, including actual native metadata races, ref formats and cleanup recovery' },
   'test-skill-source-settings.mjs': { category: 'security', timeoutMs: 120000, note: 'Owner registered content libraries through existing Settings CAS without ambient filesystem grants' },
   'test-skill-source-authorization.mjs': { category: 'security', timeoutMs: 120000, note: 'Current Task and bounded reference source authorization without tool dispatch or implied approval' },
   'test-skill-picker-ui.mjs': { category: 'desktop', timeoutMs: 120000, note: 'Production shared Skill picker and explicit reference source controls through actual owned Core services' },

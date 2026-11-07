@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { isInsideRoot, resolveInside } from './boundary.js';
 import { gitRun, gitStatus } from './tools.js';
+import { createGitIndexActions } from './git-index-actions.js';
 
 const fail = (code, message, extra = {}) => { throw Object.assign(new Error(message), { code, ...extra }); };
 const samePath = (a, b) => process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b);
@@ -131,5 +132,5 @@ export function createGitProduct({ stateDir, registry, getTask = () => null, lis
     record(entry, actor, 'git.worktree.create', binding.branch);
     return { created: true, ...binding, parentWorkspaceId: entry.id, workspace: { id: workspace.id, name: workspace.name, root: workspace.root, gitWorktree: workspace.gitWorktree } };
   }
-  return { overview, create };
+  return { overview, create, ...createGitIndexActions({ record }) };
 }

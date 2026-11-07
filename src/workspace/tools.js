@@ -549,10 +549,42 @@ export async function fileSearchAsync(rootReal, { query = '', glob = '', searchP
 
 // ── Git（只读直接执行；commit 由 service 层按策略审批后调用） ────────────────
 
-export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile, literalPaths = false, signal } = {}) {
+export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile, literalPaths = false, signal, input, repository, referenceBackend } = {}) {
+  if (input !== undefined && (typeof input !== 'string' || Buffer.byteLength(input, 'utf8') > 64 * 1024)) {
+    fail('GIT_INPUT_INVALID', 'Git stdin must be a bounded literal string');
+  }
   assertObservationActive(signal);
   const env={...process.env};for(const key of Object.keys(env))if(/^GIT_/i.test(key))delete env[key];
   env.GIT_OPTIONAL_LOCKS='0';if(indexFile)env.GIT_INDEX_FILE=indexFile;
+  if (repository !== undefined) {
+    const keys = ['gitDir', 'commonDir', 'workTree'];
+    if (!repository || typeof repository !== 'object' || Array.isArray(repository)
+      || Object.keys(repository).length !== keys.length || Object.keys(repository).some(key => !keys.includes(key))
+      || keys.some(key => typeof repository[key] !== 'string' || repository[key].length > 4096
+        || repository[key].includes('\0') || !path.isAbsolute(repository[key]))) {
+      fail('GIT_REPOSITORY_INVALID', 'Trusted Git metadata requires complete absolute directory identities');
+    }
+    const nativePath = value => process.platform === 'win32' ? value.replaceAll('\\', '/') : value;
+    env.GIT_DIR = nativePath(repository.gitDir);
+    env.GIT_COMMON_DIR = nativePath(repository.commonDir);
+    env.GIT_WORK_TREE = nativePath(repository.workTree);
+  }
+  if (referenceBackend !== undefined) {
+    const sameRoot = repository && typeof referenceBackend?.root === 'string'
+      && (process.platform === 'win32' ? path.resolve(referenceBackend.root).toLowerCase() === path.resolve(repository.commonDir).toLowerCase()
+        : path.resolve(referenceBackend.root) === path.resolve(repository.commonDir));
+    if (!referenceBackend || typeof referenceBackend !== 'object' || Array.isArray(referenceBackend)
+      || Object.keys(referenceBackend).length !== 2 || Object.keys(referenceBackend).some(key => !['format', 'root'].includes(key))
+      || !['files', 'reftable'].includes(referenceBackend.format) || !sameRoot
+      || referenceBackend.root.length > 4096 || referenceBackend.root.includes('\0') || !path.isAbsolute(referenceBackend.root)) {
+      fail('GIT_REFERENCE_BACKEND_INVALID', 'A native ref update requires an exact backend bound to the reviewed common directory');
+    }
+    // Git's native refs backend resolves its own paths separately from
+    // GIT_COMMON_DIR. The trusted domain selects the tested backend protocol;
+    // never accept a URI or environment map from a renderer or tool request.
+    const target = process.platform === 'win32' ? referenceBackend.root.replaceAll('\\', '/') : referenceBackend.root;
+    env.GIT_REFERENCE_BACKEND = referenceBackend.format + '://' + target;
+  }
   // Git's clean/process filters execute commands even for status/diff. Enumerate
   // configuration without running worktree conversions, then disable every driver.
   const keys = await new Promise((resolve, reject) => {
@@ -565,7 +597,8 @@ export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile,
   assertObservationActive(signal);
   const filters = keys.flatMap(key => ['-c', key + (key.endsWith('.required') ? '=false' : '=')]);
   return new Promise((resolve, reject) => {
-    execFile(
+    let inputError = null;
+    const child = execFile(
       'git',
       [...(literalPaths?['--literal-pathspecs']:[]), '-c', 'commit.gpgSign=false', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`, ...filters, ...args],
       {
@@ -577,15 +610,20 @@ export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile,
         env
       },
       (error, stdout, stderr) => {
-        if (error) {
-          error.exitCode = typeof error.code === 'number' ? error.code : null;
-          error.gitStderr = String(stderr ?? '');
-          reject(error);
+        if (error || inputError) {
+          const failure = error ?? inputError;
+          failure.exitCode = typeof failure.code === 'number' ? failure.code : null;
+          failure.gitStderr = String(stderr ?? '');
+          reject(failure);
           return;
         }
         resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
       }
     );
+    if (input !== undefined) {
+      child.stdin.once('error', error => { inputError = error; });
+      child.stdin.end(input, 'utf8');
+    }
   });
 }
 
@@ -593,10 +631,10 @@ function gitUnavailable(error) {
   return error?.code === 'ENOENT';
 }
 
-export async function gitStatus(rootReal, {completeFiles=false, signal}={}) {
+export async function gitStatus(rootReal, {completeFiles=false, signal, repository}={}) {
   let out;
   try {
-    out = await gitRun(rootReal, ['status', '--porcelain=v1', '--branch',...(completeFiles?['-z','--untracked-files=all']:[]), '--', '.'], { signal });
+    out = await gitRun(rootReal, ['status', '--porcelain=v1', '--branch',...(completeFiles?['-z','--untracked-files=all']:[]), '--', '.'], { signal, repository });
   } catch (error) {
     assertObservationActive(signal);
     if (gitUnavailable(error)) fail('GIT_UNAVAILABLE', 'git 不可用（未安装或不在 PATH）');
@@ -605,8 +643,8 @@ export async function gitStatus(rootReal, {completeFiles=false, signal}={}) {
     }
     fail('GIT_FAILED', `git status 失败：${error.gitStderr || error.message}`);
   }
-  const repoRoot=fs.realpathSync.native((await gitRun(rootReal,['rev-parse','--show-toplevel'], { signal })).stdout.trim());
-  const {headSha}=await gitHead(rootReal, { signal });
+  const repoRoot=fs.realpathSync.native((await gitRun(rootReal,['rev-parse','--show-toplevel'], { signal, repository })).stdout.trim());
+  const {headSha}=await gitHead(rootReal, { signal, repository });
   assertObservationActive(signal);
   if(completeFiles) {
     const records=out.stdout.split('\0').filter(Boolean),entries=[];let branch='';
@@ -686,9 +724,9 @@ export async function gitDiff(rootReal, { cached = false, context = 3, statOnly 
 }
 
 /** 只读 HEAD 检查：`git rev-parse HEAD`。空仓库（无提交）→ headSha:null，不伪造。 */
-export async function gitHead(rootReal, { signal } = {}) {
+export async function gitHead(rootReal, { signal, repository } = {}) {
   try {
-    const out = await gitRun(rootReal, ['rev-parse', 'HEAD'], { signal });
+    const out = await gitRun(rootReal, ['rev-parse', 'HEAD'], { signal, repository });
     assertObservationActive(signal);
     const headSha = String(out.stdout ?? '').trim();
     return { isRepo: true, headSha: /^[0-9a-f]{40}$/i.test(headSha) ? headSha : null };
