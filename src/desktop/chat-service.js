@@ -403,7 +403,9 @@ export function createChatService({
     const store = loadChatFile(historyFile(record.id), null);
     writeJsonAtomic(historyFile(record.id), { schemaVersion: SCHEMA_VERSION,
       messages: Array.isArray(store?.messages) ? store.messages : [],
-      activeTurn: { id: turn.activityMessageId, role: 'assistant', text: '', at: turn.activityTimeline.entries[0]?.at ?? now(),
+      activeTurn: { id: turn.activityMessageId, role: 'assistant', text: (turn.displayText ?? '').slice(0, MAX_MESSAGE_CHARS_RETURNED),
+        ...(turn.displayText?.length > MAX_MESSAGE_CHARS_RETURNED ? { textTruncated: true } : {}),
+        at: turn.activityTimeline.entries[0]?.at ?? now(),
         turnId: turn.id, requestId: turn.requestId ?? null, sourceWorkspaceId: record.config.workspaceId ?? null,
         toolActivity: (turn.toolActivity ?? []).map(projectChatToolActivity).filter(Boolean),
         ...(turn.agentActivity ? { agentActivity: { providerId: turn.agentActivity.providerId, label: turn.agentActivity.label, status: turn.agentActivity.status } } : {}),
@@ -546,7 +548,7 @@ export function createChatService({
     const all = readHistory(record.id);
     // Aggregate before pagination; a missing turn receipt means unknown, not zero.
     const usageRecords = all.filter(message => message.role === 'assistant').map(message => message.usage);
-    const sessionUsage = { ...aggregateModelUsage(usageRecords.map(normalizeModelUsage)),
+    const sessionUsage = { ...aggregateModelUsage(usageRecords.map(normalizeModelUsage), { granularity: 'snapshot' }),
       accountingComplete: usageRecords.some(usage => usage?.accountingComplete === false) ? false
         : usageRecords.length && usageRecords.every(usage => usage?.accountingComplete === true) ? true : null,
       requestCount: usageRecords.length && usageRecords.every(usage => Number.isSafeInteger(usage?.requestCount) && usage.requestCount >= 0)
@@ -1071,6 +1073,60 @@ export function createChatService({
   const lastUiStreamAt = new Map();
   const pendingUiDeltas = new Map();
 
+  function discardUiDelta(id) {
+    const pending = pendingUiDeltas.get(id);
+    if (pending?.timer) clearTimeout(pending.timer);
+    pendingUiDeltas.delete(id);
+  }
+
+  function flushUiDelta(record, state) {
+    const pending = pendingUiDeltas.get(record.id);
+    if (!pending) return;
+    discardUiDelta(record.id);
+    // A timer belongs to the exact request and turn object that queued it.
+    if (closePromise || runtime.get(record.id) !== state || pending.turn !== state.turn
+      || pending.requestId !== state.turn?.requestId || !pending.text) return;
+    lastUiStreamAt.set(record.id, now());
+    onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn.state,
+      requestId: pending.requestId, delta: pending.text,
+      toolActivity: state.turn.toolActivity ?? [], agentActivity: state.turn.agentActivity ?? null } });
+  }
+
+  function queueUiDelta(record, state, text) {
+    if (closePromise || !state.turn || state.turn.state === 'cancelling') return;
+    let pending = pendingUiDeltas.get(record.id);
+    if (pending && (pending.turn !== state.turn || pending.requestId !== state.turn.requestId)) {
+      discardUiDelta(record.id); pending = null;
+    }
+    if (!pending) {
+      pending = { turn: state.turn, requestId: state.turn.requestId, text: '', timer: null };
+      pendingUiDeltas.set(record.id, pending);
+    }
+    pending.text += text;
+    const remaining = 50 - (now() - (lastUiStreamAt.get(record.id) ?? 0));
+    if (remaining <= 0) flushUiDelta(record, state);
+    else if (!pending.timer) pending.timer = setTimeout(() => {
+      if (pendingUiDeltas.get(record.id) === pending) flushUiDelta(record, state);
+    }, remaining);
+  }
+
+  // Model tool cycles finish a public segment, whereas a provider's actual
+  // replacement reset still clears its current public answer below.
+  function finishPublicSegment(record, state) {
+    flushUiDelta(record, state);
+    state.messageTexts ??= [];
+    if (state.chunkBuffer) state.messageTexts.push(state.chunkBuffer);
+    state.chunkBuffer = '';
+    if (state.turn) state.turn.displayText = displayTextOf(state);
+  }
+
+  function finishModelText(state, text) {
+    // Empty coordinator terminal text (including an unknown effect) supplies no
+    // final answer; it does not retract public prose already streamed this cycle.
+    if (typeof text === 'string' && text.length > 0) state.chunkBuffer = text;
+    state.turn.displayText = displayTextOf(state);
+  }
+
   function handleChatEvent(record, state, event) {
     if (state.turn && ['agent', 'platform-route'].includes(state.modelTurn?.kind) && state.turn.state === 'starting' && !state.turn.agentAcked
       && !state.turn.providerRequestId && !state.turn.providerTurnId) {
@@ -1088,27 +1144,28 @@ export function createChatService({
     if (type === 'assistant/chunk') {
       const chunk = event?.data?.chunk;
       if (chunk?.type !== 'text-delta' || typeof chunk.text !== 'string' || !chunk.text) return;
-      pendingUiDeltas.set(record.id, (pendingUiDeltas.get(record.id) ?? '') + chunk.text);
-      const last = lastUiStreamAt.get(record.id) ?? 0;
-      if (now() - last < 50) return;
-      lastUiStreamAt.set(record.id, now());
-      const delta = pendingUiDeltas.get(record.id) ?? '';
-      pendingUiDeltas.delete(record.id);
-      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', requestId: state.turn?.requestId, delta, toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
+      queueUiDelta(record, state, chunk.text);
     } else if (type === 'turn/start') {
-      pendingUiDeltas.delete(record.id);
-      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn?.requestId, reset: true, toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn?.requestId,
+        ...(state.turn?.displayText ? { replaceText: state.turn.displayText } : { reset: true }),
+        toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
     } else if (type === 'assistant/reset') {
-      pendingUiDeltas.delete(record.id);
-      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn?.requestId, reset: true } });
-    } else if (type === 'tool/activity') {
+      onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn?.requestId,
+        ...(record.runtimeProvider === 'cetamesh' ? { replaceText: state.turn?.displayText ?? '' } : { reset: true }) } });
+    } else if (type === 'tool/activity' || type === 'tool/result') {
+      flushUiDelta(record, state);
       onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', requestId: state.turn?.requestId,
         toolActivity: state.turn?.toolActivity ?? [], ...(state.turn ? activityProjection(state.turn) : {}) } });
     } else if (type === 'assistant/message') {
-      pendingUiDeltas.delete(record.id);
+      if (record.runtimeProvider === 'cetamesh' && event.data?.statusOnly === true) {
+        onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming',
+          requestId: state.turn?.requestId, message: state.turn?.statusMessage ?? '' } });
+        return;
+      }
+      discardUiDelta(record.id);
       onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: state.turn?.state ?? 'streaming', requestId: state.turn?.requestId, replaceText: state.turn?.displayText ?? '', toolActivity: state.turn?.toolActivity ?? [], agentActivity: state.turn?.agentActivity ?? null } });
     } else if (type === 'turn/end') {
-      pendingUiDeltas.delete(record.id);
+      flushUiDelta(record, state);
       lastUiStreamAt.delete(record.id);
       onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: state.turn?.state ?? 'done' } });
     }
@@ -1144,7 +1201,8 @@ export function createChatService({
       state.turn.activitySourceSequence = event.seq;
     }
     if (event.type === 'turn/start') {
-      if (data.resumed || state.turn.state === 'waiting-approval') { state.messageTexts = []; state.chunkBuffer = ''; }
+      flushUiDelta(record, state);
+      if (data.resumed || state.turn.state === 'waiting-approval') finishPublicSegment(record, state);
       if (state.turn) { state.turn.state = 'streaming'; state.turn.statusMessage = null; }
       if (state.turn && (data.requestedModel || data.providerId)) state.turn.routing = {
         ...(state.turn.routing ?? {}),
@@ -1156,6 +1214,11 @@ export function createChatService({
       return true;
     }
     if (event.type === 'assistant/reset') {
+      if (record.runtimeProvider === 'cetamesh') {
+        finishPublicSegment(record, state);
+        return true;
+      }
+      flushUiDelta(record, state);
       state.messageTexts = []; state.chunkBuffer = '';
       state.turn.displayText = '';
       return true;
@@ -1188,6 +1251,14 @@ export function createChatService({
     }
     if (event.type === 'assistant/message') {
       const part = blocksToText(data.message?.content);
+      // Only the trusted Managed producer labels its own synthetic notice.
+      // External providers cannot mark ordinary assistant content as status.
+      if (record.runtimeProvider === 'cetamesh' && data.statusOnly === true) {
+        flushUiDelta(record, state);
+        state.turn.statusMessage = part.slice(0, 200);
+        retainActivity(record, state.turn);
+        return true;
+      }
       if (part) {
         // 该段完整组装文本到达：定稿本段，清空 chunk 增量（避免翻倍）。
         state.messageTexts.push(part);
@@ -1263,6 +1334,8 @@ export function createChatService({
   function finalizeTurn(record, state) {
     const turn = state.turn;
     if (!turn) return;
+    flushUiDelta(record, state);
+    lastUiStreamAt.delete(record.id);
     if (turn.state === 'error' && !turn.failureStage) {
       turn.failureStage = turn.agentAcked || turn.displayText?.trim() || turn.toolActivity?.length ? 'execution' : 'unknown';
     }
@@ -1674,11 +1747,9 @@ export function createChatService({
             onStreamReset: () => {
               const turn = state.turn;
               if (!turn || turn !== originatingTurn) return;
-              state.messageTexts = [];
-              state.chunkBuffer = '';
-              turn.displayText = '';
+              finishPublicSegment(record, state);
               onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId,
-                reset: true, toolActivity: turn.toolActivity ?? [], agentActivity: turn.agentActivity ?? null } });
+                toolActivity: turn.toolActivity ?? [], agentActivity: turn.agentActivity ?? null } });
             },
             onCapabilityResult: ({ capability, result: toolResult }) => {
               if (state.turn !== originatingTurn) return;
@@ -1708,14 +1779,14 @@ export function createChatService({
               turn.state = 'waiting-approval';
               turn.approvalId = result.approvalId;
               turn.approvalExpiresAt = result.expiresAt ?? null;
-              turn.displayText = 'Waiting for Owner approval.';
+              turn.statusMessage = 'Waiting for Owner approval.';
               retainActivity(record, turn);
               onEvent?.({ event: 'approval.pending', data: { approvalId: result.approvalId, sessionId: record.id } });
               onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: turn.state } });
               return;
             }
             retainModelProtocol(turn, result);
-            turn.displayText = result.text ?? '';
+            finishModelText(state, result.text);
             turn.state = result.status === 'partial' ? 'error' : 'done';
             if (result.status === 'partial') {
               turn.errorCode = result.code ?? 'TOOL_CALL_LIMIT';
@@ -2321,7 +2392,8 @@ export function createChatService({
     const turnId = crypto.randomUUID();
     const requestId = `cetamesh-chat-${String(record.id).slice(0, 80)}-${turnId}`;
     state.turn = { id: turnId, requestId, accountingSessionId: record.id, accountingTaskId: record.taskId ?? null, state: 'starting', displayText: '', toolActivity: [], ...(agentActivity ? { agentActivity } : {}), error: null, usage: null, routing: null };
-    pendingUiDeltas.delete(record.id);
+    discardUiDelta(record.id);
+    lastUiStreamAt.delete(record.id);
     onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'starting', requestId, reset: true, toolActivity: [], agentActivity } });
     try {
       const current=readHistory(record.id).find(m=>m.id===retryMessageId)??readHistory(record.id).findLast(m=>m.role==='user');
@@ -2418,16 +2490,15 @@ export function createChatService({
     if (!target || target.kind !== 'chat') return null;
     const record = sessionOrThrow(target.sessionId);
     const state = runtimeOf(record.id);
-    if (!state.turn) state.turn = { id: target.turnId, state: 'waiting-approval', displayText: 'Waiting for Owner approval.', error: null, usage: null, routing: null };
+    if (!state.turn) state.turn = { id: target.turnId, state: 'waiting-approval', displayText: '', error: null, usage: null, routing: null };
     if (state.turn.id !== target.turnId) return null;
     const originatingTurn = state.turn;
+    finishPublicSegment(record, state);
     state.turn.state = 'streaming';
-    state.turn.displayText = '';
+    state.turn.statusMessage = null;
     delete state.turn.approvalId;
     delete state.turn.approvalExpiresAt;
-    state.messageTexts = [];
-    state.chunkBuffer = '';
-    onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn.requestId, reset: true,
+    onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: state.turn.requestId,
       toolActivity: state.turn.toolActivity ?? [], agentActivity: state.turn.agentActivity ?? null } });
     const controller = new AbortController();
     const cancelOperation = () => controller.abort(signal?.reason);
@@ -2455,10 +2526,8 @@ export function createChatService({
         onStreamReset: () => {
           const turn = state.turn;
           if (!turn || turn !== originatingTurn) return;
-          state.messageTexts = [];
-          state.chunkBuffer = '';
-          turn.displayText = '';
-          onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId, reset: true,
+          finishPublicSegment(record, state);
+          onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: turn.state, requestId: turn.requestId,
             toolActivity: turn.toolActivity ?? [], agentActivity: turn.agentActivity ?? null } });
         },
         onCapabilityResult: ({ capability, result: toolResult }) => {
@@ -2483,14 +2552,14 @@ export function createChatService({
         state.turn.state = 'waiting-approval';
         state.turn.approvalId = result.approvalId;
         state.turn.approvalExpiresAt = result.expiresAt ?? null;
-        state.turn.displayText = 'Waiting for Owner approval.';
+        state.turn.statusMessage = 'Waiting for Owner approval.';
         retainActivity(record, state.turn);
         onEvent?.({ event: 'approval.pending', data: { approvalId: result.approvalId, sessionId: record.id } });
         onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, status: state.turn.state } });
         return { resumed: true, pending: true, approvalId: result.approvalId };
       }
       retainModelProtocol(state.turn, result);
-      state.turn.displayText = result.text ?? '';
+      finishModelText(state, result.text);
       state.turn.usage = result.usage ?? null;
       state.turn.routing = { ...(state.turn.routing ?? {}), toolCalling: result.toolCalling,
         resolvedModel: result.resolvedModel ?? state.turn.routing?.resolvedModel ?? null };
@@ -2531,6 +2600,7 @@ export function createChatService({
     if (!turn || !['starting', 'streaming', 'recovering', 'cancelling', 'waiting-approval'].includes(turn.state)) {
       return { stopped: false, reason: 'no-active-turn' };
     }
+    flushUiDelta(record, state);
     if (turn.state === 'waiting-approval') {
       if (record.dshSessionId && agentExecute) {
         await agentExecute({ method: 'agent.cancel', params: {
@@ -2587,6 +2657,10 @@ export function createChatService({
     if (closePromise) return closePromise;
     const pending = [];
     for (const [id, state] of runtime) {
+      const record = sessions.get(id);
+      if (record) flushUiDelta(record, state);
+      discardUiDelta(id);
+      lastUiStreamAt.delete(id);
       if (state.modelTurn?.done) pending.push(state.modelTurn.done);
       stopFollow(id);
       if (state.modelTurn?.controller && !state.modelTurn.controller.signal.aborted) {

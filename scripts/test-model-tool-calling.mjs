@@ -538,8 +538,9 @@ for(const outcome of ['rejected','outcome-unknown','cancel-after-completion']){
     assert.equal(approvedCoreHistory.messages.at(-1).toolActivity[0].status,'completed','real consumed approval replaces the historical waiting activity');
     const afterDecision = await approved.eventBus.next({ after: 0, waitMs: 0 });
     assert.ok(afterDecision.events.some(event => event.event === 'chat.streaming'
-      && event.data.sessionId === approved.session.id && event.data.status === 'streaming' && event.data.reset === true),
-    'approving a tool resumes the same Harbor turn in streaming state');
+      && event.data.sessionId === approved.session.id && event.data.status === 'streaming'
+      && event.data.requestId === pendingCoreStatus.turn.requestId && event.data.reset !== true),
+    'approving a tool resumes the same Harbor request without clearing its public content');
     assert.ok(afterDecision.events.some(event => event.event === 'chat.updated' && event.data.sessionId === approved.session.id),
       'Harbor reloads the completed assistant reply after an approval is handled elsewhere');
   } finally { approved.chatService.close(); }

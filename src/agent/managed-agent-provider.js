@@ -272,7 +272,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           reason = { kind: 'waiting', approvalId: s.waitingForApproval };
           const message = 'Owner approval is required to continue this Task.';
           outputChars += message.length;
-          emit(s, 'assistant/message', { requestId: turn.id, message: { content: [{ type: 'text', text: message }] } });
+          emit(s, 'assistant/message', { requestId: turn.id, statusOnly: true, message: { content: [{ type: 'text', text: message }] } });
           return;
         }
         const finalText = typeof result.text === 'string' ? result.text : '';
@@ -379,7 +379,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           reason = { kind: 'waiting', approvalId: s.waitingForApproval };
           const message = 'Owner approval is required to continue this Task.';
           outputChars += message.length;
-          emit(s, 'assistant/message', { requestId: turn.id, message: { content: [{ type: 'text', text: message }] } });
+          emit(s, 'assistant/message', { requestId: turn.id, statusOnly: true, message: { content: [{ type: 'text', text: message }] } });
           break;
         }
         if (step === steps - 1) fail('AGENT_STEP_LIMIT', 'Managed Agent reached the tool step limit');
