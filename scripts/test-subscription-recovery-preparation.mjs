@@ -10,7 +10,7 @@ import {createProviderSecrets} from '../src/providers/secrets.js';
 import {defineAgentProvider} from '../src/agent/agent-provider.js';
 import {acceptanceHash} from './helpers/autonomous-handoff-acceptance.mjs';
 import {readRecoveryParent,requireRecoveryExtensionApproval,createLinkedRecoveryJournal,continueLinkedRecoveryJournal} from './helpers/subscription-recovery-budget.mjs';
-import {recoveryFileHashes,createReadonlyWaitObserver,pauseRecoveryTaskUi,resumeRecoveryTaskUi,releaseExistingRecoveryTaskUi,rebindRecoveryExecutionConsentUi} from './helpers/real-recovery-observation.mjs';
+import {recoveryFileHashes,createReadonlyWaitObserver,requireRecoveryCheckpoint,pauseRecoveryTaskUi,resumeRecoveryTaskUi,releaseExistingRecoveryTaskUi,rebindRecoveryExecutionConsentUi} from './helpers/real-recovery-observation.mjs';
 import {checkOwnedCodexObservation} from './helpers/owned-codex-observer-fixture.mjs';
 
 if(process.env.CETAMESH_TEST_OBSERVER_SHAPE_ONLY==='1'){
@@ -126,8 +126,7 @@ try{
   assert.equal(services.agentBroker.assertExecutionConsent(consentFixture.id,{workspaceId:workspace.id}).authorized,true);
   const created=services.taskService.runtime.create({goal:'Read the fixture and enter the specifically approved controlled wait',workspaceId:workspace.id});taskId=created.id;
   services.capabilityService.grantTask(taskId,{capabilities:['filesystem.read','operation.read']});
-  await services.taskService.execute({method:'task.checkpoint.set',params:{id:taskId,expectedRev:read().rev,summary:'Preserve this exact preparation checkpoint',nextAction:'After explicit resume, read only sum.js; never repeat the wait'}});
-  const checkpoint=read().checkpoint;
+  const checkpoint=read().checkpoint;assert.equal(checkpoint,null,'Match the actual failed native Task: no historical checkpoint was ever set');
   await services.desktopUiService.execute({method:'ui.task.start',params:{id:taskId,expectedRev:read().rev,agentProvider:'cetamesh',modelProvider:'pause-fixture-model',model:'fixture'}});
   await until(()=>readyPid,value=>Number.isSafeInteger(value)&&value>0,'owned Node wait readiness');
   evidence.waitPidObserved=true;const before=read();evidence.api.push({method:'ui.task.pause',taskId});
@@ -169,8 +168,19 @@ try{
   phase='resume';step=0;evidence.api.push({method:'ui.task.reconcile',action:'resume',taskId});
   const resumed=await resumeRecoveryTaskUi(services,taskId,'cetamesh','Read only sum.js now and report. Do not repeat the wait or request another test.','dry-explicit-read-resume');
   assert.equal(resumed.task.id,taskId);await until(()=>({done,current:read()}),value=>value.done&&value.current.executionObservation?.state==='awaiting-review','fresh readonly report');
-  assert.deepEqual(read().checkpoint,checkpoint);assert.ok(read().agentHistory.some(row=>row.sessionId===before.currentAgent.sessionId));
+  evidence.emptyCheckpointTransition=requireRecoveryCheckpoint(read(),checkpoint);
+  assert.equal(evidence.emptyCheckpointTransition.kind,'new-unverified-agent-report');
+  assert.ok(read().agentHistory.some(row=>row.sessionId===before.currentAgent.sessionId));
   assert.deepEqual(recoveryFileHashes(project),baseline);
+  // Also verify an established Owner checkpoint through another controlled
+  // readonly turn; Core must retain it rather than replacing it with the report.
+  await pauseRecoveryTaskUi(services,taskId,'Pause the synthetic readonly report before checking retained Owner context');
+  await services.taskService.execute({method:'task.checkpoint.set',params:{id:taskId,expectedRev:read().rev,summary:'Established Owner checkpoint must survive the next synthetic report',nextAction:'Read only sum.js'}});
+  const establishedCheckpoint=read().checkpoint;step=0;done=false;
+  await resumeRecoveryTaskUi(services,taskId,'cetamesh','Read only sum.js and report again; retain the established Owner context.','dry-established-checkpoint-read');
+  await until(()=>({done,current:read()}),value=>value.done&&value.current.executionObservation?.state==='awaiting-review','report retaining established Owner checkpoint');
+  assert.equal(requireRecoveryCheckpoint(read(),establishedCheckpoint).kind,'retained-historical-checkpoint');
+  evidence.establishedCheckpointRetained=true;
   // A real accepted Managed dispatch followed by a controlled harness failure
   // retains the same request ownership fence as the private native attempt.
   const fenceProject=path.join(root,'fence-project');fs.mkdirSync(fenceProject);fs.writeFileSync(path.join(fenceProject,'sum.js'),'exports.sum=(a,b)=>a+b;\n');

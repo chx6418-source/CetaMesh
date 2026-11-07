@@ -9,7 +9,7 @@ import {createCetaMeshServices} from '../../src/app/service-container.js';
 import {assertRecoveryAccount} from '../real-recovery-account-guard.mjs';
 import {acceptanceHash, assertCodexSubscriptionRoute} from './autonomous-handoff-acceptance.mjs';
 import {readRecoveryParent, requireRecoveryExtensionApproval, createLinkedRecoveryJournal, continueLinkedRecoveryJournal} from './subscription-recovery-budget.mjs';
-import {recoveryFileHashes, nativeOutputDigests, requireCurrentNativeRead, createOwnedCodexProcessObserver,
+import {recoveryFileHashes, nativeOutputDigests, requireCurrentNativeRead, requireRecoveryCheckpoint, createOwnedCodexProcessObserver,
   pauseRecoveryTaskUi, resumeRecoveryTaskUi, releaseExistingRecoveryTaskUi, rebindRecoveryExecutionConsentUi} from './real-recovery-observation.mjs';
 
 const fail = (code, message) => { throw Object.assign(Error(message), {code}); };
@@ -240,7 +240,7 @@ export async function runSubscriptionPauseResumeAcceptance() {
     assert.equal(resumed.task.id,taskId);
     const settled=await until(()=>task(),value=>value.executionObservation?.state==='awaiting-review'||['blocked','failed','cancelled'].includes(value.status),'fresh readonly resume');
     assert.equal(settled.executionObservation.state,'awaiting-review');assert.notEqual(settled.executionObservation.runId,initialRunId);
-    assert.deepEqual(settled.checkpoint,checkpoint);
+    evidence.resumedCheckpoint=requireRecoveryCheckpoint(settled,checkpoint);
     assert.deepEqual(settled.agentHistory.slice(0,historyBefore.length).map(row=>({provider:row.provider,sessionId:row.sessionId})),historyBefore);
     evidence.resumedReadProof=requireCurrentNativeRead(settled,digests);assert.equal(observer.facts.wait,null);
     assert.ok(settled.agentReports.some(row=>row.runId===settled.executionObservation.runId&&row.provider==='codex'&&row.text.includes('sum.js')));

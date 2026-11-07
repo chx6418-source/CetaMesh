@@ -70,6 +70,24 @@ export function requireCurrentNativeRead(task, digests) {
   return rows.map(row => ({ eventId: row.eventId, runId: row.runId, resultSha256: row.resultSha256 }));
 }
 
+export function requireRecoveryCheckpoint(task, previousCheckpoint) {
+  if (previousCheckpoint?.summary) {
+    assert.deepEqual(task.checkpoint, previousCheckpoint, 'An established historical checkpoint must remain unchanged');
+    return { kind: 'retained-historical-checkpoint', sha256: hash(JSON.stringify(task.checkpoint)) };
+  }
+  const observed = task.executionObservation;
+  const report = task.agentReports.filter(row => row.provider === observed?.provider && row.sessionId === observed.sessionId
+    && row.runId === observed.runId && row.phase === 'user' && row.taskRev >= observed.startedRev).at(-1);
+  assert.ok(report, 'A newly generated checkpoint must refer to the actual current-run Agent report');
+  assert.equal(report.verified, false, 'Agent-generated context remains explicitly unverified');
+  assert.equal(report.sha256, hash(report.text));
+  assert.equal(task.checkpoint?.summary, '[Unverified Agent report]\n' + report.text.slice(0, 7900));
+  assert.equal(task.checkpoint.nextAction, previousCheckpoint?.nextAction ?? '');
+  assert.ok(task.checkpoint.at >= report.at && task.checkpoint.at <= observed.turnEndObservedAt);
+  return { kind: 'new-unverified-agent-report', previousCheckpoint: previousCheckpoint ?? null,
+    reportEventId: report.eventId, reportSha256: report.sha256, sha256: hash(JSON.stringify(task.checkpoint)) };
+}
+
 export async function pauseRecoveryTaskUi(services, taskId, reason) {
   const current = services.taskService.runtime.get({ id: taskId }).task;
   return services.desktopUiService.execute({ method: 'ui.task.pause', params: { id: taskId, expectedRev: current.rev, reason } });
