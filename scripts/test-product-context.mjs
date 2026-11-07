@@ -254,20 +254,24 @@ async function taskManifestScenario(authorized){
     assert.equal(task.executionObservation.state,'awaiting-review');
     assert.equal(actor.grants.capabilities.includes('test.run'),authorized);
     assert.equal(capture.tools.some(row=>row.id==='test.run'),authorized,'compaction must preserve an explicitly granted test tool; the goal alone grants nothing');
-    assert.ok(capture.serialized.length<=12000);assert.equal(capture.context.truncated,true);
+    assert.ok(capture.serialized.length<=12000);
+    assert.equal(capture.context.capabilities.schemaChannel,'structured-tools');
+    assert.ok(capture.context.capabilities.manifest.every(row=>!Object.hasOwn(row,'inputSchema')),'reference JSON does not duplicate the actual structured tool schemas');
     assert.equal(task.executionEvidence.some(row=>row.source==='core-test'),false,'this capture never invents actual test evidence');
     if(authorized){
       const capabilities=buildCapabilityContext({registered:services.capabilityService.broker.list(),grantedIds:actor.grants.capabilities,requestableIds:actor.grants.capabilities,
         executionPath:'managed-agent',mode:'managed-agent',actorKind:'agent',workspaceAvailable:true,taskAvailable:true,toolCalling:'supported'});
       const full=projectProductContext({mode:'managed-agent',executionPath:'managed-agent',task,capabilities},{maxChars:50000});
-      for(const id of ['test.run','operation.continue','operation.read']){
+      for(const id of ['filesystem.read','filesystem.write','test.run','operation.continue','operation.read']){
         const descriptor=capture.context.capabilities.manifest.find(row=>row.id===id);
-        assert.deepEqual(descriptor,full.manifest.find(row=>row.id===id),'compaction must retain the complete granted descriptor');
-        assert.ok(capture.tools.some(row=>row.id===id));
+        const expected=full.manifest.find(row=>row.id===id);
+        const {inputSchema,...metadata}=expected;
+        assert.deepEqual(descriptor,metadata,'reference metadata retains the same granted descriptor');
+        assert.deepEqual(capture.tools.find(row=>row.id===id)?.inputSchema,inputSchema,'the actual model tools field retains the complete approved schema');
       }
       const descriptor=capture.context.capabilities.manifest.find(row=>row.id==='test.run');
       assert.equal(descriptor.risk,'high');assert.equal(descriptor.requiresApproval,true);
-      assert.deepEqual(descriptor.inputSchema.required,['args','tool']);
+      assert.deepEqual(capture.tools.find(row=>row.id==='test.run').inputSchema.required,['args','tool']);
       assert.ok(services.capabilityService.broker.operationsForTask({taskId,workspaceId:workspace.id}).some(row=>row.status==='prepared'));
     }
     console.log('PASS actual Core initial Task manifest '+(authorized?'retains explicit test authorization':'does not derive test authorization from the goal'));

@@ -227,7 +227,7 @@ function serializeContext({
     agentProviders: agentProviderSummaries(agentBroker),
     workspaceReconciliation,
     toolCalling
-  });
+  }, { schemaChannel: toolCalling === 'supported' ? 'structured-tools' : null });
   return {
     context: projection.serialized,
     serialized: projection.serialized,
