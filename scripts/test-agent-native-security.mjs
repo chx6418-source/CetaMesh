@@ -200,6 +200,65 @@ for (const malformed of [false, 0, '', true, []]) {
 permissionSecurity = nativePermissionDescriptor();
 console.log('PASS explicit native permission mode, exact gates, Owner consent, runtime/policy fingerprints, and existing Task/Session/Workspace fences');
 
+for (const [mode, makeSecurity] of [['native', descriptor], ['native-permissions', nativePermissionDescriptor]]) {
+  const races = [
+    ['changed runtime without current consent', 'AGENT_SECURITY_CONFIRMATION_REQUIRED', state => { state.security.identity = 'changed-runtime'; }],
+    ['replacement policy with new Owner consent', 'AGENT_SECURITY_POLICY_CHANGED', (state, currentBroker, providerId) => {
+      state.security.identity = 'approved-replacement-runtime';
+      const scope = currentBroker.describeExecutionSecurity(providerId, state.task.workspaceId);
+      currentBroker.authorizeExecution(providerId, state.task.workspaceId, scope.fingerprint);
+    }],
+    ['removed security descriptor', 'AGENT_SECURITY_POLICY_CHANGED', state => { state.security = null; }],
+    ['paused Task', 'TASK_NOT_AUTHORIZED', state => { state.task.status = 'paused'; }],
+    ['blocked Task', 'TASK_NOT_AUTHORIZED', state => { state.task.status = 'blocked'; }],
+    ['cancelled Task', 'TASK_NOT_AUTHORIZED', state => { state.task.status = 'cancelled'; }],
+    ['reassigned Task', 'TASK_NOT_AUTHORIZED', state => { state.task.currentAgent.sessionId = 'another-session'; }],
+    ['changed Workspace', 'TASK_NOT_AUTHORIZED', state => { state.task.workspaceId = 'another-workspace'; }],
+    ['missing Task', 'TASK_NOT_AUTHORIZED', state => { state.task = null; }],
+    ['started Handoff', 'TASK_HANDOFF_IN_PROGRESS', state => { state.handoff = true; }],
+    ['revoked delegated authority', 'DELEGATION_POLICY_DENIED', state => { state.guardRevoked = true; }]
+  ];
+  for (const [name, expectedCode, change] of races) {
+    let enteredStatus, releaseStatus, sends = 0;
+    const entered = new Promise(resolve => { enteredStatus = resolve; });
+    const idle = new Promise(resolve => { releaseStatus = resolve; });
+    const providerId = 'race-' + mode;
+    const initialSecurity = makeSecurity();
+    const initialTask = { id: 'race-task', workspaceId: 'race-workspace', status: 'running',
+      currentAgent: { provider: providerId, sessionId: 'race-session' } };
+    const state = { security: structuredClone(initialSecurity), task: structuredClone(initialTask), handoff: false, guardRevoked: false };
+    const raceBase = defineAgentProvider({ id: providerId, label: 'Controlled native dispatch race',
+      capabilityExtras: { workspaceBoundary: 'native-staged' }, methods: {
+        async createSession() { return { sessionId: 'race-session' }; },
+        async status() { enteredStatus(); return idle; },
+        async send() { sends++; return { accepted: true }; }
+      } });
+    const raceAdapter = { ...raceBase, capabilities: () => ({ ...raceBase.capabilities(), security: state.security }) };
+    const currentBroker = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [raceAdapter] }),
+      resolveExecutionTask: () => state.task, isTaskHandoffInFlight: () => state.handoff });
+    const observations = [];
+    currentBroker.setTaskExecutionObserver(observation => observations.push(observation.state));
+    const scope = currentBroker.describeExecutionSecurity(providerId, initialTask.workspaceId);
+    currentBroker.authorizeExecution(providerId, initialTask.workspaceId, scope.fingerprint);
+    await currentBroker.createSession(providerId, { taskId: initialTask.id, workspaceId: initialTask.workspaceId });
+    const authorizationGuard = () => { if (state.guardRevoked) throw Object.assign(new Error('Delegation revoked'), { code: 'DELEGATION_POLICY_DENIED' }); };
+    const sending = currentBroker.send({ provider: providerId, sessionId: 'race-session', content: 'no-model race fixture',
+      authorizationGuard });
+    await entered;
+    change(state, currentBroker, providerId);
+    releaseStatus({ running: false, queued: 0 });
+    await assert.rejects(sending, error => error.code === expectedCode, mode + ': ' + name);
+    assert.equal(sends, 0, name + ' must block before the native adapter is called');
+    assert.deepEqual(observations, [], name + ' must not claim a run started or an effect became unknown');
+    state.security = structuredClone(initialSecurity); state.task = structuredClone(initialTask); state.handoff = false; state.guardRevoked = false;
+    currentBroker.authorizeExecution(providerId, initialTask.workspaceId, scope.fingerprint);
+    await currentBroker.send({ provider: providerId, sessionId: 'race-session', content: 'fresh authorized fixture', authorizationGuard });
+    assert.equal(sends, 1, 'a final-boundary refusal releases only its in-process dispatch fence');
+    assert.deepEqual(observations, ['running', 'accepted']);
+  }
+}
+console.log('PASS native dispatch rechecks current consent, original Session policy, Task ownership and Handoff after awaited status without recording an unstarted run');
+
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-native-security-'));
 let services;
 try {

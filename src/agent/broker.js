@@ -206,26 +206,29 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
       if(nativeReadinessToken!==undefined && (phase!=='bootstrap'||provider.capabilities()?.supportsReadinessCheck!==true||!/^CM_READY_[a-f0-9]{32}$/.test(nativeReadinessToken)))
         throw agentProviderError('INVALID_PARAMS','Readiness requires an exact Core bootstrap token and a verified adapter');
       const binding = executionBindings.get(consentKey(providerId, sessionId));
-      const declaredSecurity = provider.capabilities()?.security;
-      if (binding?.securityRequired || (declaredSecurity !== undefined && declaredSecurity !== null)) {
-        if (!binding) throw agentProviderError('AGENT_SECURITY_SESSION_UNBOUND', 'Native Session must be created through the authorized Broker');
-        const scope = assertExecutionConsent(providerId, binding);
-        if (binding.securityRequired && (!scope.required || binding.securityFingerprint !== scope.fingerprint)) {
-          throw agentProviderError('AGENT_SECURITY_POLICY_CHANGED', 'Session execution policy changed; create a fresh authorized Session');
-        }
-        if (phase !== 'bootstrap' && isTaskHandoffInFlight(binding.taskId)) {
-          throw agentProviderError('TASK_HANDOFF_IN_PROGRESS', 'Task execution is owned by an active Handoff');
-        }
-        if (typeof resolveExecutionTask === 'function') {
-          const task = resolveExecutionTask(binding.taskId);
-          if (!task || task.workspaceId !== binding.workspaceId
-            || task.currentAgent?.provider !== providerId || task.currentAgent?.sessionId !== sessionId
-            || (phase !== 'bootstrap' && task.status !== 'running')
-            || ['completed', 'failed', 'cancelled'].includes(task.status)) {
-            throw agentProviderError('TASK_NOT_AUTHORIZED', 'Native Session no longer owns an executable Task');
+      const assertBoundExecution = () => {
+        const declaredSecurity = provider.capabilities()?.security;
+        if (binding?.securityRequired || (declaredSecurity !== undefined && declaredSecurity !== null)) {
+          if (!binding) throw agentProviderError('AGENT_SECURITY_SESSION_UNBOUND', 'Native Session must be created through the authorized Broker');
+          const scope = assertExecutionConsent(providerId, binding);
+          if (binding.securityRequired && (!scope.required || binding.securityFingerprint !== scope.fingerprint)) {
+            throw agentProviderError('AGENT_SECURITY_POLICY_CHANGED', 'Session execution policy changed; create a fresh authorized Session');
+          }
+          if (phase !== 'bootstrap' && isTaskHandoffInFlight(binding.taskId)) {
+            throw agentProviderError('TASK_HANDOFF_IN_PROGRESS', 'Task execution is owned by an active Handoff');
+          }
+          if (typeof resolveExecutionTask === 'function') {
+            const task = resolveExecutionTask(binding.taskId);
+            if (!task || task.workspaceId !== binding.workspaceId
+              || task.currentAgent?.provider !== providerId || task.currentAgent?.sessionId !== sessionId
+              || (phase !== 'bootstrap' && task.status !== 'running')
+              || ['completed', 'failed', 'cancelled'].includes(task.status)) {
+              throw agentProviderError('TASK_NOT_AUTHORIZED', 'Native Session no longer owns an executable Task');
+            }
           }
         }
-      }
+      };
+      assertBoundExecution();
       const observation = { taskId: binding?.taskId, provider: providerId, sessionId, runId, phase };
       const singleFlight = provider.capabilities()?.workspaceBoundary === 'native-staged';
       const dispatchKey = consentKey(providerId, sessionId);
@@ -240,9 +243,12 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
           if (status.running || status.waitingForApproval || status.approvalId || Number(status.queued) > 0) throw agentProviderError('TURN_BUSY', 'Native Session is active or waiting for approval');
           if (status.running !== false || status.runtimeValid === false || status.state === 'unknown' || status.lastRunStatus === 'unknown') throw agentProviderError('AGENT_OUTCOME_UNKNOWN', 'Native Session requires reconciliation before dispatch');
         }
-        if (binding?.taskId && phase === 'user') { taskExecutionObserver?.({ ...observation, state: 'running' }); observed = true; }
         // Recheck delegated authority after all awaited native status/consent work, immediately before dispatch.
         if(authorizationGuard!==undefined){if(typeof authorizationGuard!=='function')throw agentProviderError('INVALID_PARAMS','Trusted dispatch guard required');const checked=authorizationGuard();if(checked?.then)throw agentProviderError('INVALID_PARAMS','Dispatch guard must be synchronous');}
+        // Status and delegated checks may outlive a policy, Task or Handoff change.
+        // Reuse the same current-authority checks before observing or starting a run.
+        assertBoundExecution();
+        if (binding?.taskId && phase === 'user') { taskExecutionObserver?.({ ...observation, state: 'running' }); observed = true; }
         const metadata = { phase, runId };
         const result = await provider.send({ sessionId, content, mode, phase, runId, nativeReadinessToken,
           onRequestId: requestId => rememberRun(providerId, sessionId, { requestId }, metadata) });

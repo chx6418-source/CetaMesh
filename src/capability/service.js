@@ -17,7 +17,7 @@ import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { evidenceBinding, EVIDENCE_SOURCE_CAPABILITIES } from '../context/tool-evidence.js';
 import { createNativeApprovalAdapter } from '../agent/native-approval-bridge.js';
 import { canDispatchConfiguredNativeAgent, hasNegativeAgentReadiness } from '../agent/execution-security.js';
-import { rankTaskAgents } from '../router/agent-assignment.js';
+import { rankTaskAgents, subscriptionBillingFingerprint } from '../router/agent-assignment.js';
 import { isControlledL2Write } from './l2-grants.js';
 
 // Only this module can mark a failure as occurring before Agent side effects.
@@ -922,14 +922,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     return rankTaskAgents({agentBroker,workspaceId:task.workspaceId,taskKind:request.input.taskKind,
       difficulty:request.input.difficulty,requiredTools:request.input.requiredTools,
       modelProvider:task.modelConfig?.modelProvider??null,model:task.modelConfig?.model??null,
-      allowUnknownCost:policy.allowUnknownCost===true,includePreparation:policy.prepareNative===true,exclude:['cetamesh']});
+      allowUnknownCost:policy.allowUnknownCost===true,allowSubscriptionOnly:policy.allowSubscriptionOnly===true,
+      includePreparation:policy.prepareNative===true,exclude:['cetamesh']});
   }
   broker.register({id:'agent.delegate.candidates',permission:'storage',provider:'task-runtime',risk:'low',
     requiresTask:true,workspace:true,effect:'read-only',
     description:'Discover external executors for exact task needs. preparationRequired candidates are NOT task eligible: Core must obtain Owner native consent and verify actual tools before formal work. Call this before proposing. Native development tasks normally use requiredTools: []; native tools are not CetaMesh Broker tools. Results confer no execution permission.',
     inputSchema:delegationNeedsSchema,validate:r=>validateSchema(delegationNeedsSchema,r.input),
     async execute(request) {const candidates=(await delegationCandidates(request)).map(row=>({
-      provider:row.provider,cost:row.cost,latencyMs:row.latencyMs,
+      provider:row.provider,cost:row.cost,latencyMs:row.latencyMs,...(row.billingMode?{billingMode:row.billingMode}:{}),
       proposalEligible:true,taskEligible:row.preparationRequired!==true,
       preparationRequired:row.preparationRequired===true,consentRequired:row.consentRequired===true,
       workspaceBoundary:agentBroker.capabilities(row.provider).workspaceBoundary,
@@ -1058,6 +1059,23 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         throw capabilityError('AGENT_BOUNDARY_UNSUPPORTED', 'Provider has no enforced Capability Broker workspace boundary');
       }
       agentBroker.assertExecutionConsent?.(provider, { workspaceId: r.workspaceId });
+      const delegatedBillingFingerprint = r.input.delegationRequestId && provider === 'codex'
+        && task.delegationPolicy?.allowSubscriptionOnly === true ? subscriptionBillingFingerprint(health?.billingRoute) : null;
+      const assertDispatchAuthorization = assignment => {
+        if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
+        if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
+        assertChildParentActive();
+        // Broker may await its own native status after our preflight. Recheck
+        // the exact dispatch identity and time-bounded Task authority at that
+        // final synchronous boundary, before any new Run is observed or sent.
+        assertDelegation(assignment);
+        const live = taskFor(task.id);
+        if (!live || live.workspaceId !== r.workspaceId || live.status !== 'running'
+          || live.currentAgent?.provider !== provider || live.currentAgent.sessionId !== assignment?.sessionId)
+          throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
+        if (delegatedBillingFingerprint && subscriptionBillingFingerprint(agentBroker.capabilities(provider)?.security?.billingRoute) !== delegatedBillingFingerprint)
+          throw capabilityError('DELEGATION_BILLING_ROUTE_CHANGED', 'The authorized subscription route changed before dispatch');
+      };
       if (task.currentAgent && task.currentAgent.provider !== provider) {
         throw capabilityError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'An existing Task must change Agent Providers through Continuity Fresh Session');
       }
@@ -1144,6 +1162,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             if (readOnlyChild) taskRuntime.recordAttempt({ id: task.id, expectedRev: beforeSend.rev,
               provider, sessionId: task.currentAgent.sessionId, requestId: r.requestId, state: 'started' });
             const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal),
+              authorizationGuard: () => assertDispatchAuthorization(task.currentAgent),
               ...(readOnlyChild ? { runId: r.requestId } : {}) });
             if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
             if (readOnlyChild) taskRuntime.settleAttempt({ id: task.id, expectedRev: taskFor(task.id).rev,
@@ -1232,6 +1251,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             provider, sessionId: created.sessionId, requestId: r.requestId, state: 'started' });
           instructionEntered = true;
           const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal),
+            authorizationGuard: () => assertDispatchAuthorization({ provider, sessionId: created.sessionId }),
             ...(readOnlyChild ? { runId: r.requestId } : {}) });
           if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
           if (readOnlyChild) taskRuntime.settleAttempt({ id: task.id, expectedRev: taskFor(task.id).rev,

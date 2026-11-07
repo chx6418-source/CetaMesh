@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { execFileSync } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 import { createTaskRuntime } from '../src/task/runtime.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { createToolExecutionCoordinator } from '../src/model/tool-execution.js';
 import { defineAgentProvider } from '../src/agent/agent-provider.js';
+import { testDelegationDispatchBoundary } from './helpers/delegation-dispatch-boundary.mjs';
 
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-autonomous-delegation-'));
 let now=1700000000000;
@@ -61,6 +64,30 @@ try {
  runtime.claimDelegationProposal({id:past.id,requestId:'history-proposal',selectedProvider:'external-fixture'});
  assert.deepEqual((await runtime.verifyDelegationOutcome({id:past.id})).reasons,['OWNER_MACHINE_VERIFICATION_NOT_CONFIGURED'],'pre-met acceptance and old passing tests cannot authorize automatic completion without a machine contract');
  console.log('PASS Owner-scoped delegation proposal, current-run fence, single claim and crash recovery');
+ // Execute the actual pre-change v1 store reader/writer against the optional
+ // policy field. A rollback retains it without treating old missing fields as
+ // new authority, and the current runtime can load the old writer's result.
+ const compatDir=path.join(root,'subscription-v1-roundtrip');
+ const compat=createTaskRuntime({stateDir:compatDir,now:()=>now});
+ let subscriptionTask=compat.create({goal:'Subscription policy v1 rollback',workspaceId:'subscription-compat'});
+ subscriptionTask=compat.setDelegationPolicy({id:subscriptionTask.id,expectedRev:subscriptionTask.rev,actor:{kind:'owner',id:'desktop'},
+  policy:{expiresAt:now+60000,maxDelegations:1,allowUnknownCost:false,allowSubscriptionOnly:true}});
+ assert.equal(subscriptionTask.delegationPolicy.allowSubscriptionOnly,true);
+ assert.throws(()=>compat.setDelegationPolicy({id:subscriptionTask.id,expectedRev:subscriptionTask.rev,actor:{kind:'owner',id:'desktop'},
+  policy:{expiresAt:now+60000,maxDelegations:1,allowUnknownCost:false,allowSubscriptionOnly:'yes'}}),{code:'INVALID_DELEGATION_POLICY'});
+ const storeSource=execFileSync('git',['show','HEAD:src/task/store.js'],{encoding:'utf8'})
+  .replace("'../storage/json-file.js'",JSON.stringify(new URL('../src/storage/json-file.js',import.meta.url).href))
+  .replace("'./types.js'",JSON.stringify(new URL('../src/task/types.js',import.meta.url).href));
+ const legacyModule=path.join(root,'legacy-task-v1-reader.mjs');fs.writeFileSync(legacyModule,storeSource);
+ const legacyStore=(await import(pathToFileURL(legacyModule).href)).createTaskStore({stateDir:compatDir,now:()=>now});
+ const legacyRead=legacyStore.get(subscriptionTask.id);assert.equal(legacyRead.delegationPolicy.allowSubscriptionOnly,true);
+ legacyStore.update(legacyRead.id,legacyRead.rev,row=>{row.progress.note='Legacy writer observation';return row;});
+ const reloadedSubscription=createTaskRuntime({stateDir:compatDir,now:()=>now}).get({id:subscriptionTask.id}).task;
+ assert.equal(reloadedSubscription.delegationPolicy.allowSubscriptionOnly,true);
+ assert.equal(reloadedSubscription.delegationPolicy.allowUnknownCost,false);
+ assert.equal(JSON.parse(fs.readFileSync(legacyStore.file,'utf8')).schemaVersion,1);
+ assert.equal(runtime.get({id:task.id}).task.delegationPolicy.allowSubscriptionOnly,undefined,'historical absent policy is never silently upgraded');
+ console.log('PASS optional subscription policy survives the real legacy v1 reader/writer roundtrip without a schema upgrade');
  const {createAutonomousHandoff}=await import('../src/continuity/autonomous-handoff.js');
  const flow=createTaskRuntime({stateDir:path.join(root,'flow'),now:()=>now});
  const flowTask=flow.create({goal:'Code a verified change',workspaceId:'workspace-flow'});
@@ -178,4 +205,5 @@ try {
 
  } finally {await services.chatService.close();await services.agentService.close();await services.managedAgent.close();await services.capabilityService.close();await services.extensionService.close();}
  console.log('PASS Owner-bound Broker proposal and trusted user-turn identity');
+ await testDelegationDispatchBoundary();
 } finally { fs.rmSync(root,{recursive:true,force:true}); }
