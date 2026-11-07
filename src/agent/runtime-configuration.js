@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 
 const DEFAULT_ENDPOINTS = Object.freeze({
-  dsh: 'https://api.deepseek.com',
+  dsh: 'https://api.deepseek.com/anthropic',
   gemini: 'https://generativelanguage.googleapis.com',
   opencode: 'https://api.openai.com/v1',
   qwen: 'https://api.openai.com/v1',
@@ -23,6 +23,10 @@ const invalid = message => fail('AGENT_RUNTIME_CONFIG_INVALID', message);
 export function createAgentRuntimeConfiguration({ stateDir, providerSecrets, allowLoopbackHttpForTests = false, connectionLeases, authProfileIdentity } = {}) {
   if (typeof stateDir !== 'string' || !path.isAbsolute(stateDir)) invalid('Agent runtime state directory must be absolute');
   const file = path.join(stateDir, 'agent-runtimes.json');
+  // Older releases reject unknown providers in their shared runtime document.
+  // Keep DSH's new settings under the same owner, in an ignored-by-old-reader
+  // namespace; neither configuration nor rollback rewrites other Agents.
+  const configurationFile = provider => provider === 'dsh' ? path.join(stateDir, 'agent', 'dsh-runtime.json') : file;
   const providerId = value => {
     if (typeof value !== 'string' || !Object.hasOwn(DEFAULT_ENDPOINTS, value)) invalid('Unsupported Agent runtime provider');
     return value;
@@ -82,9 +86,9 @@ export function createAgentRuntimeConfiguration({ stateDir, providerSecrets, all
     }
     return next;
   }
-  function read() {
+  function read(provider) {
     try {
-      const document = readJsonFile(file, { missing: { version: 2, providers: {} }, maxBytes: 65536 });
+      const document = readJsonFile(configurationFile(provider), { missing: { version: 2, providers: {} }, maxBytes: 65536 });
       if (!isRecord(document) || ![1,2].includes(document.version) || !isRecord(document.providers) || Object.keys(document).some(key => !['version', 'providers'].includes(key))) throw new Error('Invalid document');
       const fields=document.version===1 ? LEGACY_FIELDS : PUBLIC_FIELDS;
       for (const [provider, entry] of Object.entries(document.providers)) {
@@ -103,7 +107,7 @@ export function createAgentRuntimeConfiguration({ stateDir, providerSecrets, all
   }
   function get(provider) {
     providerId(provider);
-    const entry = read().providers[provider] ?? defaults(provider);
+    const entry = read(provider).providers[provider] ?? defaults(provider);
     return { provider, enabled: entry.enabled, runtimePath: entry.runtimePath, nodePath: entry.nodePath, model: entry.model,
       baseUrl: entry.baseUrl, credentialConfigured: metadata(provider).configured, executionMode: 'native-permissions', revision: entry.revision,authMode:entry.authMode,servicePreset:entry.servicePreset,providerId:entry.providerId,methodId:entry.methodId,authorizationEpoch:connectionLeases?.epoch(provider) ?? entry.revision };
   }
@@ -111,7 +115,7 @@ export function createAgentRuntimeConfiguration({ stateDir, providerSecrets, all
     providerId(provider);
     const lease=connectionLeases?.reserve({provider,kind:'configure',expectedEpoch:connectionLeases.epoch(provider)});
     try {
-    const document = read();
+    const document = read(provider);
     const previous = document.providers[provider] ?? defaults(provider);
     const next = selection(provider, input, previous);
     if (previous.revision >= Number.MAX_SAFE_INTEGER) invalid('Agent runtime revision limit reached');
@@ -127,7 +131,7 @@ export function createAgentRuntimeConfiguration({ stateDir, providerSecrets, all
       providerSecrets.set({provider:secretRef(provider),apiKey:key,baseUrl:next.baseUrl});
     }
     document.providers[provider] = next;
-    try { writeJsonAtomic(file, document); }
+    try { writeJsonAtomic(configurationFile(provider), document); }
     catch { fail('AGENT_RUNTIME_CONFIG_WRITE_FAILED', 'Agent runtime configuration could not be saved'); }
     lease?.advance();
     return { provider, supported: true, applied: true, configuration: get(provider) };

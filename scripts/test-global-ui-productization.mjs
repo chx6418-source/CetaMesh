@@ -329,8 +329,8 @@ try {
         const dsh='[...document.querySelectorAll(".agent-card")].find(n=>n.querySelector("h3")?.textContent==="DSH")';
         await evaluate('(()=>{const row=window.fixture.agents.find(a=>a.id==="dsh");row.reason="preset-not-configured";row.status="needs-setup";row.configuration.active.codingPreset=null;window.fixtureDshPresets={state:"ready",truncated:false,presets:[{id:"fixture-coding",compatible:true,reason:null,verification:"local-persona-only"},{id:"standard",compatible:true,reason:null,verification:"native-persona-only"}]}})()');
         await textClick('刷新状态');await until(dsh+'?.innerText.includes("尚未选择")','DSH missing selection');
-        assert.ok(await evaluate('!!('+dsh+'?.querySelector("button[aria-label=\\"选择 DSH 任务预设\\"]"))'),'missing DSH preset offers a direct configuration action');
-        await pointerClick(dsh+'?.querySelector("button[aria-label=\\"选择 DSH 任务预设\\"]")','choose DSH task preset');
+        assert.ok(await evaluate('!!('+dsh+'?.querySelector("button[aria-label=\\"查看 DSH 原生预设\\"]"))'),'missing DSH preset offers a direct configuration action');
+        await pointerClick(dsh+'?.querySelector("button[aria-label=\\"查看 DSH 原生预设\\"]")','choose DSH task preset');
         await until('!!('+dsh+'?.querySelector("form"))','DSH form');
         const presetReads=await evaluate('window.fixtureCalls.filter(row=>row.method==="ui.agent.presets").length');
         await pointerClick(dsh+'&&[...('+dsh+').querySelectorAll("form button")].find(n=>n.textContent.trim()==="刷新预设")','refresh the newly available DSH preset catalog');

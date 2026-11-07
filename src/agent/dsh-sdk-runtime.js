@@ -118,6 +118,10 @@ export function createDshSdkRuntimeResolver({runtimeConfiguration, environment =
   const resolve = async () => {
     const config = configuration(), expected = runtimeConfiguration.identity('dsh');
     if (!config.enabled) fail('runtime_disabled', 'DSH task execution is disabled');
+    const endpoint = new URL(config.baseUrl);
+    if (endpoint.origin === 'https://api.deepseek.com' && !/^\/anthropic(?:\/v1)?\/?$/.test(endpoint.pathname)) {
+      fail('dsh_sdk_endpoint_protocol_mismatch', 'DSH 0.2.2 uses DeepSeek Messages; select https://api.deepseek.com/anthropic');
+    }
     const runtime = await inspect();
     if (!runtime.compatible) fail(runtime.reason, 'Select the verified DSH SDK runtime in task connection settings');
     if (!config.model) fail('agent_model_required', 'Select the DSH task model');

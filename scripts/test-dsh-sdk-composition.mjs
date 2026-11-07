@@ -10,7 +10,7 @@ try {
   services = createCetaMeshServices({stateDir: path.join(root, 'state'), dataRoot: path.join(root, 'data'), deferOptionalStart: true});
   const response = await services.desktopUiService.execute({method: 'ui.agent.configure', params: {
     agentId: 'dsh', config: {taskTransport: 'sdk', runtimePath: path.join(root, 'not-installed', 'package.json'),
-      model: 'explicit-task-model', baseUrl: 'https://api.deepseek.com', apiKey: 'synthetic-composition-key'}
+      model: 'explicit-task-model', baseUrl: 'https://api.deepseek.com/anthropic', apiKey: 'synthetic-composition-key'}
   }});
   assert.equal(response.supported, true, 'formal DSH task configuration must reach the existing Agent settings service');
   assert.equal(response.applied, true);

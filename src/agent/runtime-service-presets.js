@@ -1,6 +1,6 @@
 // Public endpoint metadata only: no inferred model, key or account compatibility.
 export const RUNTIME_SERVICE_PRESETS = Object.freeze([
-  {id:'deepseek-official',label:'DeepSeek API',baseUrl:'https://api.deepseek.com',providers:['dsh']},
+  {id:'deepseek-official',label:'DeepSeek Messages API',baseUrl:'https://api.deepseek.com/anthropic',providers:['dsh']},
   {id:'gemini-official',label:'Google Gemini API',baseUrl:'https://generativelanguage.googleapis.com',providers:['gemini']},
   {id:'anthropic-official',label:'Anthropic API',baseUrl:'https://api.anthropic.com',providers:['claude']},
   {id:'openai',label:'OpenAI-compatible API · OpenAI',baseUrl:'https://api.openai.com/v1',providers:['opencode','qwen']},

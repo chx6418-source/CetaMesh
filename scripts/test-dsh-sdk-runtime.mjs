@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {createAgentRuntimeConfiguration} from '../src/agent/runtime-configuration.js';
 import {createMinimalAgentEnv} from '../src/agent/cli-agent-process.js';
-import {inspectDshSdkRuntime} from '../src/agent/dsh-sdk-runtime.js';
+import {inspectDshSdkRuntime, createDshSdkRuntimeResolver} from '../src/agent/dsh-sdk-runtime.js';
 import {createCodexSessionLifecycle} from '../src/agent/codex-session-lifecycle.js';
 import {createConnectionLeases} from '../src/agent/runtime-auth-service.js';
 
@@ -21,18 +21,21 @@ try {
   const initial = configuration.get('dsh');
   assert.equal(initial.credentialConfigured, false);
   assert.equal(initial.model, '');
-  assert.equal(initial.baseUrl, 'https://api.deepseek.com');
+  assert.equal(initial.baseUrl, 'https://api.deepseek.com/anthropic', 'DSH 0.2.2 uses the Messages endpoint, not the OpenAI endpoint');
   const before = fs.existsSync(path.join(root, 'agent-runtimes.json'));
   assert.equal(before, false, 'reading DSH settings must not migrate or write existing storage');
+  configuration.configure('qwen', {model: 'unchanged-qwen'});
+  const legacyRuntimeBytes = fs.readFileSync(path.join(root, 'agent-runtimes.json'));
   const saved = configuration.configure('dsh', {runtimePath: path.join(root, 'dsh', 'package.json'), nodePath: process.execPath,
     model: 'synthetic-dsh', baseUrl: 'http://127.0.0.1:3333', apiKey: 'synthetic-test-key'});
   assert.equal(saved.applied, true);
   assert.equal(saved.configuration.credentialConfigured, true);
+  assert.deepEqual(fs.readFileSync(path.join(root, 'agent-runtimes.json')), legacyRuntimeBytes, 'DSH configuration must not add provider keys to an older reader\'s runtime document');
   const lease = connectionLeases.reserve({provider: 'dsh', kind: 'task', expectedEpoch: connectionLeases.epoch('dsh')});
   assert.throws(() => configuration.configure('dsh', {model: 'cannot-change-active-session'}), {code: 'AGENT_RUNTIME_BUSY'});
   lease.release({exitConfirmed: true});
   assert.equal(configuration.resolveCredential('dsh').apiKey, 'synthetic-test-key');
-  const bytes = fs.readFileSync(path.join(root, 'agent-runtimes.json'), 'utf8');
+  const bytes = fs.readFileSync(path.join(root, 'agent', 'dsh-runtime.json'), 'utf8');
   assert.equal(bytes.includes('synthetic-test-key'), false, 'settings must only hold credential metadata');
   assert.throws(() => configuration.configure('dsh', {authMode: 'provider-login'}), {code: 'AGENT_RUNTIME_CONFIG_INVALID'});
   assert.throws(() => configuration.configure('dsh', {authMode: 'native-cli'}), {code: 'AGENT_RUNTIME_CONFIG_INVALID'});
@@ -58,6 +61,11 @@ try {
   fs.writeFileSync(path.join(fake, 'package.json'), JSON.stringify({name: '@deepseek-ai/dsh', version: '0.2.2-rc.1', bin: {dsh: '../unowned.js'}}));
   const escaped = await inspectDshSdkRuntime({runtimePath: path.join(fake, 'package.json'), nodePath: process.execPath});
   assert.equal(escaped.compatible, false, 'manifest version is insufficient to trust a CLI');
+  const wrongProtocol = createDshSdkRuntimeResolver({runtimeConfiguration: {
+    get: () => ({...initial, enabled: true, baseUrl: 'https://api.deepseek.com', model: 'fixture'}),
+    identity: () => 'fixture', resolveCredential: () => {throw new Error('the wrong protocol must not load credentials');}
+  }});
+  await assert.rejects(wrongProtocol(), {code: 'dsh_sdk_endpoint_protocol_mismatch'});
   const lifecycle = createCodexSessionLifecycle({stateDir: root, provider: 'dsh'});
   lifecycle.create({sessionId: 'sdk-session', taskId: 'dsh-task', workspaceId: 'dsh-workspace', transport: 'dsh-sdk', snapshotId: 'private-stage'});
   const running = lifecycle.begin({sessionId: 'sdk-session', runId: 'core-run', turnId: 'native-turn'});

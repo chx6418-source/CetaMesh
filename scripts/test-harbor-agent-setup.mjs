@@ -136,6 +136,45 @@ try {
   const runtimeDraft={enabled:true,runtimePath:'',nodePath:'',model:'gemini-fixture',baseUrl:runtimePublic.baseUrl,apiKey:''};
   const runtimeProps={provider:'gemini',configuration:runtimePublic,draft:runtimeDraft,saving:false,onDraftChange(){},onSave(){},onRefresh(){}};
   const agentPanels=await vite.ssrLoadModule('/src/app/AgentSetupPanels.tsx');
+  const presentation=await vite.ssrLoadModule('/src/app/PagePresentation.tsx');
+  assert.equal(agentPanels.isRuntimeProvider('dsh'),true,'DSH needs the existing explicit runtime configuration flow');
+  const dshRuntimePublic={...runtimePublic,provider:'dsh',runtimePath:'C:\\owned-dsh\\node_modules\\@deepseek-ai\\dsh\\package.json',nodePath:'C:\\Program Files\\nodejs\\node.exe',baseUrl:'https://api.deepseek.com/anthropic',authMode:'api-key',model:'deepseek-fixture'};
+  const dshRuntimeDraft={...runtimeDraft,runtimePath:dshRuntimePublic.runtimePath,nodePath:dshRuntimePublic.nodePath,baseUrl:dshRuntimePublic.baseUrl,model:dshRuntimePublic.model,authMode:'api-key'};
+  const dshRuntimeMarkup=renderToStaticMarkup(React.createElement(ui.AgentRuntimeSetupForm,{...runtimeProps,provider:'dsh',configuration:dshRuntimePublic,draft:dshRuntimeDraft}));
+  assert.match(dshRuntimeMarkup,/DSH 受控任务连接配置/);
+  assert.match(dshRuntimeMarkup,/0\.2\.2-rc\.1/);assert.match(dshRuntimeMarkup,/24\.9/);
+  assert.match(dshRuntimeMarkup,/DeepSeek API 端点/);assert.match(dshRuntimeMarkup,/DSH SDK.*路径/);
+  assert.match(dshRuntimeMarkup,/API Key/);assert.match(dshRuntimeMarkup,/HTTP.*预设/);
+  assert.doesNotMatch(dshRuntimeMarkup,/服务商官方账号|开始官方登录|已登录的 Claude Code/,'DSH does not inherit account login options');
+  const staleDshAccountMarkup=renderToStaticMarkup(React.createElement(ui.AgentRuntimeSetupForm,{...runtimeProps,provider:'dsh',configuration:{...dshRuntimePublic,authMode:'provider-login'},draft:{...dshRuntimeDraft,authMode:'provider-login'},auth:{state:'awaiting-user'}}));
+  assert.match(staleDshAccountMarkup,/API Key/);assert.doesNotMatch(staleDshAccountMarkup,/开始官方登录|等待服务商完成登录/,'stale unsupported account state cannot create DSH login behavior');
+  let dshDoc='';const dshGuide=ui.AgentRuntimeSetupGuide({provider:'dsh',onOpen:value=>{dshDoc=value;}});
+  assert.match(renderToStaticMarkup(dshGuide),/DSH SDK/);assert.match(renderToStaticMarkup(dshGuide),/官方/);
+  React.Children.toArray(dshGuide.props.children).find(child=>child.props?.onClick).props.onClick();
+  assert.equal(dshDoc,'https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.2-rc.1/packages/sdk');
+  const legacyPreset={purpose:'coding',id:'standard',compatible:true,loaded:true,loadState:'loaded',reason:null,verification:'native-persona-only'};
+  const dshExecution={transport:'sdk',bridgeState:'unavailable',gateVersion:null,supportedTools:[],allToolsRequireApproval:false,osSandbox:false,reason:'dsh_sdk_version_unsupported',legacyConnection:{available:true,ready:true,reason:null}};
+  const rawDshHealth={id:'dsh',available:false,installed:true,authenticated:null,compatible:false,status:'needs-setup',eligible:false,taskEligible:false,reason:'dsh_sdk_version_unsupported',preset:legacyPreset,runtimeConfiguration:dshRuntimePublic,dshExecution};
+  const dshProjectionUi=createDesktopUiService({services:{agentService:{execute:async()=>rawDshHealth}}});
+  const projectedDsh=await dshProjectionUi.execute({method:'ui.agent.health',params:{provider:'dsh'}});
+  assert.deepEqual(projectedDsh.dshExecution,dshExecution,'Core projection retains bridge and legacy evidence as separate fields');
+  assert.equal(agentPanels.isAgentReady(projectedDsh),false,'healthy HTTP/preset cannot grant SDK task eligibility');
+  const dshDiagnostic=renderToStaticMarkup(React.createElement(ui.AgentSetupDiagnostic,{agent:projectedDsh}));
+  for(const label of ['受控 SDK 连接','HTTP 连接','HTTP／社交原生预设','Core 工具桥接','任务资格'])assert.ok(dshDiagnostic.includes(label),label+' is independently visible');
+  assert.match(dshDiagnostic,/0\.2\.2-rc\.1/);assert.doesNotMatch(dshDiagnostic,/可分配任务/);
+  const bridgedDsh={...projectedDsh,available:true,compatible:true,eligible:true,taskEligible:true,status:'ready',reason:null,dshExecution:{...dshExecution,bridgeState:'verified',gateVersion:'cetamesh-dsh-tool-v1',supportedTools:['read','write','edit'],allToolsRequireApproval:true,reason:null}};
+  assert.equal(agentPanels.isAgentReady(bridgedDsh),true);
+  assert.match(renderToStaticMarkup(React.createElement(ui.AgentSetupDiagnostic,{agent:bridgedDsh})),/可分配任务.*逐次审批/);
+  const sdkReadyWithLegacyFailure=renderToStaticMarkup(React.createElement(ui.AgentSetupDiagnostic,{agent:{...bridgedDsh,preset:{...legacyPreset,reason:'native-preset-document-mismatch'}}}));
+  assert.match(sdkReadyWithLegacyFailure,/原生预设：/);
+  assert.deepEqual({readyWithoutTask:agentPanels.isAgentReady({...bridgedDsh,taskEligible:false}),
+    readyWithoutTaskUnknown:agentPanels.isAgentReady({...bridgedDsh,taskEligible:null}),
+    legacyFailureCopies:(sdkReadyWithLegacyFailure.match(/DSH 实际加载的同名预设与本机文件不同/g)??[]).length},
+  {readyWithoutTask:false,readyWithoutTaskUnknown:false,legacyFailureCopies:1},'Task eligibility and the legacy preset failure keep independent meanings');
+  for(const patch of [{taskEligible:false},{taskEligible:null},{dshExecution:null},{dshExecution:{...bridgedDsh.dshExecution,bridgeState:'unavailable'}},{dshExecution:{...bridgedDsh.dshExecution,allToolsRequireApproval:false}},{dshExecution:{...bridgedDsh.dshExecution,gateVersion:null}}]){
+    assert.equal(agentPanels.isAgentReady({...bridgedDsh,...patch}),false,'renderer cannot retain DSH readiness without mandatory bridge evidence');
+  }
+  for(const [reason,expected] of Object.entries({dsh_sdk_runtime_required:/0\.2\.2-rc\.1/,dsh_sdk_version_unsupported:/0\.2\.2-rc\.1/,dsh_sdk_node_required:/独立 Node/,dsh_sdk_node_unsupported:/24\.9/,DSH_TOOL_APPROVAL_UNAVAILABLE:/Core.*审批/}))assert.match(presentation.dshSetupReasonLabel(reason),expected);
   assert.equal(agentPanels.isAgentTaskCheckPending(checkedCodex),true);
   assert.equal(agentPanels.isAgentTaskCheckPending({...checkedCodex,sessionCapable:null}),false,'renderer cannot preserve connection verification if Session capability becomes unknown');
   const missingClaudeKey={id:'claude',reason:'agent_credential_required',runtimeConfiguration:{...runtimePublic,provider:'claude',authMode:'api-key',credentialConfigured:false},connection:{nativeCliSupported:true}};
@@ -253,7 +292,7 @@ try {
   const props = { presets, configuration, draft: { ...configuration.pending }, saving: false, onDraftChange() {}, onSave() {} };
   const render = (component, props) => renderToStaticMarkup(React.createElement(component, props));
   const html = render(ui.DshSetupForm, props);
-  assert.match(html, /任务预设/); assert.match(html, /<summary>高级设置<\/summary>/); assert.doesNotMatch(html, /<details open/); assert.match(html, /从本机预设中选择/);
+  assert.match(html, /任务预设/); assert.match(html, /<summary>高级设置<\/summary>/); assert.doesNotMatch(html, /<details open/); assert.match(html, /本机及 DSH 已加载的预设/);
   assert.match(html, /编程预设/); assert.match(html, /社交预设/);
   assert.match(html, /coder-old/); assert.match(html, /coder-next/);
   assert.match(html, /当前生效版本 2/); assert.match(html, /待生效版本 3/);
@@ -281,6 +320,9 @@ try {
   window.ipc.postMessage=payload=>{sent=JSON.parse(payload);window.__cetameshReceive({id:sent.id,ok:true,result:{provider:'gemini',supported:true,applied:true,configuration:runtimePublic}});};
   assert.deepEqual(await agentClient.configureRuntime('gemini',runtimeDraft),runtimePublic);
   assert.equal(sent.method,'ui.agent.configure');assert.deepEqual(sent.params,{agentId:'gemini',config:runtimeDraft});
+  window.ipc.postMessage=payload=>{sent=JSON.parse(payload);window.__cetameshReceive({id:sent.id,ok:true,result:{provider:'dsh',supported:true,applied:true,configuration:dshRuntimePublic}});};
+  assert.deepEqual(await agentClient.configureRuntime('dsh',dshRuntimeDraft),dshRuntimePublic);
+  assert.deepEqual(sent.params,{agentId:'dsh',config:{...dshRuntimeDraft,taskTransport:'sdk'}},'DSH SDK setup explicitly selects task transport and does not edit the HTTP preset config');
   await agentClient.list(true);assert.equal(sent.method,'ui.agent.list');assert.deepEqual(sent.params,{refresh:true});
   window.ipc.postMessage=payload=>{sent=JSON.parse(payload);window.__cetameshReceive({id:sent.id,ok:true,result:presets});};
   assert.deepEqual(await agentClient.presets('/isolated/dsh'),presets);

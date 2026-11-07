@@ -9,8 +9,33 @@ export function mergeAgentHealth(previous: Agent, health: Agent): Agent {
 }
 
 export function AgentSetupDiagnostic({ agent }: { agent: Agent }) {
-  const reason = agent.reason || agent.preset?.reason;
-  return <div className="agent-diagnostic">{reason && <small>{dshSetupReasonLabel(reason)}</small>}{agent.preset && <small>编程预设 {agent.preset.id || '未选择'} · {agent.preset.loadState === 'loaded' ? '原生已加载' : agent.preset.loadState === 'not-loaded' ? '原生未加载' : '加载状态未知'} · {agent.preset.compatible === true ? 'persona 格式已验证' : agent.preset.compatible === false ? 'persona 格式不兼容' : 'persona 格式未验证'}</small>}{agent.diagnostic && <details><summary>诊断详情</summary><small>阶段：{agent.diagnostic.stage || '未知'} · 错误码：{agent.diagnostic.code || '无'} · {agent.diagnostic.retryable ? '允许重新检查连接' : '请先处理配置'}{agent.diagnostic.checkedAt ? ` · ${dateLabel(agent.diagnostic.checkedAt)}` : ''}</small></details>}</div>;
+  const reason = agent.reason || (agent.id === 'dsh' ? null : agent.preset?.reason);
+  return <div className="agent-diagnostic">{reason && <small>{dshSetupReasonLabel(reason)}</small>}{agent.id === 'dsh' ? <DshExecutionDiagnostic agent={agent} /> : agent.preset && <small>编程预设 {agent.preset.id || '未选择'} · {agent.preset.loadState === 'loaded' ? '原生已加载' : agent.preset.loadState === 'not-loaded' ? '原生未加载' : '加载状态未知'} · {agent.preset.compatible === true ? 'persona 格式已验证' : agent.preset.compatible === false ? 'persona 格式不兼容' : 'persona 格式未验证'}</small>}{agent.diagnostic && <details><summary>诊断详情</summary><small>阶段：{agent.diagnostic.stage || '未知'} · 错误码：{agent.diagnostic.code || '无'} · {agent.diagnostic.retryable ? '允许重新检查连接' : '请先处理配置'}{agent.diagnostic.checkedAt ? ` · ${dateLabel(agent.diagnostic.checkedAt)}` : ''}</small></details>}</div>;
+}
+
+function dshToolBridgeVerified(agent: Pick<Agent, 'dshExecution'>) {
+  const bridge = agent.dshExecution;
+  return bridge?.transport === 'sdk' && bridge.bridgeState === 'verified' && bridge.allToolsRequireApproval === true
+    && bridge.osSandbox === false && Boolean(bridge.gateVersion);
+}
+
+export function DshExecutionDiagnostic({ agent }: { agent: Agent }) {
+  const execution = agent.dshExecution;
+  const legacy = execution?.legacyConnection;
+  const preset = agent.preset;
+  const connection = (available: boolean | null | undefined) => available === true ? '已连接' : available === false ? '未连接' : '尚未验证';
+  return <><dl className="agent-connection-steps">
+    <div><dt>受控 SDK 连接</dt><dd>{execution?.transport === 'sdk' ? connection(agent.available) : '尚未配置或验证'}</dd></div>
+    <div><dt>旧 HTTP 连接</dt><dd>{connection(legacy?.available)} · {legacy?.ready === true ? '公共接口已就绪' : legacy?.ready === false ? '公共接口未就绪' : '接口状态未知'}</dd></div>
+    <div><dt>HTTP／社交原生预设</dt><dd>{preset?.id || '未选择'} · {preset?.loadState === 'loaded' ? '原生已加载' : preset?.loadState === 'not-loaded' ? '原生未加载' : '加载状态未知'} · {preset?.compatible === true ? 'persona 格式已验证' : preset?.compatible === false ? 'persona 格式不兼容' : 'persona 格式未验证'}</dd></div>
+    <div><dt>Core 工具桥接</dt><dd>{dshToolBridgeVerified(agent) ? '必经逐次审批已验证' : '尚未验证或不可用'}</dd></div>
+    <div><dt>任务资格</dt><dd>{agent.taskEligible === true && isAgentReady(agent) ? '可分配任务，仍需工作区授权及逐次审批' : '任务执行条件尚未满足'}</dd></div>
+  </dl><small>受控 SDK 任务使用独立会话；HTTP 连接与原生预设分别保留，不向任务授予工具权限。</small>
+    {execution?.reason && execution.reason !== agent.reason && <small role="status">{dshSetupReasonLabel(execution.reason)}</small>}
+    {legacy?.reason && <small>旧 HTTP 连接：{dshSetupReasonLabel(legacy.reason)}</small>}
+    {preset?.reason && preset.reason !== agent.reason && <small>原生预设：{dshSetupReasonLabel(preset.reason)}</small>}
+    {execution?.supportedTools.length ? <small>受控工具：{execution.supportedTools.join('、')} · 桥接版本：{execution.gateVersion || '未验证'}</small> : null}
+    <small>此任务模式没有 OS 沙箱；支持范围由当前 Core 工具桥接与工作区授权决定。</small></>;
 }
 
 export function DshSetupForm({ configuration, draft, presets, saving, conflicted = false, onDraftChange, onSave, onRefresh }: {
@@ -31,9 +56,9 @@ export function DshSetupForm({ configuration, draft, presets, saving, conflicted
     : !catalog.presets.some(row => row.compatible) ? '未发现兼容预设；不会自动修改已有文件。请在 DSH 中核对后刷新。'
     : null;
   return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!saving && !conflicted) onSave(); }}>
-    <h4>DSH 设置</h4><p>从本机及 DSH 已加载的预设中选择，无需手填名称或编辑文件。</p>
+    <h4>旧 HTTP／社交连接</h4><p>从本机及 DSH 已加载的预设中选择，无需手填名称或编辑文件。</p>
     {preset('codingPreset', '任务预设')}
-    <small>选择后保存；预设格式校验只验证 persona 内容，任务执行仍需通过工具与权限检查。</small>
+    <small>这些预设用于旧 HTTP／社交会话。格式校验只验证 persona 内容，不会修改受控 SDK 任务配置或开放工具权限。</small>
     {catalog.presets.some(row => row.id === draft.codingPreset && row.verification === 'native-persona-only') && <small role="status">此原生预设可以保存；Core 尚未验证其 Shell 与工具权限，保存不会开放任务执行。</small>}
     {listingMessage && <small role="status">{listingMessage}</small>}
     {catalog.presets.some(row => !row.compatible) && <small>部分预设不兼容，已禁用；原因见高级设置。</small>}
@@ -63,7 +88,7 @@ export function dshSetupErrorMessage(cause: unknown): string {
     CONFIGURATION_UNSUPPORTED: '当前 Core 无法保存 DSH 配置，请检查本机数据目录。',
     INVALID_PARAMS: '配置字段无效，请检查预设名称、绝对目录路径与服务地址。',
     WRITE_FAILED: '无法写入连接配置，请检查数据目录的写入权限。'
-  } as Record<string, string>)[code];
+  } as Record<string, string>)[code] ?? (/^DSH_(?:SDK_|TOOL_APPROVAL_)/i.test(code) ? dshSetupReasonLabel(code) : null);
   return message ? `${message}${code ? `（${code}）` : ''}` : messageOf(cause);
 }
 
@@ -111,15 +136,15 @@ export function DshSetupPanel({ agent, onConfigured }: { agent: Agent; onConfigu
 export function DshSetupDisclosure({ agent, onConfigured }: { agent: Agent; onConfigured(configuration: DshConfiguration): void }) {
   const disclosure = useRef<HTMLDetailsElement>(null);
   const missingPreset = agent.reason === 'preset-not-configured' || agent.configuration?.active.codingPreset === null;
-  return <>{(missingPreset || agent.reason === 'native-tool-policy-unverified') && <Button compact aria-label="选择 DSH 任务预设" onClick={() => {
+  return <>{(missingPreset || agent.reason === 'native-tool-policy-unverified') && <Button compact aria-label="查看 DSH 原生预设" onClick={() => {
     if (!disclosure.current) return;
     disclosure.current.open = true;
     disclosure.current.querySelector<HTMLButtonElement>('button[aria-label="任务预设"]')?.focus();
-  }}>选择任务预设</Button>}<details ref={disclosure} className="agent-setup-disclosure"><summary>连接设置</summary><DshSetupPanel agent={agent} onConfigured={onConfigured} /></details></>;
+  }}>查看 HTTP／社交预设</Button>}<details ref={disclosure} className="agent-setup-disclosure"><summary>旧 HTTP／社交预设设置</summary><DshSetupPanel agent={agent} onConfigured={onConfigured} /></details></>;
 }
 
 type AgentRuntimeDraft = Required<Pick<AgentRuntimeInput, 'enabled' | 'runtimePath' | 'nodePath' | 'model' | 'baseUrl' | 'apiKey'>> & Pick<AgentRuntimeInput, 'authMode' | 'servicePreset' | 'providerId' | 'methodId'>;
-export function isRuntimeProvider(provider: string): provider is AgentRuntimeProvider { return ['gemini', 'opencode', 'qwen', 'claude'].includes(provider); }
+export function isRuntimeProvider(provider: string): provider is AgentRuntimeProvider { return ['gemini', 'opencode', 'qwen', 'claude', 'dsh'].includes(provider); }
 export function agentNeedsSetup(agent: Pick<Agent, 'id' | 'status' | 'reason' | 'eligible' | 'taskEligible' | 'runtimeConfiguration'>): boolean {
   if (isAgentReady(agent) || agent.runtimeConfiguration?.enabled === false || ['disabled', 'provider_disabled', 'runtime_disabled'].includes(agent.reason?.trim().toLowerCase() ?? '')) return false;
   return agent.status === 'needs-setup' || agent.status === 'connection-pending' || isRuntimeProvider(agent.id);
@@ -132,17 +157,19 @@ export function AgentRuntimeSetupGuide({ provider, onOpen }: { provider: AgentRu
   const documentation = {
     gemini: { name: 'Gemini CLI', url: 'https://geminicli.com/docs/get-started/installation/' },
     qwen: { name: 'Qwen Code', url: 'https://qwenlm.github.io/qwen-code-docs/en/users/quickstart/' },
-    claude: { name: 'Claude Code', url: 'https://code.claude.com/docs/en/setup' }
+    claude: { name: 'Claude Code', url: 'https://code.claude.com/docs/en/setup' },
+    dsh: { name: 'DSH SDK', url: 'https://github.com/deepseek-ai/deepseek-harness/tree/dsh-v0.2.2-rc.1/packages/sdk' }
   };
   if (provider === 'opencode') return <small>优先自动发现 OpenCode 安装包中的编码运行时；已包含时无需另装 CLI。</small>;
   const doc = documentation[provider];
+  if (provider === 'dsh') return <div className="dsh-setup-form"><small>受控任务需要官方 DSH／SDK 0.2.2-rc.1 配对运行时与独立 Node 24.9+。桌面客户端或旧 HTTP 服务已安装，不代表此 SDK 连接已验证。</small><Button compact type="button" variant="ghost" title={doc.url} onClick={() => onOpen(doc.url)}>DSH SDK 官方文档</Button></div>;
   return <div className="dsh-setup-form"><small>本连接使用 {doc.name} 编码运行时；桌面客户端已安装不代表编码 CLI 已就绪。</small><Button compact type="button" variant="ghost" title={doc.url} onClick={() => onOpen(doc.url)}>{doc.name} 官方安装文档</Button></div>;
 }
 function runtimeDraft(configuration: AgentRuntimeConfiguration): AgentRuntimeDraft {
-  return { enabled: configuration.enabled, runtimePath: configuration.runtimePath, nodePath: configuration.nodePath, model: configuration.model, baseUrl: configuration.baseUrl, apiKey: '', authMode: configuration.authMode ?? 'api-key', servicePreset: configuration.servicePreset ?? 'custom', providerId: configuration.providerId ?? null, methodId: configuration.methodId ?? null };
+  return { enabled: configuration.enabled, runtimePath: configuration.runtimePath, nodePath: configuration.nodePath, model: configuration.model, baseUrl: configuration.baseUrl, apiKey: '', authMode: configuration.provider === 'dsh' ? 'api-key' : configuration.authMode ?? 'api-key', servicePreset: configuration.servicePreset ?? 'custom', providerId: configuration.providerId ?? null, methodId: configuration.methodId ?? null };
 }
 export function AgentConnectionSteps({ agent }: { agent: Agent }) {
-  if (!isRuntimeProvider(agent.id)) return null;
+  if (!isRuntimeProvider(agent.id) || agent.id === 'dsh') return null;
   const evidence = agent.connection;
   const authentication = evidence?.authentication;
   const authenticationLabel = authentication?.mode === 'native-cli'
@@ -162,28 +189,31 @@ export function AgentRuntimeSetupForm({ provider, configuration, draft, saving, 
   connection?: AgentConnectionEvidence | null; auth?: AgentAuthStatus | null;
   onDraftChange(value: AgentRuntimeDraft): void; onSave(): void; onRefresh(): void; onLogin?(methodId: string): void; onCancel?(): void;
 }) {
-  const account = draft.authMode === 'provider-login';
+  const dsh = provider === 'dsh';
+  const account = !dsh && draft.authMode === 'provider-login';
   const native = provider === 'claude' && draft.authMode === 'native-cli';
   const modelRequired = !native && (provider !== 'claude' || connection?.modelRequired !== false);
-  const active = auth && ['starting', 'awaiting-user', 'exit-unconfirmed'].includes(auth.state);
+  const active = !dsh && auth && ['starting', 'awaiting-user', 'exit-unconfirmed'].includes(auth.state);
   const locked = saving || Boolean(active);
   const accountPolicyReason = provider === 'opencode' && connection?.accountReason === 'opencode_native_policy_override_unsupported' ? availabilityReasonLabel(connection.accountReason) : null;
-  const field = (key: 'runtimePath' | 'nodePath' | 'model' | 'baseUrl', label: string, placeholder: string, maxLength: number) => <label>{label}<Input aria-label={label} value={draft[key]} placeholder={placeholder} maxLength={maxLength} required={key === 'model' && modelRequired && draft.enabled} disabled={locked} onChange={event => onDraftChange({ ...draft, [key]: event.target.value, ...(key === 'baseUrl' ? { servicePreset: 'custom', apiKey: '' } : {}) })} /></label>;
+  const field = (key: 'runtimePath' | 'nodePath' | 'model' | 'baseUrl', label: string, placeholder: string, maxLength: number) => <label>{label}<Input aria-label={label} value={draft[key]} placeholder={placeholder} maxLength={maxLength} required={draft.enabled && (dsh || key === 'model' && modelRequired)} disabled={locked} onChange={event => onDraftChange({ ...draft, [key]: event.target.value, ...(key === 'baseUrl' ? { servicePreset: 'custom', apiKey: '' } : {}) })} /></label>;
   const supported = !accountPolicyReason && connection?.methods.find(method => method.id !== 'api-key' && method.supported && (provider !== 'opencode' || method.id === draft.methodId));
   return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!locked && !conflicted) onSave(); }}>
+    {dsh && <><h4>DSH 受控任务连接配置</h4><small>仅支持此任务执行器专用的 API Key。受控 SDK 任务不继承旧 HTTP／社交预设，也不读取普通聊天的模型配置。</small></>}
     <label><Input type="checkbox" checked={draft.enabled} disabled={locked} onChange={event => onDraftChange({ ...draft, enabled: event.target.checked })} /> 启用此连接</label>
-    {provider === 'qwen' ? <small>Qwen Code 仅支持 API；旧账号 OAuth 已停用。</small> : <label>认证方式<Select label="认证方式" value={draft.authMode ?? 'api-key'} disabled={locked} onChange={event => onDraftChange({ ...draft, authMode: event.target.value as AgentRuntimeConfiguration['authMode'], apiKey: '', providerId: null, methodId: null })}><option value="api-key">API Key</option><option value="provider-login">服务商官方账号（待原生验证）</option>{provider === 'claude' && <option value="native-cli" disabled={connection?.nativeCliSupported !== true}>使用已登录的 Claude Code</option>}</Select></label>}
+    {dsh ? <small>认证方式：API Key</small> : provider === 'qwen' ? <small>Qwen Code 仅支持 API；旧账号 OAuth 已停用。</small> : <label>认证方式<Select label="认证方式" value={draft.authMode ?? 'api-key'} disabled={locked} onChange={event => onDraftChange({ ...draft, authMode: event.target.value as AgentRuntimeConfiguration['authMode'], apiKey: '', providerId: null, methodId: null })}><option value="api-key">API Key</option><option value="provider-login">服务商官方账号（待原生验证）</option>{provider === 'claude' && <option value="native-cli" disabled={connection?.nativeCliSupported !== true}>使用已登录的 Claude Code</option>}</Select></label>}
+    {dsh && <>{field('runtimePath', 'DSH SDK 0.2.2-rc.1 路径', '官方 CLI lib/bin.js 或 DSH／配对 SDK package.json 的绝对路径', 4096)}{field('nodePath', '独立 Node 路径（24.9+）', '独立 node.exe 的绝对路径', 4096)}{field('baseUrl', 'DeepSeek API 端点', 'https://api.deepseek.com/anthropic', 2048)}</>}
     {provider === 'claude' && !native && connection?.nativeCliSupported !== true && <small>本机 Claude Code 登录接入尚未通过运行时检查，请检查连接与安装版本。</small>}
     {accountPolicyReason && <small role="status">{accountPolicyReason}</small>}
-    {!account && !native && Boolean(connection?.servicePresets?.length) && <label>API 服务<Select label="API 服务" value={draft.servicePreset ?? 'custom'} disabled={locked} onChange={event => { const preset = connection?.servicePresets?.find(item => item.id === event.target.value); if (preset) onDraftChange({ ...draft, servicePreset: preset.id, baseUrl: preset.baseUrl ?? draft.baseUrl, apiKey: '' }); }}>{connection?.servicePresets?.map(preset => <option key={preset.id} value={preset.id}>{preset.label}</option>)}</Select></label>}
+    {!dsh && !account && !native && Boolean(connection?.servicePresets?.length) && <label>API 服务<Select label="API 服务" value={draft.servicePreset ?? 'custom'} disabled={locked} onChange={event => { const preset = connection?.servicePresets?.find(item => item.id === event.target.value); if (preset) onDraftChange({ ...draft, servicePreset: preset.id, baseUrl: preset.baseUrl ?? draft.baseUrl, apiKey: '' }); }}>{connection?.servicePresets?.map(preset => <option key={preset.id} value={preset.id}>{preset.label}</option>)}</Select></label>}
     {account && provider === 'opencode' && <label>模型服务的官方登录<Select label="模型服务的官方登录" disabled={locked} value={draft.methodId ?? ''} onChange={event => { const item = connection?.providerSelections?.find(item => item.methodId === event.target.value); onDraftChange({ ...draft, providerId: item?.providerId ?? null, methodId: item?.methodId ?? null }); }}><option value="">选择服务及方式（均待验证）</option>{connection?.providerSelections?.map(item => <option key={item.methodId} value={item.methodId}>{item.label}</option>)}</Select></label>}
     {(!account || provider === 'opencode') && field('model', modelRequired ? '模型（必填）' : '模型（可选）', modelRequired ? '填写服务支持的准确模型 ID' : '留空使用 Claude Code 默认模型', 256)}
     {!account && !native && <><label>API Key<Input aria-label="API Key" type="password" value={draft.apiKey} autoComplete="new-password" maxLength={512} placeholder={configuration.credentialConfigured ? '留空保留已保存凭据' : '输入此 Agent 使用的 API Key'} disabled={locked} onChange={event => onDraftChange({ ...draft, apiKey: event.target.value })} /></label><small>{configuration.credentialConfigured ? '凭据已保存；留空保留已保存凭据。' : '尚未保存此 Agent 的凭据。'} 更换服务或端点须重新输入 Key；保存后清空输入框。</small></>}
     {native && <><small>使用当前 Windows 用户的 Claude Code 默认配置目录；凭据与历史由 Claude 管理。CetaMesh 不复制凭据，任务仍禁用 Claude 的设置、插件及 MCP 配置。</small><small role="status">尚未登录时，请在本机终端运行 <code>claude auth login</code>，完成后刷新连接。连接检查只读取登录状态；实际任务仍需工作区授权与逐次工具审批。</small></>}
     {account && <><small>在 CetaMesh 专用配置中使用服务商官方登录，不复制现有账号目录。服务商可能打开系统默认浏览器；这不是独立浏览器账号。不会自动调用付费模型。</small>{supported ? <Button type="button" disabled={locked || configuration.authMode !== 'provider-login' || draft.methodId !== configuration.methodId} onClick={() => onLogin?.(draft.methodId ?? supported.id)}>开始官方登录</Button> : !accountPolicyReason && <small role="status">官方登录暂未启用：需要 Windows 原生进程、私有存储与审批策略验证。可切回 API 配置。</small>}{provider === 'gemini' && <small>Gemini 0.65.0 没有可用于被动检查的账号状态接口，且缺少完整工具输入证明；登录也不会开放任务执行。</small>}{provider === 'claude' && <small>仅计划支持 Claude 订阅登录，不支持 Console 无 Key 登录；SDK 第三方使用资格文档存在差异，需发行前复核。</small>}</>}
     {active && <div role="status">{auth.state === 'exit-unconfirmed' ? '进程退出尚未确认；连接仍被占用。' : '等待服务商完成登录。'}<Button type="button" variant="ghost" onClick={onCancel}>取消登录</Button></div>}
-    {!native && auth && !active && <small role="status">{{'no-session':'尚无专用登录会话',unsupported:'此账号方式不受支持',starting:'正在启动', 'awaiting-user':'等待用户', 'session-present':'专用会话已保存；不代表模型访问已验证',cancelled:'登录已取消',failed:'登录失败；可重试',expired:'登录已超时；可重试','exit-unconfirmed':'退出未确认'}[auth.state]}</small>}
-    <details><summary>高级设置</summary>{field('runtimePath', '运行时路径', '留空自动发现；填写官方编码运行时的绝对路径', 4096)}{field('nodePath', '独立 Node 路径', 'npm 运行时可填写独立 node.exe 的绝对路径', 4096)}{!account && !native && field('baseUrl', 'API 端点', 'https://…', 2048)}</details>
+    {!dsh && !native && auth && !active && <small role="status">{{'no-session':'尚无专用登录会话',unsupported:'此账号方式不受支持',starting:'正在启动', 'awaiting-user':'等待用户', 'session-present':'专用会话已保存；不代表模型访问已验证',cancelled:'登录已取消',failed:'登录失败；可重试',expired:'登录已超时；可重试','exit-unconfirmed':'退出未确认'}[auth.state]}</small>}
+    {!dsh && <details><summary>高级设置</summary>{field('runtimePath', '运行时路径', '留空自动发现；填写官方编码运行时的绝对路径', 4096)}{field('nodePath', '独立 Node 路径', 'npm 运行时可填写独立 node.exe 的绝对路径', 4096)}{!account && !native && field('baseUrl', 'API 端点', 'https://…', 2048)}</details>}
     <small>使用原生权限模式；工作区授权与逐次审批另行确认。保存配置不等于连接成功。</small>
     <div className="row"><Button compact type="submit" disabled={locked || conflicted}>{saving ? '保存中…' : '保存配置'}</Button><Button compact type="button" variant="ghost" disabled={saving} onClick={onRefresh}>刷新连接</Button></div>
   </form>;
@@ -202,7 +232,7 @@ function AgentRuntimeSetupPanel({ agent, onConfigured, onRefresh }: { agent: Age
   useEffect(() => { ++mountedRevision.current; return () => { ++mountedRevision.current; }; }, [agent.id]);
   useEffect(() => {
     setAuth(null);
-    if (!isRuntimeProvider(agent.id) || !configuration || configuration.authMode === 'native-cli') return;
+    if (!isRuntimeProvider(agent.id) || agent.id === 'dsh' || !configuration || configuration.authMode === 'native-cli') return;
     let updates = 0, active = true;
     const controller = createAuthPanelController({ provider: agent.id, revision: configuration.revision, client: agentClient, onUpdate: value => { updates++; setAuth(value); } });
     authController.current = controller;
@@ -221,7 +251,7 @@ function AgentRuntimeSetupPanel({ agent, onConfigured, onRefresh }: { agent: Age
     setSaving(true); setError(''); setNotice('');
     let clearCredential = false;
     try {
-      const result = await agentClient.configureRuntime(agent.id, { ...draft, executionMode: 'native-permissions' });
+      const result = await agentClient.configureRuntime(agent.id, { ...draft, ...(agent.id === 'dsh' ? { authMode: 'api-key', providerId: null, methodId: null } : {}), executionMode: 'native-permissions' });
       if (epoch === mountedRevision.current) {
         clearCredential = true;
         const current = currentConfiguration.current;
@@ -241,12 +271,13 @@ function AgentRuntimeSetupPanel({ agent, onConfigured, onRefresh }: { agent: Age
 
 export function AgentRuntimeSetupDisclosure(props: { agent: Agent; onConfigured(configuration: AgentRuntimeConfiguration): void; onRefresh(): void }) {
   const [open, setOpen] = useState(false);
-  return <details className="agent-setup-disclosure" onToggle={event => setOpen(event.currentTarget.open)}><summary>连接设置</summary>{open && <AgentRuntimeSetupPanel {...props} />}</details>;
+  return <details className="agent-setup-disclosure" onToggle={event => setOpen(event.currentTarget.open)}><summary>{props.agent.id === 'dsh' ? '受控 SDK 任务连接设置' : '连接设置'}</summary>{open && <AgentRuntimeSetupPanel {...props} />}</details>;
 }
 
-export function isAgentReady(agent: Pick<Agent, 'eligible' | 'taskEligible'> & Partial<Pick<Agent, 'status' | 'reason' | 'probeCode' | 'diagnostic'>>) {
+export function isAgentReady(agent: Pick<Agent, 'eligible' | 'taskEligible'> & Partial<Pick<Agent, 'id' | 'dshExecution' | 'status' | 'reason' | 'probeCode' | 'diagnostic'>>) {
   const failedCheck = [agent.reason, agent.probeCode, agent.diagnostic?.code].some(value => value?.trim().toUpperCase() === 'CHECK_FAILED');
-  return !failedCheck && (!agent.status || agent.status === 'ready') && (agent.eligible === true || agent.taskEligible === true);
+  const eligible = agent.id === 'dsh' ? agent.taskEligible === true && dshToolBridgeVerified(agent) : agent.eligible === true || agent.taskEligible === true;
+  return !failedCheck && (!agent.status || agent.status === 'ready') && eligible;
 }
 
 export function isAgentTaskCheckPending(agent: Agent) {
@@ -283,7 +314,7 @@ export function CodexSetupDiagnostic({ agent }: { agent: Agent }) {
 
 export function AgentInstallationDiagnostic({ agent }: { agent: Agent }) {
   if (!agent.desktopApp) return null;
-  if (agent.id === 'dsh') return <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed === true ? '已安装' : agent.desktopApp.installed === false ? '未检测到' : '安装状态未知'} · {agent.desktopApp.running === true ? '运行中' : agent.desktopApp.running === false ? '未运行' : '运行状态未知'}</span><span>DSH Agent Provider：{agent.available === true && agent.reason !== 'CHECK_FAILED' ? '已连接' : agent.available === false ? '未连接' : '连接状态未知'}</span></div>;
+  if (agent.id === 'dsh') return <div className="agent-desktop-state"><strong>DeepSeek Harness Desktop</strong><span>桌面应用：{agent.desktopApp.installed === true ? '已安装' : agent.desktopApp.installed === false ? '未检测到' : '安装状态未知'} · {agent.desktopApp.running === true ? '运行中' : agent.desktopApp.running === false ? '未运行' : '运行状态未知'}</span><span>旧 HTTP 连接：{agent.dshExecution?.legacyConnection.available === true ? '已连接' : agent.dshExecution?.legacyConnection.available === false ? '未连接' : '连接状态未知'} · 受控 SDK 任务资格另行检查</span></div>;
   const installed = agent.desktopApp.installed;
   return <div className="agent-desktop-state"><strong>{agent.desktopApp.displayName || agent.name} 桌面客户端</strong><span>桌面客户端：{installed === true ? '已安装' : installed === false ? '未检测到' : '检测结果未知'}{agent.desktopApp.version ? ' · ' + agent.desktopApp.version : ''}</span><span>CLI：{agent.cliInstalled === true ? '已检测到' : agent.cliInstalled === false ? '未检测到' : '检测结果未知'} · Agent 连接：{isAgentReady(agent) ? '已就绪' : isAgentTaskCheckPending(agent) ? '已通过 · 任务待验证' : '待验证'}</span></div>;
 }

@@ -154,12 +154,17 @@ export interface Agent {
   configuration?: DshConfiguration | null;
   runtimeConfiguration?: AgentRuntimeConfiguration | null;
   connection?: AgentConnectionEvidence | null;
+  dshExecution?: {
+    transport: 'sdk'; bridgeState: 'verified' | 'unavailable'; gateVersion: string | null;
+    supportedTools: string[]; allToolsRequireApproval: boolean; osSandbox: false; reason: string | null;
+    legacyConnection: { available: boolean | null; ready: boolean | null; reason: string | null };
+  } | null;
   authConfigured?: boolean | null; authVerified?: boolean | null; authentication?: 'configured-unverified' | 'not-configured' | 'verified' | null;
   preset?: { purpose: string; id: string | null; compatible: boolean | null; loaded: boolean | null; loadState: 'loaded' | 'not-loaded' | 'unknown'; reason: string | null; verification: string | null } | null;
   diagnostic?: { stage: string; code: string | null; retryable: boolean; checkedAt: string | null } | null;
   version: string | null; desktopApp: { displayName?: string; installed: boolean | null; running: boolean | null; status: string; version: string | null } | null;
 }
-export type AgentRuntimeProvider = 'gemini' | 'opencode' | 'qwen' | 'claude';
+export type AgentRuntimeProvider = 'gemini' | 'opencode' | 'qwen' | 'claude' | 'dsh';
 export interface AgentConnectionEvidence {
   runtime: { installed: boolean; protocolVerified: boolean; version: string | null };
   authentication: { mode: 'api-key' | 'provider-login' | 'native-cli'; state: string; verified: boolean };
@@ -536,7 +541,7 @@ export const agentClient = {
   health: (provider: string, refresh = false) => uiCall<Agent>('ui.agent.health', { provider, refresh }),
   presets: (homeDir: string | null) => uiCall<DshPresetCatalog>('ui.agent.presets', { provider: 'dsh', homeDir }),
   configureRuntime: async (provider: AgentRuntimeProvider, config: AgentRuntimeInput) => {
-    const result = await uiCall<{ provider: AgentRuntimeProvider; supported: boolean; applied: boolean; configuration: AgentRuntimeConfiguration }>('ui.agent.configure', { agentId: provider, config });
+    const result = await uiCall<{ provider: AgentRuntimeProvider; supported: boolean; applied: boolean; configuration: AgentRuntimeConfiguration }>('ui.agent.configure', { agentId: provider, config: provider === 'dsh' ? { ...config, taskTransport: 'sdk' } : config });
     return result.configuration;
   },
   configure: (config: DshSelection) => uiCall<{ provider: 'dsh'; supported: boolean; applied: false; restartRequired: boolean; configuration: DshConfiguration }>('ui.agent.configure', { agentId: 'dsh', config })
