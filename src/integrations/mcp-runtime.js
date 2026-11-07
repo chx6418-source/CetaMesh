@@ -273,7 +273,7 @@ export function createMcpRuntime({
     record.connection = null;
     record.pid = null;
     record.tools = [];
-    if (record.stopping) { record.status = 'stopped'; record.lastError = null; return; }
+    if (record.stopping) { record.status = 'stopped'; return; }
     record.status = 'crashed';
     record.crashes += 1;
     record.lastError = 'MCP Server 连接意外关闭，请查看本机脱敏诊断日志。';
@@ -333,7 +333,7 @@ export function createMcpRuntime({
         if (record.connection) {
           // Do not await our own start promise. stop joins it after this failure
           // returns, retaining ownership if cleanup fails or exceeds its budget.
-          void stop(id).catch(() => {});
+          void stop(id, { retainFailure: true }).catch(() => {});
         }
         throw integrationError('MCP_START_FAILED', record.lastError);
       } finally {
@@ -341,9 +341,12 @@ export function createMcpRuntime({
       }
     }
   }
-  async function stop(id) {
+  async function stop(id, { retainFailure = false } = {}) {
     requireServer(id);
     const record = recordFor(id);
+    // Automatic cleanup must not erase the failure that required cleanup.
+    // A later explicit stop clears it, while unconfirmed cleanup records its own error.
+    if (!retainFailure) record.lastError = null;
     if (!record.stopPromise) {
       ++record.generation;
       record.tools = [];
@@ -355,8 +358,8 @@ export function createMcpRuntime({
         const connection = record.connection;
         if (connection) await connection.close();
         if (record.connection === connection) record.connection = null;
-        record.status = 'stopped'; record.pid = null;
-        record.stopping = false; record.lastError = null;
+        record.status = record.lastError ? 'crashed' : 'stopped'; record.pid = null;
+        record.stopping = false;
         return snapshot(id);
       });
       record.stopPromise = stopping;

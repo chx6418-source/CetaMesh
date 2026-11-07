@@ -361,6 +361,7 @@ const REGISTRY = {
   'test-product-services.mjs': { category: 'runtime', note: '产品化 D：About / 更新公告 / 诊断本机展示 / 新 IPC 命名空间' },
   'test-feedback-links.mjs': { category: 'runtime', note: '反馈修正：只提供官网入口（query 白名单 version/build/platform，无软件内收集）' },
   'test-onboarding.mjs': { category: 'runtime', note: '产品化 D：首次运行引导（无 QQ/DSH/移动端也可完成）' },
+  'test-onboarding-ui.mjs': { category: 'desktop', requires: ['ui-motion-live'], timeoutMs: 120000, note: 'Production onboarding with real local Core services, cached catalog recovery and explicit model persistence; synthetic loopback catalog only' },
   'test-product-copy.mjs': { category: 'runtime', note: '产品化 D：空状态文案与 Provider 基础/高级字段分离' },
   'test-update-source.mjs': { category: 'runtime', note: '分发运行时：GitCode 主源 + GitHub 备用 + 校验下载' },
   'test-update-manifest-redirects.mjs': { category: 'security', note: 'Manifest fetch validates each redirect before transport, schema and signature trust' },
@@ -719,4 +720,3 @@ main().catch((error) => {
   console.error('[run-all-tests] 聚合器自身失败:', error?.stack ?? error);
   process.exitCode = 1;
 });
-

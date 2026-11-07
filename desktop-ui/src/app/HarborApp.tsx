@@ -1109,7 +1109,8 @@ function OnboardingPage({ onComplete }: { onComplete(): Promise<void> }) {
       if (!result.ok) { setConnectionResult(String(result.message ?? '连接测试失败。')); return; }
       if (saveProvider && status?.steps.some(step => step.id === 'provider' && step.status !== 'completed')) await onboardingClient.completeStep('provider', { provider });
       if (status?.steps.some(step => step.id === 'connection' && step.status !== 'completed')) await onboardingClient.completeStep('connection', { provider });
-      setCatalog(await chatClient.catalog());
+      // Credential validation may have changed configured providers since the cached first-run catalog.
+      setCatalog(await chatClient.catalog(true));
       setConnectionResult(String(result.message ?? '连接成功。'));
       await refresh();
     } catch (cause) { setConnectionResult(messageOf(cause)); }

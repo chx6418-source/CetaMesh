@@ -138,6 +138,8 @@ export function createIntegrationRegistry({
     const status = enabled ? (runtime.status ?? 'stopped') : 'disabled';
     return {
       id: server.id, name: server.name, enabled, running,
+      activationSource: typeof mcpRecord(id).enabled === 'boolean' ? 'owner' : 'catalog',
+      runtimeStatus: runtime.status ?? 'stopped',
       callable: enabled && running && discoveredTools.some(found => {
         const tool = toolById.get(server.namespace + found.name);
         return tool && toolEnabled(tool);

@@ -34,7 +34,14 @@ export function serviceDiagnosticChecks(services,{dataProbe=null,uiProbe=null,li
    return state('NOT_RUN','SESSION_PROBE_NOT_RUN');
   }},
   {id:'models',stage:'extensions',critical:false,run:()=>{const list=services.modelRuntime.listProviders();valid(list,Array.isArray(list));return state(list.some(p=>p.hasKey)?'NOT_RUN':'DEGRADED','MODEL_REQUEST_NOT_RUN');}},
-  {id:'mcp',stage:'extensions',critical:false,run:async()=>{const v=await call(services.integrationService,'mcp.list');valid(v,Array.isArray(v.servers));return !v.servers.length?state('NOT_RUN','MCP_NOT_CONFIGURED'):v.servers.some(s=>s.enabled!==false&&s.status!=='running')?state('DEGRADED','MCP_STOPPED'):state('NOT_RUN','MCP_DISCOVERY_ONLY');}},
+  {id:'mcp',stage:'extensions',critical:false,run:async()=>{
+   const v=await call(services.integrationService,'mcp.list');valid(v,Array.isArray(v.servers));
+   // Catalog permission and Owner enablement do not request a connection.
+   // Only observed runtime failures degrade Core; discovery never proves a tool call.
+   if(v.servers.some(s=>['crashed','failed','error'].includes(s.runtimeStatus??s.status)||s.lastError))return state('DEGRADED','MCP_STOPPED');
+   const selected=v.servers.some(s=>s.enabled!==false&&(s.activationSource==='owner'||s.running===true||s.status==='running'));
+   return state('NOT_RUN',selected?'MCP_DISCOVERY_ONLY':'MCP_NOT_CONFIGURED');
+  }},
   {id:'forge',stage:'extensions',critical:false,run:()=>{const v=services.forgeService.describe();valid(v,Array.isArray(v.providers));return state('NOT_RUN','REMOTE_API_NOT_RUN');}},
   {id:'qq',stage:'extensions',critical:false,timeoutMs:1500,run:async()=>{const q=await call(services.channelService,'channel.qq.health');
    valid(q,typeof q.ready==='boolean');if(!q.configured)return state('NOT_RUN','QQ_NOT_CONFIGURED');if(!q.ready)return state('DEGRADED','QQ_STOPPED');

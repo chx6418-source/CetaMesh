@@ -123,6 +123,39 @@ try{
   assert.ok(actual.find(c=>c.id==='tasks'&&c.status==='PASS'));
   assert.ok(actual.find(c=>c.id==='memory'&&c.status==='PASS'));
  }finally{await app.lifecycle.stop();}
+ const {createIntegrationService}=await import('../src/integrations/service.js');
+ let mcpStarts=0,failMcpDiscovery=false,closeMcp;
+ const optionalMcp=createIntegrationService({stateDir:path.join(temp,'optional-mcp'),transportFactory:async()=>{
+  mcpStarts++;let onClose;
+  return {onClose(handler){onClose=handler;closeMcp=()=>handler(null);},async listTools(){
+   if(failMcpDiscovery)throw Error('synthetic discovery failure');
+   return [{name:'web_search',inputSchema:{type:'object'}}];
+  },async close(){onClose?.(null);}};
+ }});
+ const mcpCheck=serviceDiagnosticChecks({integrationService:optionalMcp}).find(check=>check.id==='mcp');
+ const mcpReport=async()=>{const [row]=await runDiagnosticChecks([mcpCheck]);return {status:row.status,code:row.code};};
+ try{
+  assert.deepEqual(await mcpReport(),{status:'NOT_RUN',code:'MCP_NOT_CONFIGURED'},'default catalog permission does not request optional connections');
+  assert.equal(mcpStarts,0,'read-only diagnostics never start MCP');
+  const initial=(await optionalMcp.execute({method:'mcp.list'})).servers.find(row=>row.id==='web-search-safe');
+  assert.equal(initial.activationSource,'catalog');assert.equal(initial.runtimeStatus,'stopped');
+  await optionalMcp.execute({method:'mcp.enable',params:{id:'web-search-safe',approved:true}});
+  assert.deepEqual(await mcpReport(),{status:'NOT_RUN',code:'MCP_DISCOVERY_ONLY'},'an explicit enable is separate from requesting a connection');
+  assert.equal(mcpStarts,0);
+  failMcpDiscovery=true;
+  await assert.rejects(optionalMcp.execute({method:'mcp.start',params:{id:'web-search-safe',approved:true}}),{code:'MCP_START_FAILED'});
+  await new Promise(resolve=>setImmediate(resolve));
+  assert.deepEqual(await mcpReport(),{status:'DEGRADED',code:'MCP_STOPPED'},'cleanup of a failed discovery retains its actual failure');
+  await optionalMcp.execute({method:'mcp.stop',params:{id:'web-search-safe',approved:true}});
+  assert.deepEqual(await mcpReport(),{status:'NOT_RUN',code:'MCP_DISCOVERY_ONLY'},'an explicit confirmed stop returns to optional idle');
+  failMcpDiscovery=false;
+  await optionalMcp.execute({method:'mcp.start',params:{id:'web-search-safe',approved:true}});
+  assert.deepEqual(await mcpReport(),{status:'NOT_RUN',code:'MCP_DISCOVERY_ONLY'},'running and discovery do not certify tool execution');
+  closeMcp();
+  assert.deepEqual(await mcpReport(),{status:'DEGRADED',code:'MCP_STOPPED'},'an unexpected connection exit remains a real failure');
+  await optionalMcp.execute({method:'mcp.disable',params:{id:'web-search-safe',approved:true}});
+  assert.deepEqual(await mcpReport(),{status:'NOT_RUN',code:'MCP_NOT_CONFIGURED'},'disabled optional connections do not hold Core in a failure state');
+ }finally{await optionalMcp.close();}
  const {probeNativeIpc}=await import('../src/app/diagnostic-ipc.js');const net=await import('node:net');
  const endpoint=process.platform==='win32'?'\\\\.\\pipe\\cetamesh-diag-stalled-'+crypto.randomUUID():path.join(temp,'stalled.sock');
  const accepted=new Set(),stalled=net.createServer(socket=>{accepted.add(socket);socket.on('close',()=>accepted.delete(socket));});await new Promise(resolve=>stalled.listen(endpoint,resolve));
