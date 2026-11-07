@@ -92,6 +92,16 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
   let closed = false;
   let closePromise = null;
   const pendingOperations = new Set();
+  function configurationObservationOptions(session, turn) {
+    // Legacy Model Runtimes retain their data-only request shape. Only the
+    // existing adapter's explicit actual-wire contract can produce this event.
+    if (typeof modelRuntime.resolveProvider !== 'function'
+      || modelRuntime.resolveProvider(session.modelProvider || null)?.configurationControl?.observation !== 'wire-v1') return {};
+    return { onConfiguration: configurationObservation => {
+      if (closed || session.archived || !session.running || session.currentTurn !== turn) return;
+      emit(session, 'model/configuration', { requestId: turn.id, configurationObservation });
+    } };
+  }
   function trackedAbortable(createWork, signal) {
     // Fast cancellation may finish the Agent turn before provider cleanup.
     // Preserve the underlying work so close can join its real completion.
@@ -216,6 +226,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           signal: controller.signal,
           onTextDelta: delta => { streamedText += delta; emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: delta } }); },
           onContext: context=>emit(s,'model/context',{requestId:turn.id,context}),
+          ...configurationObservationOptions(s, turn),
           onActivity: activity => emit(s, 'tool/activity', { requestId: turn.id, activity }),
           onCapabilityResult: ({ capability, result, input, eventId }) => emit(s, 'tool/result', {
             requestId: turn.id, eventId, capability, status: result?.status ?? 'failed',
@@ -232,7 +243,8 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         if (result.status === 'unsupported') {
           const request = { providerId: s.modelProvider || null,
             model: s.model || undefined, reasoning: s.reasoningEffort || undefined,
-            messages: projectMessageBudget(messages).messages, onContext:context=>emit(s,'model/context',{requestId:turn.id,context}), toolChoice: 'none', signal: controller.signal };
+            messages: projectMessageBudget(messages).messages, onContext:context=>emit(s,'model/context',{requestId:turn.id,context}), toolChoice: 'none', signal: controller.signal,
+            ...configurationObservationOptions(s, turn) };
           let fallback;
           if (typeof modelRuntime.stream === 'function') {
             activeRequestId = `${turn.id}:fallback:0`; activeUsage = null; activeModel = null;
@@ -324,7 +336,8 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           messages.push({ role: 'system', content: 'CetaMesh dynamic context (JSON reference data):\n' + productContext });
         }
         const request = { providerId: s.modelProvider || null, model: s.model || undefined, reasoning: s.reasoningEffort || undefined,
-          messages: projectMessageBudget([...messages, ...copy(s.messages)]).messages, signal: controller.signal };
+          messages: projectMessageBudget([...messages, ...copy(s.messages)]).messages, signal: controller.signal,
+          ...configurationObservationOptions(s, turn) };
         const response = await trackedAbortable(() => {
           activeRequestId = `${turn.id}:${step}`; activeUsage = null; activeModel = null;
           return modelRuntime.chat(request);
@@ -540,6 +553,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       emit(s, 'turn/start', { requestId: turn.id, resumed: true });
       try {
         const result = await toolExecutionCoordinator.resumeApproval({
+          ...configurationObservationOptions(s, turn),
           onContext:context=>emit(s,'model/context',{requestId:turn.id,context}), approvalId, requestFingerprint, decisionResult,
           signal: controller.signal,
           onTextDelta: delta => emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: delta } }),

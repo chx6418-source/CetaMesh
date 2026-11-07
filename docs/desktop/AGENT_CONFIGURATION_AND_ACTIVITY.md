@@ -210,3 +210,12 @@ The complete native control and its display projection share the 128 KiB UTF-8
 budget. Missing optional selector IDs do not become synthetic null metadata that
 would make a valid native catalog disappear. Real selector IDs remain intact;
 over-budget or malformed advertisements never become silently partial choices.
+
+Managed Agent forwards the Model Runtime's actual-wire configuration observations
+through existing Agent Follow events, including continuation after an exact
+approved tool call. Existing Chat writers retain the bounded per-request records
+after completion and restart. Only adapters explicitly advertising the `wire-v1`
+observation contract receive the callback; legacy data-only request shapes stay
+unchanged. Old-turn or closed-runtime callbacks cannot attach observations to a
+new Run. A serialized wire value and a response model alias remain separately
+attributed observations, rather than a claim about an unreported server setting.
