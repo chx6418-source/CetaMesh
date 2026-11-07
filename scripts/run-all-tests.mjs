@@ -353,6 +353,7 @@ const REGISTRY = {
   'test-workshop-runtime.mjs': { category: 'runtime' },
   'test-workshop-production-flow.mjs': { category: 'runtime' },
   'test-workspace-runtime.mjs': { category: 'runtime' },
+  'test-workspace-async-contract.mjs': { category: 'security', timeoutMs: 120000, note: 'Actual bounded asynchronous Workspace IO, live authorization and drained cooperative cancellation' },
   'test-workspace-governance.mjs': { category: 'security', timeoutMs: 120000, note: 'Project-scoped recovery, exact legacy approvals and truthful handoff observations' },
   'test-workspace-scale.mjs': { category: 'runtime', timeoutMs: 180000, note: 'Measured real Git 1200 changes, 30 branches, 12 worktrees and concurrent imports' },
   'test-workspace-staging-governance.mjs': { category: 'security', timeoutMs: 120000, note: 'Lossless staging and bounded live preimage checks' },

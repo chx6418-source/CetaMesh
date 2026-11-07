@@ -10,7 +10,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { exec, execFile } from 'node:child_process';
-import { resolveInside } from './boundary.js';
+import { isInsideRoot, resolveInside } from './boundary.js';
 import {prepareScopedCommit,commitScopedPaths} from './scoped-git-commit.js';
 import { applyWorkspaceTransaction } from './transaction.js';
 import { assertObservationActive } from './observation-abort.js';
@@ -29,6 +29,7 @@ function fail(code, message) {
 }
 
 const READ_MAX_BYTES_HARD_CAP = 10 * 1024 * 1024;
+const READ_IO_CHUNK_BYTES = 256 * 1024;
 const WRITE_MAX_CHARS_HARD_CAP = 5 * 1024 * 1024;
 const SEARCH_LIMIT_CAP = 500;
 const SEARCH_MAX_DEPTH = 12;
@@ -76,6 +77,166 @@ export function readFile(rootReal, relPath, { maxBytes = 1024 * 1024, offset = 0
   } finally {
     fs.closeSync(handle);
   }
+}
+
+function assertReadActive(signal) {
+  if (signal?.aborted) throw Object.assign(new WorkspaceToolError('INVOKE_CANCELLED', 'Workspace read cancelled'), { name: 'AbortError' });
+}
+
+function sameReadPath(left, right) {
+  return process.platform === 'win32' ? path.resolve(left).toLowerCase() === path.resolve(right).toLowerCase()
+    : path.resolve(left) === path.resolve(right);
+}
+
+function sameReadIdentity(left, right) {
+  return left.dev === right.dev && left.ino === right.ino && left.birthtimeMs === right.birthtimeMs;
+}
+
+function stableReadFile(left, right) {
+  return sameReadIdentity(left, right) && left.size === right.size
+    && left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+}
+
+function changedRead() {
+  fail('WORKSPACE_READ_CHANGED', 'Workspace root, path or file changed during asynchronous read; retry with current facts');
+}
+
+function createReadContext(rootReal, { signal, assertAuthorized, restricted = false } = {}) {
+  assertReadActive(signal);
+  let real, stat;
+  try { real = fs.realpathSync.native(rootReal); stat = fs.statSync(real); }
+  catch { changedRead(); }
+  if (!sameReadPath(rootReal, real) || !stat.isDirectory()) changedRead();
+  return { rootReal, rootStat: stat, signal, assertAuthorized, restricted };
+}
+
+function assertReadRoot(context) {
+  assertReadActive(context.signal);
+  try {
+    if (!sameReadPath(fs.realpathSync.native(context.rootReal), context.rootReal)
+      || !sameReadIdentity(fs.statSync(context.rootReal), context.rootStat)) changedRead();
+  } catch { changedRead(); }
+}
+
+async function readCheckpoint(context) {
+  assertReadActive(context.signal);
+  // Trusted Broker context only. It is never taken from file/search parameters.
+  await context.assertAuthorized?.();
+  assertReadActive(context.signal);
+  assertReadRoot(context);
+}
+
+function resolveReadPath(context, relPath) {
+  assertReadRoot(context);
+  const resolved = resolveInside(context.rootReal, relPath, { forWrite: false });
+  if (context.searchScope) {
+    const scope = context.searchScope;
+    if (sameReadPath(resolved.absolute, scope.absolute)) {
+      // An explicitly selected initial alias stays bound to its original target.
+      if (!sameReadPath(resolved.real, scope.real)) changedRead();
+    } else {
+      // A stale Dirent never authorizes adopting a new canonical destination.
+      // Descendants are selected through their already canonical parent/name;
+      // check this on recapture and every later path/handle verification as well.
+      if (!isInsideRoot(scope.real, resolved.absolute) || !isInsideRoot(scope.real, resolved.real)
+        || !sameReadPath(resolved.absolute, resolved.real)) changedRead();
+      const entry = fs.lstatSync(resolved.absolute);
+      if (entry.isSymbolicLink()) changedRead();
+    }
+  }
+  if (context.restricted && [resolved.absolute, resolved.real].some(target =>
+    path.relative(context.rootReal, target).split(/[\\/]/).some(segment => SEARCH_RESTRICTED_NAME.test(segment)))) {
+    fail('SENSITIVE_RESOURCE_DENIED', 'Read cannot access protected Workspace resources');
+  }
+  return resolved;
+}
+
+function captureReadPath(context, relPath) {
+  const resolved = resolveReadPath(context, relPath);
+  let stat;
+  try { stat = fs.statSync(resolved.real); }
+  catch (error) { fail('FILE_NOT_FOUND', `文件不存在：${relPath}（${error?.code ?? error}）`); }
+  return { ...resolved, stat, relPath };
+}
+
+function verifyReadPath(context, snapshot, { directory = false } = {}) {
+  const resolved = resolveReadPath(context, snapshot.relPath);
+  let live;
+  try { live = fs.statSync(resolved.real); }
+  catch { changedRead(); }
+  if (!sameReadPath(resolved.real, snapshot.real)
+    || !(directory ? live.isDirectory() && sameReadIdentity(live, snapshot.stat) : live.isFile() && stableReadFile(live, snapshot.stat))) changedRead();
+}
+
+async function verifyReadHandle(context, snapshot, handle) {
+  const opened = await handle.stat();
+  assertReadActive(context.signal);
+  if (!opened.isFile() || !stableReadFile(opened, snapshot.stat)) changedRead();
+  verifyReadPath(context, snapshot);
+}
+
+async function readFileInContext(context, relPath, { maxBytes = 1024 * 1024, offset = 0 } = {}) {
+  const cap = Math.max(1, Math.min(READ_MAX_BYTES_HARD_CAP, Number(maxBytes) || 0));
+  if (!Number.isSafeInteger(offset) || offset < 0) fail('READ_OFFSET_INVALID', 'File read offset must be a nonnegative integer');
+  await readCheckpoint(context);
+  const snapshot = captureReadPath(context, relPath);
+  const stat = snapshot.stat;
+  if (stat.isDirectory()) fail('FILE_IS_DIRECTORY', `目标是目录，不是文件：${relPath}`);
+  if (!stat.isFile()) fail('FILE_NOT_REGULAR', 'Workspace read requires a regular file');
+  if (offset > stat.size) fail('READ_OFFSET_INVALID', 'File read offset exceeds file size');
+  const truncated = stat.size > offset + cap;
+  const buffer = Buffer.alloc(Math.min(cap, stat.size - offset));
+  let handle, result;
+  try {
+    // NOFOLLOW rejects a last-component replacement where supported; NONBLOCK
+    // prevents a replaced FIFO from blocking open. Handle/path identities are
+    // checked on every IO boundary on all platforms, including Windows.
+    handle = await fs.promises.open(snapshot.real, fs.constants.O_RDONLY
+      | (fs.constants.O_NOFOLLOW ?? 0) | (fs.constants.O_NONBLOCK ?? 0));
+    await readCheckpoint(context);
+    await verifyReadHandle(context, snapshot, handle);
+    const readInto = async (target, position) => {
+      let consumed = 0;
+      while (consumed < target.length) {
+        await readCheckpoint(context);
+        verifyReadPath(context, snapshot);
+        const { bytesRead } = await handle.read(target, consumed, Math.min(READ_IO_CHUNK_BYTES, target.length - consumed), position + consumed);
+        // No race against cancellation: this await drains the started OS read.
+        assertReadActive(context.signal);
+        await verifyReadHandle(context, snapshot, handle);
+        if (!bytesRead) changedRead();
+        consumed += bytesRead;
+      }
+      return consumed;
+    };
+    const bytesRead = await readInto(buffer, offset);
+    const header = Buffer.alloc(offset ? Math.min(64, stat.size) : 0);
+    if (offset) await readInto(header, 0);
+    await readCheckpoint(context);
+    await verifyReadHandle(context, snapshot, handle);
+    const expectedHash = offset === 0 && !truncated && bytesRead === stat.size
+      ? crypto.createHash('sha256').update(buffer).digest('hex') : null;
+    const headerText = offset ? decodeWorkspaceText(header, true) : null;
+    const decoded = offset && !headerText ? null : decodeWorkspaceText(buffer, truncated, headerText?.encoding ?? null);
+    if (decoded === null) result = { path: relPath, size: stat.size, offset,
+      nextOffset: truncated ? offset + buffer.length : null, truncated, binary: true, expectedHash, base64: buffer.toString('base64') };
+    else {
+      const nextOffset = offset + decoded.consumed;
+      result = { path: relPath, size: stat.size, offset, nextOffset: nextOffset < stat.size ? nextOffset : null,
+        truncated: nextOffset < stat.size, binary: false, content: decoded.content, encoding: decoded.encoding, expectedHash };
+    }
+  } finally {
+    // Closing is part of settlement, including failed/cancelled pending IO.
+    if (handle) await handle.close();
+  }
+  await readCheckpoint(context);
+  verifyReadPath(context, snapshot);
+  return result;
+}
+
+/** Bounded asynchronous production read; the synchronous helper remains compatible. */
+export async function readFileAsync(rootReal, relPath, options = {}) {
+  return readFileInContext(createReadContext(rootReal, options), relPath, options);
 }
 
 function decodeWorkspaceText(buffer, truncated = false, encodingHint = null) {
@@ -294,6 +455,90 @@ export function fileSearch(rootReal, { query = '', glob = '', searchPath = '.', 
     }
     return { path: relPosix, name: entry.name, dir: isDir, size, mtime };
   }
+}
+
+/** The traversal and file contents use real asynchronous filesystem IO. */
+export async function fileSearchAsync(rootReal, { query = '', glob = '', searchPath = '.', offset = 0,
+  restricted = false, includeHidden = false, skipNames, limit = 200, maxDepth = SEARCH_MAX_DEPTH, signal, assertAuthorized } = {}) {
+  const context = createReadContext(rootReal, { signal, assertAuthorized, restricted });
+  const cap = Math.max(1, Math.min(SEARCH_LIMIT_CAP, Number(limit) || 0));
+  const depthCap = Math.max(1, Math.min(SEARCH_MAX_DEPTH, Number(maxDepth) || 0));
+  const skip = new Set(['.git', 'node_modules', ...(Array.isArray(skipNames) ? skipNames.map(String) : [])]);
+  const needle = String(query ?? '').trim().toLowerCase();
+  const globRe = String(glob ?? '').trim() ? globToRegExp(String(glob).trim()) : null;
+  if (!needle && !globRe) fail('SEARCH_EMPTY', 'file.search 需要 query 或 glob');
+  const start = captureReadPath(context, searchPath);
+  if (!start.stat.isDirectory()) fail('SEARCH_PATH_INVALID', 'file.search path must be a directory');
+  // Capture the selected canonical subtree before the first authorization await.
+  // This private context also constrains file helper recaptures before payload IO.
+  context.searchScope = { absolute: start.absolute, real: start.real };
+  await readCheckpoint(context);
+  verifyReadPath(context, start, { directory: true });
+  const skipRows = Math.max(0, Math.min(SEARCH_MAX_ENTRIES, Number(offset) || 0));
+  const results = [];
+  let scanned = 0, matchedRows = 0, contentTruncated = false;
+  const add = row => { if (matchedRows++ >= skipRows && results.length < cap) results.push(row); };
+  const skippable = error => ['EACCES', 'EPERM', 'ENOENT', 'ENOTDIR', 'FILE_NOT_FOUND', 'FILE_IS_DIRECTORY',
+    'FILE_NOT_REGULAR', 'BOUNDARY_ESCAPE', 'SENSITIVE_RESOURCE_DENIED'].includes(error?.code);
+  const yieldSearch = async () => { await new Promise(resolve => setImmediate(resolve)); await readCheckpoint(context); };
+  const walk = async (directory, depth) => {
+    if (results.length >= cap || scanned >= SEARCH_MAX_ENTRIES || depth > depthCap) return;
+    await readCheckpoint(context);
+    verifyReadPath(context, directory, { directory: true });
+    let entries;
+    try { entries = await fs.promises.readdir(directory.real, { withFileTypes: true }); }
+    catch (error) { await readCheckpoint(context); if (skippable(error)) return; throw error; }
+    await readCheckpoint(context);
+    verifyReadPath(context, directory, { directory: true });
+    entries.sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
+      if (results.length >= cap || scanned >= SEARCH_MAX_ENTRIES) return;
+      scanned++;
+      if (scanned % 64 === 0) await yieldSearch();
+      const name = entry.name;
+      if ((!includeHidden && name.startsWith('.')) || skip.has(name) || (restricted && SEARCH_RESTRICTED_NAME.test(name))) continue;
+      const relPosix = toRelPosix(rootReal, path.join(directory.real, name));
+      const inGlob = !globRe || globRe.test(relPosix) || globRe.test(name);
+      const matched = inGlob && (!needle || name.toLowerCase().includes(needle));
+      // Like the existing Dirent traversal, symbolic links/junctions are omitted.
+      if (entry.isDirectory()) {
+        let child;
+        try { child = captureReadPath(context, relPosix); }
+        catch (error) { if (skippable(error)) continue; throw error; }
+        if (!child.stat.isDirectory()) continue;
+        await walk(child, depth + 1);
+      } else if (entry.isFile() && inGlob) {
+        try {
+          const file = captureReadPath(context, relPosix);
+          const stat = await fs.promises.stat(file.real);
+          await readCheckpoint(context);
+          verifyReadPath(context, file);
+          if (!stableReadFile(stat, file.stat)) changedRead();
+          let data = null;
+          if (needle) data = await readFileInContext(context, relPosix, { maxBytes: 1024 * 1024 });
+          if (matched) add({ path: relPosix, name, dir: false, size: stat.size, mtime: stat.mtimeMs });
+          if (data?.truncated) contentTruncated = true;
+          if (data && !data.binary) {
+            const lines = data.content.split(/\r?\n/);
+            for (let index = 0; index < lines.length && results.length < cap; index++) {
+              if (index && index % 256 === 0) await yieldSearch();
+              if (lines[index].toLowerCase().includes(needle)) add({ path: relPosix, name, dir: false,
+                line: index + 1, snippet: lines[index].slice(0, 500), encoding: data.encoding });
+            }
+          }
+        } catch (error) {
+          // Cancellation/authorization/root changes never become partial success.
+          if (!skippable(error)) throw error;
+        }
+      }
+    }
+    verifyReadPath(context, directory, { directory: true });
+  };
+  await walk(start, 0);
+  await readCheckpoint(context);
+  verifyReadPath(context, start, { directory: true });
+  return { results, scanned, truncated: contentTruncated || scanned >= SEARCH_MAX_ENTRIES || results.length >= cap,
+    nextOffset: matchedRows > skipRows + results.length ? skipRows + results.length : results.length >= cap ? skipRows + results.length : null };
 }
 
 // ── Git（只读直接执行；commit 由 service 层按策略审批后调用） ────────────────

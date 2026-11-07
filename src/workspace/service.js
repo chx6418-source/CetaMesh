@@ -20,12 +20,12 @@ import {
 } from './registry.js';
 import {
   WorkspaceToolError,
-  fileSearch,
+  fileSearchAsync,
   gitCommit,
   prepareGitCommit,
   gitDiff,
   gitStatus,
-  readFile,
+  readFileAsync,
   testRun,
   writeFile,
   applyWorkspaceChanges
@@ -177,6 +177,16 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     return text;
   }
 
+  function readExecution(entry, context) {
+    return { signal: context.signal, restricted: context.restricted === true,
+      assertAuthorized: async () => {
+        await context.assertAuthorized?.();
+        if (context.signal?.aborted) fail('INVOKE_CANCELLED', 'Workspace read cancelled');
+        const live = registry.get(entry.id);
+        if (live.root !== entry.root) fail('WORKSPACE_UNVERIFIED', 'Workspace identity changed during read');
+      } };
+  }
+
   async function executeCommit(entry, { message, ...selection }, pendingId = null) {
     assertWritable(entry, { pendingId });
     if (entry.settings?.policies?.gitCommit === 'deny') fail('GIT_COMMIT_DENIED', '当前工作区策略禁止 commit');
@@ -267,10 +277,13 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     },
 
     // ── 工具 ──
-    'workspace.read': async (p) => {
+    'workspace.read': async (p, context) => {
       const entry = requireWorkspace(p);
       const relPath = normalizeRelPath(p);
-      const result = readFile(entry.root, relPath, { maxBytes: p?.maxBytes ?? p?.maxChars, offset: p?.offset ?? 0 });
+      const execution = readExecution(entry, context);
+      const result = await readFileAsync(entry.root, relPath, { ...execution, maxBytes: p?.maxBytes ?? p?.maxChars, offset: p?.offset ?? 0 });
+      // The helper's last await reauthorizes, then proves the final identities.
+      // Do not introduce another awaited window between that proof and delivery.
       registry.recordFileAccess(entry.id, { relPath, action: 'read' });
       record(entry, String(p?.actor ?? 'user'), 'read', relPath);
       return result;
@@ -287,14 +300,16 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
       return result;
     },
 
-    'workspace.file.search': async (p) => {
+    'workspace.file.search': async (p, context) => {
       const entry = requireWorkspace(p);
-      const result = fileSearch(entry.root, {
+      const execution = readExecution(entry, context);
+      const result = await fileSearchAsync(entry.root, {
+        ...execution,
         query: p?.query,
         glob: p?.glob,
         searchPath: p?.path ?? '.',
         offset: p?.offset,
-        restricted: p?.searchRestricted === true,
+        restricted: execution.restricted || p?.searchRestricted === true,
         includeHidden: p?.includeHidden === true,
         skipNames: entry.settings?.search?.skipNames,
         limit: p?.maxResults ?? p?.limit
@@ -393,10 +408,10 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     }
   };
 
-  async function execute({ method, params } = {}) {
+  async function execute({ method, params } = {}, context = {}) {
     const handler = handlers[method];
     if (!handler) fail('METHOD_NOT_FOUND', `Unknown workspace method: ${method}`);
-    return handler(params ?? {});
+    return handler(params ?? {}, context);
   }
 
   function applyChanges({ id, changes, actor = 'capability-broker' } = {}) {

@@ -246,7 +246,21 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    const claimed=claimDispatch(request,entry,grantId);
    if(claimed&&!claimed.dispatchClaim){await validateReplay(request,entry);return claimed;}
    const claim=claimed?.dispatchClaim;
-   const providerRequest=signal?{...request,signal}:request;
+   const cooperativeRead=entry.readOnly===true&&entry.parallelSafe===true&&entry.effect==='read-only'
+    &&entry.provider==='workspace'&&['filesystem.read','filesystem.search'].includes(entry.id);
+   // This closure is in-process execution context, absent from durable requests,
+   // transport schemas and plugin metadata. It can restrict but never grant.
+   const assertAuthorized=async()=>{
+    if(signal?.aborted)throw abortError(signal);
+    if(registry.require(request.capability)!==entry)throw capabilityError('APPROVAL_EXPIRED','Capability changed during Workspace read');
+    const authorized=await policy.authorize(request,entry);
+    await executionGuard();await validatePluginParent(request);await entry.validate?.(request);
+    if(grantId)approval.validateGrant(grantId,request,entry,authorized?.approvalBinding);
+    await policy.authorize(request,entry);
+    if(registry.require(request.capability)!==entry)throw capabilityError('APPROVAL_EXPIRED','Capability changed during Workspace read');
+    if(signal?.aborted)throw abortError(signal);
+   };
+   const providerRequest=cooperativeRead?{...request,...(signal?{signal}:{}),assertAuthorized}:signal?{...request,signal}:request;
    let executorEntered=false;
    const providerPromise=Promise.resolve().then(async()=>{
     if(signal?.aborted)throw abortError(signal);
@@ -270,7 +284,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
      throw error;
     }
    }).then(result=>{settleDispatch(request,'completed',entry,result,claim);return result;},error=>{settleDispatch(request,!executorEntered?'failed-no-effect':error.effectStatus==='unknown'?'outcome-unknown':'failed',entry,undefined,claim);throw error;});
-   const result=await (entry.cancellationAware===true&&request.actor.kind==='agent'?providerPromise:awaitWithAbort(providerPromise,signal));
+   const result=await (entry.cancellationAware===true&&(request.actor.kind==='agent'||cooperativeRead)?providerPromise:awaitWithAbort(providerPromise,signal));
    audit({requestId:request.requestId,capability:entry.id,status:'completed',actor:request.actor.id});
    return {requestId:request.requestId,status:'completed',capability:entry.id,result};
   }catch(error){

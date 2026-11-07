@@ -593,7 +593,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   if (workspaceService) {
     for (const [method, id] of Object.entries(WORKSPACE_CAPABILITIES)) {
-      broker.register({ id, cancellationAware: id === 'test.run', permission: ['git.branch.create','git.worktree.create'].includes(id)?'git.commit':id==='git.overview'?'git.status':id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
+      const concurrentRead = id === 'filesystem.read' || id === 'filesystem.search';
+      broker.register({ id, cancellationAware: concurrentRead || id === 'test.run',
+        ...(concurrentRead ? { readOnly: true, parallelSafe: true, effect: 'read-only',
+          cancellationMode: 'cooperative', timeoutMode: 'await-settlement' } : {}),
+        permission: ['git.branch.create','git.worktree.create'].includes(id)?'git.commit':id==='git.overview'?'git.status':id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
         ...(['git.branch.create','git.worktree.create'].includes(id)?{effect:'non-idempotent',requiresTask:true}:{}),
         description: WORKSPACE_TOOL_DESCRIPTORS[id][0],
         inputSchema: WORKSPACE_TOOL_DESCRIPTORS[id][1],
@@ -636,16 +640,17 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               throw capabilityError('INVALID_PARAMS', 'test.run 需要 { tool, args }（allowlist 形态）');
             }
           }
-          if (id === 'filesystem.read' || id === 'filesystem.write') {
+          if (id === 'filesystem.read' || id === 'filesystem.write' || id === 'filesystem.search') {
             const ws = resolveWorkspace(request.workspaceId);
+            const relativePath = request.input.path ?? (id === 'filesystem.search' ? '.' : '');
             if (request.actor.kind !== 'owner') {
-              const segments = path.relative(ws.root, path.resolve(ws.root, String(request.input.path ?? ''))).split(/[\\/]/);
+              const segments = path.relative(ws.root, path.resolve(ws.root, String(relativePath))).split(/[\\/]/);
               if (segments.some(s => /^(?:\.git|\.ssh|\.aws|\.env(?:\..*)?|credentials(?:\..*)?|secrets?(?:\..*)?|id_rsa|id_ed25519)$/i.test(s))) {
                 throw capabilityError('SENSITIVE_RESOURCE_DENIED', 'Repository controls and credentials require Owner access');
               }
             }
             try {
-              const resolved = resolveInside(ws.root, request.input.path, { forWrite: id === 'filesystem.write' });
+              const resolved = resolveInside(ws.root, relativePath, { forWrite: id === 'filesystem.write' });
               if (!replay && id === 'filesystem.write' && request.actor.kind !== 'owner' && fs.existsSync(resolved.absolute)
                 && typeof request.input.expectedHash !== 'string') {
                 throw capabilityError('EXPECTED_HASH_REQUIRED', 'Agent write to an existing file requires expectedHash');
@@ -714,7 +719,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               ...(id === 'filesystem.read' ? { maxBytes: request.input.maxBytes ?? request.input.maxChars ?? 8192 } : {}),
               ...(id === 'filesystem.search' ? { searchRestricted: request.actor.kind !== 'owner' } : {}),
               ...(id === 'git.diff' ? { excludeSensitive: request.actor.kind !== 'owner' } : {}),
-              ...(request.workspaceId ? { id: request.workspaceId } : {}), actor: request.actor.id } });
+              ...(request.workspaceId ? { id: request.workspaceId } : {}), actor: request.actor.id } },
+              concurrentRead ? { signal: request.signal, assertAuthorized: request.assertAuthorized,
+                restricted: request.actor.kind !== 'owner' } : undefined);
           };
           return id === 'workspace.create' ? idempotent(request, run) : run();
         }
