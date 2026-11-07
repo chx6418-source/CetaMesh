@@ -33,17 +33,19 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     // preflight does not authorize stopping an assignment that changed later.
     assertTaskControlAvailable(taskRow);
     if (!taskRow.currentAgent) return;
+    const controlledDsh = taskRow.currentAgent.provider === 'dsh'
+      && agentBroker.capabilities('dsh')?.taskTransport === 'sdk';
     try {
       await agentBroker.cancel(taskRow.currentAgent);
       if (taskRow.currentAgent.provider === 'codex'
         && !(await inspectTaskSession(agentBroker, taskRow)).stopped) {
         throw capabilityError('SESSION_EXECUTION_UNCONFIRMED', '旧 Codex 执行尚未确认停止，请保留任务并核查恢复凭据');
       }
-      if (closeNativeSession && !['cetamesh', 'dsh', 'codex'].includes(taskRow.currentAgent.provider)) {
+      if (closeNativeSession && (controlledDsh || !['cetamesh', 'dsh', 'codex'].includes(taskRow.currentAgent.provider))) {
         // Native cancel is a request ACK, not an owned-process exit receipt.
         // Existing Session cleanup cannot depend on current launch readiness:
         // changed configuration may report unsupported while its process lives.
-        // Managed/DSH keep their existing cancellation contract; Codex has the
+        // Managed/legacy HTTP keep their existing contract; Codex has the
         // durable stop proof above. Every other assigned external Session closes.
         // Keep Task/Workspace ownership until the existing adapter confirms
         // process close and approval/staging cleanup. A failed close is retryable.
@@ -58,6 +60,9 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
           || latest.currentAgent?.sessionId !== taskRow.currentAgent.sessionId) {
           throw capabilityError('TASK_CONFLICT', '原生 Agent 关闭期间任务执行归属已变更');
         }
+      }
+      if (controlledDsh && !(await inspectTaskSession(agentBroker, taskRow)).stopped) {
+        throw capabilityError('SESSION_EXECUTION_UNCONFIRMED', 'DSH SDK 执行尚未取得准确的停止凭据，请保留任务、暂存区和工作区占用');
       }
     } catch (error) {
       // Managed Sessions belong to this Core. A missing external Session or

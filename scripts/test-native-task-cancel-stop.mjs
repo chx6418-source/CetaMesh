@@ -14,7 +14,7 @@ const runtime = services.taskService.runtime;
 const current = id => runtime.get({id}).task;
 const ui = (method, params) => services.desktopUiService.execute({method, params});
 const originals = {cancel: services.agentBroker.cancel, closeSession: services.agentBroker.closeSession,
-  capabilities: services.agentBroker.capabilities};
+  capabilities: services.agentBroker.capabilities, require: services.agentBroker.require};
 const fault = code => Object.assign(new Error(code), {code});
 
 function deferred() {
@@ -74,6 +74,30 @@ try {
     assert.equal(current(sibling.id).currentAgent.sessionId, sibling.currentAgent.sessionId);
   } finally { stop.resolve(); await pending.catch(() => {}); }
   console.log('PASS delayed native close retains Task assignment/Workspace owner and preserves independent sibling');
+
+  const dshTask = await createAssigned('controlled-dsh-stop', 'dsh');
+  const beforeDshCaps = services.agentBroker.capabilities;
+  let dshClosed = false, dshCloseCalls = 0;
+  services.agentBroker.capabilities = provider => provider === 'dsh'
+    ? {taskTransport: 'sdk', workspaceBoundary: 'native-staged'} : beforeDshCaps(provider);
+  services.agentBroker.require = provider => provider === 'dsh' ? {
+    verifyStoppedTask: async binding => ({...binding, provider: 'dsh', stopped: dshClosed,
+      evidence: 'supervisor-close', receiptId: 'controlled-proof'})
+  } : originals.require(provider);
+  services.agentBroker.cancel = async () => ({cancelRequested: true, stopped: false});
+  services.agentBroker.closeSession = async assignment => {dshCloseCalls++; return {closed: dshClosed, sessionId: assignment.sessionId};};
+  try {
+    await assert.rejects(ui('ui.task.cancel', {id: dshTask.id, expectedRev: dshTask.rev}),
+      {code: 'SESSION_EXECUTION_UNCONFIRMED'}, 'DSH SDK cancel ACK cannot release Task ownership');
+    assert.deepEqual(current(dshTask.id).currentAgent, dshTask.currentAgent);
+    assert.equal(runtime.activeWorkspaceOwner({workspaceId: dshTask.workspaceId})?.id, dshTask.id);
+    dshClosed = true;
+    const cancelled = await ui('ui.task.cancel', {id: dshTask.id, expectedRev: current(dshTask.id).rev});
+    assert.equal(cancelled.task.status, 'cancelled');
+    assert.equal(cancelled.task.currentAgent, null);
+    assert.equal(dshCloseCalls, 2);
+  } finally {services.agentBroker.require = originals.require; services.agentBroker.capabilities = beforeDshCaps;}
+  console.log('PASS DSH SDK ACK is refused and an exact stopped receipt allows a later cancellation');
 
   for (const outcome of ['close-rejected', 'close-unconfirmed', 'close-wrong-session']) {
     const assigned = await createAssigned(outcome);
