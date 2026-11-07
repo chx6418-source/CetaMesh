@@ -1,8 +1,10 @@
 # DSH 连接与预设兼容边界
 
-CetaMesh 通过已有 Core DSH connector 连接独立安装的 DSH，不安装、升级或启动第三方服务。当前适配依据旧版 `0.1.5-rc.1` 的实际接口与官方 [`dsh-v0.2.2-rc.1`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-rc.1) 的公开协议；新版源码参考固定为 `66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db`。包版本、服务可达、协议兼容与工具授权是独立事实。
+CetaMesh 保留已有 Core DSH HTTP connector，并通过同一个 DSH AgentProvider 为任务提供受控 SDK stdio 传输。它不会自动安装或升级 DSH，不会修改或重启用户正在运行的 HTTP 服务。Owner 明确配置兼容运行时后，Core 为每个新 Task Session 启动独立 SDK 进程。适配依据旧版 `0.1.5-rc.1` 的实际接口与官方 [`dsh-v0.2.2-rc.1`](https://github.com/deepseek-ai/deepseek-harness/releases/tag/dsh-v0.2.2-rc.1)；新版源码固定为 `66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db`。包版本、服务连接、预设格式、工具审批与任务资格分别报告。
 
-## 当前接口
+## 保留的 HTTP 接口
+
+这些接口用于原有连接、目录、社交和会话观测，不为新 Task 提供工具执行授权。不会把 SDK 的独立进程审批接口套到 HTTP Session，也不会自动迁移旧 HTTP Session。
 
 | 接口 | 生产者 → Core 消费者 | 兼容规则 |
 | --- | --- | --- |
@@ -23,19 +25,82 @@ Provider 关闭同时拥有尚未完成的创建操作。预设校验与远端�
 
 本机 `.agent-presets/<id>/agent.cordis.yml` 与 authenticated `agentPresets/read` 复用同一有界 persona parser。预设 ID、`trust`、默认标记以及 persona 格式均不授予工具权限。目录读取仅用于发现；Owner 在执行器页面选择任务预设并保存，配置按原有版本化连接文件持久化，当前 Core generation 及其 Session 保持原配置，重启 Core 后采用待生效配置。
 
-`local-persona-only` 仅表示本机 persona 格式；绑定真实 connector 时，同名本机文档还必须与 DSH 实际返回文档的 SHA-256 指纹一致。健康检查及最终 Session 创建均校验该绑定，避免用同名本机文件为不同的系统预设背书。已有本机预设执行与 staging/import 路径保留，仍须接受现有 Task、Workspace、Broker 与审批检查。
+`local-persona-only` 仅表示本机 persona 格式；绑定真实 connector 时，同名本机文档还必须与 DSH 实际返回文档的 SHA-256 指纹一致。该检查避免用同名本机文件为不同的系统预设背书，但不证明工具经过 Core。无论预设来自本机还是原生 registry，未接必经工具审批的 HTTP Provider 都不能创建新 Task staging/Session。
 
 Windows 的 home 路径仅大小写不同时，还须核对实际目录的非零设备及文件身份一致。大小写敏感目录中的不同对象、不同目录及其他 junction 别名不能共享原连接的预设或凭据范围；异步保存仍检查配置 revision，不能覆盖并发的新选择。
 
-原生系统预设可被发现、读取、校验格式并由 Owner 显式保存，标记为 `native-persona-only`。这类预设没有本机受控工具边界时，Task Provider 返回 `taskEligible: false` / `native-tool-policy-unverified`，创建 Task Session 以现有 `AGENT_BOUNDARY_UNSUPPORTED` 拒绝。UI 同时说明可使用现有 Core 默认模型或已就绪的其他执行器。
+原生系统预设可被发现、读取、校验格式并由 Owner 显式保存，标记为 `native-persona-only`。缺少受控工具边界时，Task Provider 返回 `taskEligible: false` / `native-tool-policy-unverified`，在创建 staging 前以 `DSH_TOOL_APPROVAL_UNAVAILABLE` 拒绝。SDK Task 使用下述固定受控组合，不继承所选 HTTP 原生预设。
 
 ## 原生工具的协议限制
 
 官方 [approval request](https://github.com/deepseek-ai/deepseek-harness/blob/66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db/docs/subsystems/approval.md) 通过 `callId` 引用已记录的工具调用。原生 `tool/call` 的工具名与完整原始 arguments 在 prepare/审批前提交；PTC 的 `tool/ptc-dispatch-start` 同样先记录 exact normalized arguments。正式 `$events` / `$events/result` waterfall 可传回应答。审批消息没有重复携带参数，不代表整个协议无法取得完整输入。
 
-当前 Agent Provider 尚未把这些记录按 Session/callId 与 Core NativeApproval 的执行生命周期关联。并且 `approval.policy: ask` 只处理已经要求审批的操作，工具 pre-execute 默认允许；该选项不强制每个工具都询问 Core。Gateway 把问题发给所有 owner Client，首个 result 完成决定，当前连接也不能保证 Core 是必经的审批者。因此原生 Task 工具边界仍未验证，保持执行拒绝。接入需验证完整且唯一的调用关联、每工具的必经检查、其他客户端答复无法绕过 Core、取消及未知效果恢复。
+`approval.policy: ask` 只处理已经要求审批的操作，工具 pre-execute 默认允许；该选项不强制每个工具都询问 Core。HTTP Gateway 把问题发给多个 owner Client，首个 result 完成决定，因而当前 HTTP 连接不能证明 Core 是必经的审批者，继续拒绝原生 Task 执行。SDK 传输只在独立、无 HTTP/UI 应答者的受控组合中使用官方 `approvalRequests` / `approval/request`。
 
-新版仍提供 [`tools.restrict` 与 `tools.guard`](https://github.com/deepseek-ai/deepseek-harness/blob/66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db/packages/core/tools/README.md)，也提供 scoped `tools/pre-execute` 扩展点。这些是实现受控适配的可用基础，当前 connector 尚未部署对应的 Task 绑定执行约束，亦没有现成的通用 Task MCP 文件工具桥。仓库已有 QQ 社交工具白名单不能替代 Task 的路径、审批和效果账本。公开的模型服务是 Host 内部 `ctx.llm` 插件 API；当前适配未发现可直接供 Core Managed loop 使用的已发布 raw model HTTP endpoint。未来若补桥，必须另行证明逐 Task 作用域、完整参数、审批、取消与未知效果恢复；不能通过全局 host MCP 或宽 namespace 放行来演示成功。
+新版提供 [`tools.guard`](https://github.com/deepseek-ai/deepseek-harness/blob/66491b05e3f05ad35bcdd4f6cd7ed26041d9e3db/packages/core/tools/README.md) 和 `tools/pre-execute` 扩展点。受控 SDK 组合在全局 pre-execute 中要求一次性 Core 审批，同步 guard 与实际 dispatch 再核对同一 execution token、Agent 对象、Session、工具名和完整参数；跳过异步审批也没有可用许可。SDK server 依赖 gate 的 readiness 服务，gate 缺失时不能完成初始化。此机制不是宿主 OS 沙箱，也不隔离同进程中的恶意插件，因此不加载任意用户插件。
+
+## 受控 SDK Task 连接
+
+首期只接受已验证的 `0.2.2-rc.1` CLI、SDK server、sdk-minimal、审批服务和工具 pipeline 组合。运行时检查包含关键模块、pipeline/shared 文件和 package routing manifest 的精确指纹；独立 Node 需要 `24.9+`。SEA Core 通过独立 Node 启动 CLI 模块，不把自身可执行文件当作 Node 使用。配置发生变化或文件不再匹配时，已有批准不能沿用。
+
+如需安装单独的兼容环境，可由 Owner 在自己的运行时目录执行：
+
+```powershell
+npm install --prefix <专用运行时目录> @deepseek-ai/dsh-sdk-client@0.2.2-rc.1
+```
+
+使用精确版本；SDK-client 的不带版本 `latest` 标签不保证与 CLI 兼容。然后在 DSH 的“受控 SDK 任务连接设置”填写该配对安装内的 `@deepseek-ai/dsh/package.json` 或 `lib/bin.js` 的绝对路径、独立 Node 路径、端点、模型和专用 API 凭据。官方 DeepSeek 端点为 `https://api.deepseek.com/anthropic`，该固定版本使用 Anthropic Messages 协议；根 API URL 不是兼容的任务端点。
+
+配置由现有 AgentRuntimeConfiguration 管理，存入独立 `agent/dsh-runtime.json`，专用 Key 进入现有受保护凭据存储的 `agent-dsh` 引用；JSON 和 SDK profile 不保存 Key。旧 `agent-runtimes.json` 保持原字节，旧版本不读取新配置文件，回滚不需要迁移旧 Agent 配置。旧产品不能执行新的 SDK 任务，其已有历史和状态仍须保留，不能通过删除记录回滚。此连接不读取 Model Runtime 的模型目录或用户 DSH home 中的凭据。保存配置不发模型请求；启动探针不发 Prompt；配置过的 Key 不标为已验证账号。
+
+每个任务使用新建私有 home、完整 sdk-minimal bootstrap 和固定 overlay。首期仅开放 `read`、`write`、`edit`，禁用持久/后台 Shell、PTC、子 Agent、MCP 和动态插件；不继承 HTTP agentPreset。模型在新 Session 初始化时选定；不静默修改运行中的配置，不支持的模型来源、模型或推理设置在启动前明确拒绝。
+
+工具审批链为：
+
+```mermaid
+sequenceDiagram
+  participant DSH as Owned DSH SDK
+  participant Adapter as Existing DSH Provider
+  participant Core as Capability Broker
+  participant Owner
+  DSH->>DSH: durable tool/call + final-input gate
+  DSH->>Adapter: approval/asked + approval/request
+  Adapter->>Adapter: exact Session/call/input + Core Run join
+  Adapter->>Core: agent.native.approve
+  Core->>Owner: complete one-call review
+  Owner->>Core: allow once / reject
+  Core->>Core: consume approval + persist native effect started
+  Core->>Adapter: bound one-shot permit
+  Adapter->>DSH: allowed-once
+  DSH->>Adapter: actual tool/result
+  Adapter->>Core: exact native-result digest and terminal receipt
+```
+
+官方 ApprovalRequest 的 callId 与工具参数之间，通过官方 durable `tool/call`、`approval/asked` 和受控 gate 的结构化 reason 三方核对。首期 final input 必须与原始 JSON 完整一致；缺失、归一化差异、重复身份、迟到或跨 Run 请求均拒绝。reason 最多 64 KiB，现有 NativeApproval 的完整审核摘要最多 8192 UTF-8 字节；超限拒绝，不以截断后的参数获取批准。
+
+SDK 工具许可与 Workspace 导入是两笔独立审批。放行前在现有 `capability/dispatches.json` 保存 native effect 意图，只有实际工具终态回执可以结清。失败的 `write/edit` 可能已有部分副作用，保留 `outcome-unknown`。固定且已校验的 `read` 实现由可信 Transport 绑定 `dsh-staging-read-v1` 策略到原审批与 journal，真实终态错误记为 `failed`，可以接收新的执行指令，不因文件不存在制造未知写入。运行时指纹同时固定其本地文件后端；旧记录、缺少策略或仅结果中声称只读均不获得该例外。失败工具证据仍为失败，不记作成功。
+
+取消、断线、Core 重启或审批完成本身都不代表工具完成；即使是 `read`，缺少真实结果仍保持未知。运行中撤销后不再放行，迟到批准不执行；没有结果的已放行操作不可重放。
+
+文件路径在 Core 审批前及放行前都核对同一个 staging 根、目录身份和实际路径，拒绝越界、junction 逃逸、ADS 和原生 Home 展开语法 `~`、`~/…`、`~\…`。DSH 原生后端会展开这些 Home 写法，Core 的通用路径核验将其视为字面路径，因此直接拒绝，不能批准后再静默改写参数。相对路径及 staging 内绝对路径正常使用。这些检查复用已有文件边界，不提供 OS 沙箱，也不消除通用文件系统边界中检查与使用之间的竞争窗口。
+
+SDK 文件工具在现有 staging 工作区内执行；`workspace.apply` 审批前原项目保持不变。导入仍绑定可信 Core Run；原生工具等待与导入等待分别投影。已确认停止后，拒绝导入或无法核验的 staging 保留在受保护目录，不因关闭 Session 丢弃。SDK Session 的停止凭据复用现有原生生命周期实现并存入独立 DSH namespace，不修改 Codex 历史。恢复需要停止凭据、Workspace 事实和既有操作核验；旧 HTTP 缺少停止证明时仍保持阻断。
+
+## 验证与支持范围
+
+`test-dsh-sdk-gate`、`test-dsh-sdk-transport`、`test-dsh-sdk-runtime`、`test-dsh-staging-approval` 和现有 NativeApproval 回归覆盖协议、权限、版本和故障边界。`test-dsh-sdk-composition` 验证正式 Core/UI DTO 配置；`test-dsh-sdk-native-loop` 是显式 opt-in 的真实 Windows CLI、真实 Core、原生文件工具与本地合成模型验收，需要受审核的独立监督器，不使用全局 DSH 或真实模型账号。
+
+支持标记为 **PARTIAL**：受控文件工具链与旧 HTTP 连接各有明确范围。真实 CLI、合成模型和真实 Core 的成功，不替代付费模型账号资格、Windows 原生界面、其他工具或发布安全验收。扩展 Shell、PTC、子 Agent、MCP、其他版本或任意原生预设前，必须补齐对应的必经审批、子进程停止和未知效果回归。
+
+| 能力 | 当前范围与验证等级 |
+| --- | --- |
+| 旧 HTTP 连接、预设目录与历史观测 | 保留原接口；协议 fixture 覆盖，不能由此获得新 Task 工具权限 |
+| HTTP 原生预设工具执行 | `BLOCKED_PROTOCOL`：当前无法证明 Core 是必经执行前应答者 |
+| 固定 SDK `read/write/edit` | `PARTIAL`：真实 0.2.2-rc.1 CLI、真实 Core、原生文件工具及本地合成 Messages 模型通过；逐次 Core 审批，写入另需导入审批 |
+| 同 Task 继续、暂停后 Fresh Session、取消与丢失结果 | 真实 CLI/Core 故障验收覆盖；正常结束与未知效果拒绝分别核验，失败读取保留真实失败记录 |
+| 实际远端模型与账户资格 | 不由配置、启动探针或合成服务推导；必须在明确授权的账户与预算中另行验收 |
+| Windows 已安装原生产品 | 需要包含修复的验收构建独立验证，浏览器 DTO/组件测试不替代原生产品结果 |
+| Shell、PTC、后台工具、MCP、子 Agent、任意插件或其他版本 | 此受控适配暂不开放，不因为 DSH 自身提供它们就显示为任务可执行 |
 
 ## 回归入口
 
