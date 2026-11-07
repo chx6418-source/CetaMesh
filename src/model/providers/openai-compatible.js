@@ -19,6 +19,7 @@ import {
   MODEL_ERROR_CODES
 } from '../types.js';
 import { defineModelProvider, modelStreamEvent } from '../model-provider.js';
+import { createRequestDiagnostics, requestValueHash } from '../request-diagnostics.js';
 
 const LIST_TIMEOUT_MS = 10_000;
 const CHAT_TIMEOUT_MS = 300_000;
@@ -334,8 +335,23 @@ export function createOpenAiCompatibleModelProvider({
     return body;
   }
 
+  function observedError(error, requestDiagnostics, responseModel = null) {
+    if (error && typeof error === 'object') {
+      error.providerId = id;
+      error.resolvedModel = typeof responseModel === 'string' && responseModel.trim() ? responseModel.trim() : null;
+      error.requestDiagnostics = { ...requestDiagnostics,
+        responseModelHash: error.resolvedModel ? requestValueHash(error.resolvedModel) : null };
+    }
+    return error;
+  }
+
   async function request(path, { body, signal, timeoutMs }) {
     const { apiKey, base } = resolveCredentials();
+    // Serialize exactly once. Both transport and diagnostics consume these same
+    // bytes, after schema/continuation/image/parameter projection is complete.
+    const serializedBody = JSON.stringify(body);
+    const requestDiagnostics = createRequestDiagnostics({ serializedBody, endpoint: `${base}${path}`, providerId: id,
+      protocol: { adapter: 'openai-compatible-v1', profile: protocolProfile } });
     const deadline = AbortSignal.timeout(timeoutMs);
     const effectiveSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     let response;
@@ -347,20 +363,20 @@ export function createOpenAiCompatibleModelProvider({
           'content-type': 'application/json',
           accept: body.stream ? 'text/event-stream' : 'application/json'
         },
-        body: JSON.stringify(body),
+        body: serializedBody,
         signal: effectiveSignal
       });
     } catch (error) {
       if (deadline.aborted && !signal?.aborted) {
-        throw modelRuntimeError('MODEL_REQUEST_TIMEOUT', `「${label}」请求超时`, { cause: error });
+        throw observedError(modelRuntimeError('MODEL_REQUEST_TIMEOUT', `「${label}」请求超时`, { cause: error }), requestDiagnostics);
       }
-      throw mapFetchError(error, apiKey);
+      throw observedError(mapFetchError(error, apiKey), requestDiagnostics);
     }
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '');
-      throw mapHttpError(response.status, bodyText, apiKey, response, body.model);
+      throw observedError(mapHttpError(response.status, bodyText, apiKey, response, body.model), requestDiagnostics);
     }
-    return { response, apiKey, signal: effectiveSignal, deadline };
+    return { response, apiKey, signal: effectiveSignal, deadline, requestDiagnostics };
   }
 
   return defineModelProvider({
@@ -428,12 +444,13 @@ export function createOpenAiCompatibleModelProvider({
       async chat(options) {
         const body = buildBody({ ...options, stream: false });
         const { byName } = buildToolSchemas(options?.tools);
-        const { response, signal: requestSignal } = await request('/chat/completions', {
+        const { response, signal: requestSignal, requestDiagnostics } = await request('/chat/completions', {
           body,
           signal: options?.signal,
           timeoutMs: requestTimeoutMs
         });
         let payload;
+        try {
         try {
           payload = await response.json();
         } catch (error) {
@@ -466,16 +483,20 @@ export function createOpenAiCompatibleModelProvider({
             };
           }),
           usage: payload?.usage && typeof payload.usage === 'object' ? payload.usage : null,
+          requestDiagnostics: { ...requestDiagnostics, responseModelHash: typeof payload?.model === 'string' && payload.model.trim() ? requestValueHash(payload.model.trim()) : null },
           model: typeof payload?.model === 'string' && payload.model.trim() ? payload.model.trim() : null,
           finishReason: choice?.finish_reason ?? null
         };
+        } catch (error) { throw observedError(error, requestDiagnostics, payload?.model); }
       },
 
       /** 流式回合：async generator，产出 model-stream-v1 事件；取消以 turn/end(aborted) 收尾。 */
       async *stream(options) {
         const body = buildBody({ ...options, stream: true });
         const { byName } = buildToolSchemas(options?.tools);
-        const { response, signal: requestSignal, deadline } = await request('/chat/completions', { body, signal: options?.signal, timeoutMs: requestTimeoutMs });
+        const { response, signal: requestSignal, deadline, requestDiagnostics } = await request('/chat/completions', { body, signal: options?.signal, timeoutMs: requestTimeoutMs });
+        let streamModel = null;
+        try {
         const signal = options?.signal;
         const parser = createSseLineParser();
         const reader = response.body.getReader();
@@ -487,7 +508,6 @@ export function createOpenAiCompatibleModelProvider({
         let usage = null;
         let finished = false;
         let finishReasonSeen = false;
-        let streamModel = null;
         const toolCalls = new Map();
         /** 处理一行 SSE：返回 true 表示遇到 [DONE]，流结束。 */
         const consumeLine = (line) => {
@@ -505,7 +525,10 @@ export function createOpenAiCompatibleModelProvider({
               { cause: error }
             );
           }
-          if (payload?.model) streamModel = String(payload.model);
+          if (typeof payload?.model === 'string' && payload.model.trim()) {
+            streamModel = payload.model.trim();
+            requestDiagnostics.responseModelHash = requestValueHash(streamModel);
+          }
           if (payload?.usage && typeof payload.usage === 'object') usage = payload.usage;
           const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
           if (choice?.finish_reason !== null && choice?.finish_reason !== undefined) finishReasonSeen = true;
@@ -539,6 +562,7 @@ export function createOpenAiCompatibleModelProvider({
         let pendingEvents = [];
         yield modelStreamEvent('turn/start', {
           providerId: id,
+          requestDiagnostics,
           requestedModel: options?.requestedModel ?? 'provider-default',
           resolvedModel: null
         });
@@ -606,7 +630,7 @@ export function createOpenAiCompatibleModelProvider({
           if (aborted) {
             try { await reader.cancel('aborted'); }
             catch (cancelError) { log(`Model Provider「${label}」SSE abort cleanup failed (${cancelError?.code ?? cancelError?.name ?? 'stream-error'})`); }
-            yield modelStreamEvent('turn/end', { reason: { kind: 'aborted', usage } });
+            yield modelStreamEvent('turn/end', { providerId: id, resolvedModel: streamModel, requestDiagnostics, reason: { kind: 'aborted', usage } });
             return;
           }
           throw error;
@@ -630,10 +654,12 @@ export function createOpenAiCompatibleModelProvider({
           message: { content: [{ type: 'text', text: fullText }], ...(usage ? { usage } : {}) }
         });
         yield modelStreamEvent('turn/end', { providerId: id,
+          requestDiagnostics,
           requestedModel: options?.requestedModel ?? 'provider-default',
           resolvedModel: streamModel,
           ...(continuation(nativeReasoning, body.model) ? { modelContinuation: continuation(nativeReasoning, body.model) } : {}),
           reason: { kind: 'completed', usage } });
+        } catch (error) { throw observedError(error, requestDiagnostics, streamModel); }
       }
     }
   });

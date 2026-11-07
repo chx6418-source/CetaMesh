@@ -159,6 +159,7 @@ const REGISTRY = {
   'test-suite-process-unconfirmed.mjs': { category: 'security', note: 'Fail closed when a live suite has no owned process group' },
   'test-managed-failed-request-usage.mjs': { category: 'runtime' },
   'test-model-schema-cache-stability.mjs': { category: 'runtime' },
+  'test-model-request-diagnostics.mjs': { category: 'runtime', timeoutMs: 120000, note: 'Actual loopback provider payload fingerprints, bounded receipt coverage and default route identity' },
   'test-model-verification-feedback.mjs': { category: 'security', timeoutMs: 120000, note: 'Actual Core file repair and controlled failing/passing test feedback through exact approvals' },
   'test-chat-usage-ledger-hook.mjs': { category: 'runtime' },
   'test-model-context-budget.mjs': { category: 'runtime' },

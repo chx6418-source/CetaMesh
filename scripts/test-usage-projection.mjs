@@ -48,6 +48,34 @@ try {
   assert.equal(priced.usage.cost.status, 'estimated');
   assert.match(render(priced), /估算费用 USD 0.00022/);
   assert.doesNotMatch(JSON.stringify(priced), /DO_NOT_EXPOSE/);
+  const pricedUsageSnapshot = structuredClone(raw.usage);
+  const projection = (await import('../src/model/request-diagnostics.js')).createRequestDiagnostics({
+    serializedBody: JSON.stringify({model:'fixture',messages:[{role:'user',content:'PRIVATE_REQUEST_BODY'}]}),
+    endpoint:'https://fixture.invalid/v1/chat/completions',providerId:'fixture',protocol:'openai-chat-completions'});
+  raw.usage = {inputTokens:null,outputTokens:7,accountingComplete:false,requestCount:3,
+    knownUsage:{inputTokens:120,outputTokens:7,totalTokens:127,reasoningTokens:null,cacheReadTokens:40,cacheWriteTokens:0},
+    cacheCoverage:{totalRequests:3,inputReportedRequests:2,knownInputTokens:120,
+      read:{reportedRequests:1,inputReportedRequests:1,knownInputTokens:80,knownTokens:40,matchedReadTokens:40,reportedHitRate:0.5},
+      write:{reportedRequests:1,inputReportedRequests:1,knownInputTokens:80,knownTokens:0}},
+    requestDiagnostics:{totalRequests:3,retainedRequests:2,omittedRequests:0,unreportedRequests:1,
+      latest:{...projection,requestId:'DO_NOT_EXPOSE'},comparedRequestId:'DO_NOT_EXPOSE',changes:['system-changed','SECRET_CHANGE_CODE'],apiKey:'DO_NOT_EXPOSE'}};
+  const observedUsage = (await history()).messages[0].usage;
+  assert.equal(observedUsage.cacheCoverage.read.reportedRequests,1,'cache report presence crosses the bounded DTO independently of unknown totals');
+  assert.equal(observedUsage.inputTokens,null,'known subtotal must not become a full total');
+  assert.equal(observedUsage.requestDiagnostics.latest.requestHash,projection.requestHash);
+  assert.deepEqual(observedUsage.requestDiagnostics.changes,['system-changed']);
+  assert.doesNotMatch(JSON.stringify(observedUsage),/DO_NOT_EXPOSE|PRIVATE_REQUEST_BODY|SECRET_CHANGE_CODE/);
+  const observedHtml=renderToStaticMarkup(React.createElement(UsageSummary,{usage:observedUsage}));
+  assert.match(observedHtml,/已报告小计/);assert.match(observedHtml,/缓存读取报告 1 \/ 3/);
+  assert.match(observedHtml,/系统提示变化/);assert.match(observedHtml,/不代表服务商缓存/);
+  raw.usage.cacheCoverage.knownInputTokens=110;
+  raw.usage.cacheCoverage.read={reportedRequests:2,inputReportedRequests:2,knownInputTokens:110,knownTokens:20,matchedReadTokens:20,reportedHitRate:null};
+  assert.equal((await history()).messages[0].usage.cacheCoverage.read.reportedHitRate,null,'a summed valid ratio cannot repair Core-invalid per-receipt cache evidence');
+  raw.usage.cacheCoverage.read.reportedRequests=4;
+  assert.equal((await history()).messages[0].usage.cacheCoverage,null,'invalid denominator relationships do not cross the DTO');
+  raw.usage.requestDiagnostics.latest.requestHash='SECRET_CHANGE_CODE';
+  assert.equal((await history()).messages[0].usage.requestDiagnostics.latest,null,'malformed hashes are not rendered as diagnostics');
+  raw.usage = pricedUsageSnapshot;
   raw.usage.cost = { ...raw.usage.cost, status: 'unknown', amount: null, complete: false };
   assert.match(render((await history()).messages[0]), /费用 未知.*已核算 USD 0.00022/);
   raw.usage = null;

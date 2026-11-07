@@ -2,6 +2,7 @@ import {useState} from 'react';
 import type {ChatContextObservation, ChatModelProvider, ModelUsage, ChatModelCapabilities, AgentModelControl} from '../bridge/typed-client';
 import {Popover} from '../components/primitives/overlays';
 import {Icon} from '../components/icons';
+import {UsageObservationDetails} from './UsageSummary';
 import './chat-composer-panels.css';
 
 const known=(value:unknown):value is number=>typeof value==='number'&&Number.isFinite(value)&&value>=0;
@@ -28,6 +29,7 @@ function UsageLedger({usage,label}:{usage:ModelUsage|null|undefined;label:string
     <p className="chat-context-caption">{evidence(usage?.measurement?.status)} · {usageSourceLabels.get(usage?.measurement?.source??'')||'来源未知'}</p>
     <dl className="chat-stat-grid">{[['输入',usage?.inputTokens],['输出',usage?.outputTokens],['推理',usage?.reasoningTokens],['缓存读取',usage?.cacheReadTokens],['缓存写入',usage?.cacheWriteTokens],['请求',usage?.requestCount]].map(([name,value])=><div key={String(name)}><dt>{name}</dt><dd>{count(value)}</dd></div>)}<div><dt>有效缓存命中</dt><dd>{hit}</dd></div></dl>
     <p className="chat-cost-line">{completeCost?`${evidence(cost.status)}费用 ${cost.currency} ${cost.amount}`:'费用未知'}{!completeCost&&known(cost?.knownAmount)&&cost?.currency&&<small>已核算 {cost.currency} {cost.knownAmount}，不代表总费用</small>}</p>
+    <UsageObservationDetails usage={usage}/>
   </section>;
 }
 export function ChatUsageContent({context,turnUsage,sessionUsage}:{context?:ChatContextObservation|null;turnUsage?:ModelUsage|null;sessionUsage?:ModelUsage|null}){

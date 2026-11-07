@@ -1,4 +1,4 @@
-import {projectChatContext,projectModelCapabilities,projectAgentModelControl} from './chat-telemetry.js';
+import {projectChatContext,projectModelCapabilities,projectAgentModelControl,projectModelUsageObservation} from './chat-telemetry.js';
 import { projectChatFailureDetails, projectChatFailureMessage } from './chat-failure-details.js';
 import { explicitDelegationTarget } from './explicit-delegation.js';
 import {SIMULATION_UI_METHODS} from '../simulation/ui-methods.js';
@@ -143,6 +143,7 @@ function projectUsage(value) {
     result.knownUsage = Object.fromEntries(['inputTokens', 'outputTokens', 'totalTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens']
       .map(key => [key, Number.isFinite(value.knownUsage[key]) && value.knownUsage[key] >= 0 ? value.knownUsage[key] : null]));
   }
+  Object.assign(result, projectModelUsageObservation(value));
   return result;
 }
 

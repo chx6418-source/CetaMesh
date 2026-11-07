@@ -1,7 +1,7 @@
-import { aggregateModelUsage, normalizeModelUsage, safeRawUsage } from './usage.js';
+import { aggregateModelUsage, normalizeModelUsage, safeRawUsage, isModelUsageSnapshot } from './usage.js';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
+import { safeRequestDiagnostics, boundRequestDiagnostics, summarizeRequestDiagnostics } from './request-diagnostics.js';
 
-const TOKEN_FIELDS = ['inputTokens', 'outputTokens', 'totalTokens', 'reasoningTokens', 'cacheReadTokens', 'cacheWriteTokens'];
 const finite = value => typeof value === 'number' && Number.isFinite(value) && value >= 0;
 const label = value => typeof value === 'string' && value.length > 0 && value.length <= 300 && !/[\x00-\x1f]/.test(value);
 // An explicit unknown belongs to that request; only old receipts with no field
@@ -79,16 +79,17 @@ export function createUsageLedger({ file, pricingResolver = null, now = () => Da
     const rows = load().receipts.filter(row => (!sessionId || row.sessionId === sessionId) && (!sessions || sessions.has(row.sessionId))
       && (!taskId || row.taskId === taskId) && (!tasks || tasks.has(row.taskId)));
     const usages = rows.map(row => row.usage);
-    const knownUsage = Object.fromEntries(TOKEN_FIELDS.map(key => [key, usages.some(u => finite(u[key])) ? usages.reduce((sum, u) => sum + (finite(u[key]) ? u[key] : 0), 0) : null]));
     const accountingComplete = rows.length > 0 && rows.every(row => row.accountingComplete && finite(row.usage.inputTokens) && finite(row.usage.outputTokens));
-    return { ...aggregateModelUsage(usages), knownUsage, accountingComplete, requestCount: rows.length,
+    const snapshots = rows.some(isModelUsageSnapshot);
+    return { ...aggregateModelUsage(usages, { granularity: snapshots ? 'snapshot' : 'request' }), accountingComplete, requestCount: rows.length,
+      requestDiagnostics: snapshots ? null : summarizeRequestDiagnostics(rows),
       cost: aggregateUsageCosts(rows.map(row => row.cost), accountingComplete) };
   }
   function record({ usage, sessionId, taskId = null, turnId, providerId = null, model = null } = {}) {
     if (!label(sessionId) || !label(turnId) || (taskId !== null && !label(taskId))) throw error('USAGE_ATTRIBUTION_INVALID');
     const store = load();
     const source = Array.isArray(usage?.requests) && usage.requests.length ? usage.requests
-      : [{ ...(usage ?? {}), requestId: `snapshot:${turnId}`, providerId, model }];
+      : [{ ...(usage ?? {}), requestId: `snapshot:${turnId}`, usageGranularity: 'snapshot', providerId, model }];
     if (source.length > maxReceipts) throw error('USAGE_LEDGER_FULL');
     let changed = false;
     for (const receipt of source) {
@@ -100,6 +101,8 @@ export function createUsageLedger({ file, pricingResolver = null, now = () => Da
           || existing.model !== identity(receipt, 'model', model)) throw error('USAGE_RECEIPT_CONFLICT');
         // The same provider request must not change after it has been recorded.
         if (JSON.stringify(existing.usage) !== JSON.stringify(normalizeModelUsage(receipt))) throw error('USAGE_RECEIPT_CONFLICT');
+        const diagnostics = safeRequestDiagnostics(receipt.requestDiagnostics);
+        if (existing.requestDiagnostics && diagnostics && JSON.stringify(existing.requestDiagnostics) !== JSON.stringify(diagnostics)) throw error('USAGE_RECEIPT_CONFLICT');
         if (usage?.accountingComplete === false && existing.accountingComplete) { existing.accountingComplete = false; changed = true; }
         continue;
       }
@@ -109,13 +112,19 @@ export function createUsageLedger({ file, pricingResolver = null, now = () => Da
         model: identity(receipt, 'model', model) };
       const raw = receipt.rawUsage && typeof receipt.rawUsage === 'object' ? receipt.rawUsage : receipt;
       const rawUsage = safeRawUsage(raw);
+      const snapshot = isModelUsageSnapshot(receipt);
+      const requestDiagnostics = snapshot ? null : safeRequestDiagnostics(receipt.requestDiagnostics);
       store.receipts.push({ sessionId, taskId, turnId, requestId: receipt.requestId,
         providerId: label(safeReceipt.providerId) ? safeReceipt.providerId : null, model: label(safeReceipt.model) ? safeReceipt.model : null,
+        ...(snapshot ? { usageGranularity: 'snapshot' } : {}),
         at: now(), usage: normalized, rawUsage, cost: receiptCost(safeReceipt, pricingResolver),
+        ...(requestDiagnostics ? { requestDiagnostics } : {}),
+        ...(!requestDiagnostics && receipt.requestDiagnosticsOmitted === true ? { requestDiagnosticsOmitted: true } : {}),
         accountingComplete: usage?.accountingComplete !== false && finite(normalized.inputTokens) && finite(normalized.outputTokens) });
       changed = true;
     }
     if (changed) {
+      boundRequestDiagnostics(store.receipts);
       // Match writeJsonAtomic's UTF-8, two-space indentation and final newline.
       // Reject before replacement so every successfully written file is readable.
       if (Buffer.byteLength(JSON.stringify(store, null, 2) + '\n', 'utf8') > maxBytes) throw error('USAGE_LEDGER_FULL');

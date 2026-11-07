@@ -343,6 +343,9 @@ export function createToolExecutionCoordinator({
     let limitReached = state.limitReached === true;
     let activeRequestId = null;
     let activeUsage = null;
+    let activeProviderId = null;
+    let activeModel = null;
+    let activeRequestDiagnostics = null;
 
     try {
     for (let cycle = state.cycle ?? 0; cycle <= maxCycles; cycle++) {
@@ -376,6 +379,9 @@ export function createToolExecutionCoordinator({
       } else if (typeof modelRuntime.stream === 'function') {
         activeRequestId = `${turnId ?? 'turn'}:${cycle}`;
         activeUsage = null;
+        activeProviderId = providerId ?? null;
+        activeModel = null;
+        activeRequestDiagnostics = null;
         let streamedText = '';
         let streamedToolCalls = [];
         let streamUsage = null;
@@ -383,6 +389,9 @@ export function createToolExecutionCoordinator({
         let streamReason = null;
         let modelContinuation = null;
         for await (const event of modelRuntime.stream(request)) {
+          if (typeof event?.data?.providerId === 'string' && event.data.providerId.trim()) activeProviderId = event.data.providerId.trim();
+          if (typeof event?.data?.resolvedModel === 'string' && event.data.resolvedModel.trim()) activeModel = event.data.resolvedModel.trim();
+          if (event?.data?.requestDiagnostics) activeRequestDiagnostics = event.data.requestDiagnostics;
           const snapshot = event?.data?.reason?.usage ?? event?.data?.usage ?? event?.data?.message?.usage;
           if (snapshot && typeof snapshot === 'object') activeUsage = streamUsage = snapshot;
           if (event?.type === 'assistant/chunk') {
@@ -405,7 +414,8 @@ export function createToolExecutionCoordinator({
               ? event.data.resolvedModel : streamResolvedModel;
           }
         }
-        usage = accumulateModelUsage(usage, streamUsage, { requestId: activeRequestId, providerId, model: streamResolvedModel ?? model ?? null });
+        usage = accumulateModelUsage(usage, streamUsage, { requestId: activeRequestId, providerId: activeProviderId,
+          model: streamResolvedModel ?? activeModel ?? model ?? null, requestDiagnostics: activeRequestDiagnostics });
         activeRequestId = null;
         if (signal?.aborted || streamReason === 'aborted' || streamReason === 'cancelled') {
           fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
@@ -421,17 +431,23 @@ export function createToolExecutionCoordinator({
           ...(modelContinuation ? { modelContinuation } : {}),
           toolCalls: streamedToolCalls,
           usage: streamUsage,
+          providerId: activeProviderId,
+          requestDiagnostics: activeRequestDiagnostics,
           resolvedModel: streamResolvedModel
         };
       } else {
         activeRequestId = `${turnId ?? 'turn'}:${cycle}`;
         activeUsage = null;
+        activeProviderId = providerId ?? null;
+        activeModel = null;
+        activeRequestDiagnostics = null;
         response = await modelRuntime.chat(request);
         activeRequestId = null;
       }
       if (typeof response?.text === 'string') text = response.text;
       if (!resumingToolBatch) usage = accumulateModelUsage(usage, response?.usage, {
-        requestId: `${turnId ?? 'turn'}:${cycle}`, providerId, model: response?.resolvedModel ?? response?.model ?? model ?? null
+        requestId: `${turnId ?? 'turn'}:${cycle}`, providerId: response?.providerId ?? providerId ?? null,
+        model: response?.resolvedModel ?? response?.model ?? model ?? null, requestDiagnostics: response?.requestDiagnostics
       });
       if (!resumingToolBatch) await recordUsage(state, usage);
       if (typeof response?.resolvedModel === 'string' && response.resolvedModel.trim()) resolvedModel = response.resolvedModel.trim();
@@ -647,7 +663,8 @@ export function createToolExecutionCoordinator({
       // A failed transport may still be billable, but its usage is unknown. Keep
       // earlier receipts and a distinct unknown attempt rather than reporting 0.
       if (activeRequestId) usage = accumulateModelUsage(usage, activeUsage, {
-        requestId: `${activeRequestId}:failed:${crypto.randomUUID()}`, providerId, model: model ?? null
+        requestId: `${activeRequestId}:failed:${crypto.randomUUID()}`, providerId: error?.providerId ?? activeProviderId,
+        model: error?.resolvedModel ?? activeModel, requestDiagnostics: error?.requestDiagnostics ?? activeRequestDiagnostics
       });
       if (activeRequestId) {
         try { await recordUsage(state, usage); }

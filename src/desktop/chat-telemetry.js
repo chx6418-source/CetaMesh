@@ -47,3 +47,45 @@ export function projectAgentModelControl(value){
   ...(value.requested?{requested:projectSelection(value.requested)}:{}),
   ...(value.lastRequest?.source==='cli-argv'?{lastRequest:{...projectSelection(value.lastRequest),source:'cli-argv',turnId:label(value.lastRequest.turnId,160)}}:{})};
 }
+import { safeRequestDiagnostics, MAX_REQUEST_DIAGNOSTICS } from '../model/request-diagnostics.js';
+
+/** Display-only observations; no raw request, endpoint, receipt identity or authority crosses this DTO. */
+export function projectModelUsageObservation(value) {
+  const metric = number => Number.isFinite(number) && number >= 0 ? number : null;
+  const count = number => Number.isSafeInteger(number) && number >= 0 ? number : null;
+  const coverage = value?.cacheCoverage;
+  let cacheCoverage = null;
+  if (count(coverage?.totalRequests) !== null && count(coverage?.inputReportedRequests) !== null
+    && coverage.inputReportedRequests <= coverage.totalRequests) {
+    const part = (input, read) => {
+      if (count(input?.reportedRequests) === null || input.reportedRequests > coverage.totalRequests
+        || count(input?.inputReportedRequests) === null || input.inputReportedRequests > input.reportedRequests
+        || input.inputReportedRequests > coverage.inputReportedRequests) return null;
+      const knownInputTokens = metric(input.knownInputTokens), matchedReadTokens = metric(input.matchedReadTokens);
+      const producerRate = metric(input.reportedHitRate);
+      return {reportedRequests: input.reportedRequests, inputReportedRequests: input.inputReportedRequests,
+        knownInputTokens, knownTokens: metric(input.knownTokens), ...(read ? {matchedReadTokens,
+          // A null producer rate may mean an individual receipt was invalid even
+          // when the summed ratio looks valid. Do not repair that lost evidence.
+          reportedHitRate: producerRate !== null && producerRate <= 1 && knownInputTokens > 0
+            && matchedReadTokens !== null && matchedReadTokens <= knownInputTokens
+            && Math.abs(producerRate - matchedReadTokens / knownInputTokens) < 1e-12 ? producerRate : null} : {})};
+    };
+    const read = part(coverage.read, true), write = part(coverage.write, false);
+    if (read && write) cacheCoverage = {totalRequests: coverage.totalRequests,
+      inputReportedRequests: coverage.inputReportedRequests, knownInputTokens: metric(coverage.knownInputTokens), read, write};
+  }
+  const observation = value?.requestDiagnostics;
+  let requestDiagnostics = null;
+  if (['totalRequests','retainedRequests','omittedRequests','unreportedRequests'].every(key => count(observation?.[key]) !== null)
+    && observation.retainedRequests <= MAX_REQUEST_DIAGNOSTICS
+    && observation.retainedRequests + observation.omittedRequests + observation.unreportedRequests === observation.totalRequests) {
+    const changes = new Set(['first-request','unknown','unchanged','provider-changed','endpoint-changed','protocol-changed',
+      'model-changed','response-model-changed','tools-changed','system-changed','history-changed','parameters-changed','projection-changed']);
+    requestDiagnostics = {totalRequests: observation.totalRequests, retainedRequests: observation.retainedRequests,
+      omittedRequests: observation.omittedRequests, unreportedRequests: observation.unreportedRequests,
+      latest: observation.retainedRequests > 0 ? safeRequestDiagnostics(observation.latest) : null,
+      changes: Array.isArray(observation.changes) ? [...new Set(observation.changes.filter(code => changes.has(code)))].slice(0, 13) : []};
+  }
+  return {cacheCoverage, requestDiagnostics};
+}
