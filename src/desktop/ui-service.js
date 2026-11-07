@@ -15,6 +15,9 @@ import { unreviewedTaskEffects } from '../task/recovery-evidence.js';
 import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
 import { LEGACY_RETIRED_TOOLS, isDesktopLocalService } from '../integrations/catalog.js';
 import { projectChatActivityTimeline, projectChatToolActivity } from './chat-activity.js';
+import { chatConfigurationObservations } from './chat-configuration.js';
+import { safeModelIdentifier } from '../model/model-discovery.js';
+import { normalizeSkillReferences } from '../context/skill-references.js';
 
 // Narrow, renderer-safe DTO adapter for the privileged Desktop WebView.
 // Business state stays in existing Core services; this module owns no persistent data.
@@ -104,6 +107,7 @@ function projectSession(value) {
   return {
     id: string(row.id, 128), title: string(row.title, 200), createdAt: scalar(row.createdAt),
     updatedAt: scalar(row.updatedAt), archived: row.archived === true, taskId: string(row.taskId, 128) || null,
+    configuration: projectChatConfigurationState(row.configuration),
     config: {
       mode: string(config.mode, 40), modelProvider: string(config.modelProvider, 80) || null,
       reasoning: typeof config.reasoning==='string'&&!/[\x00-\x1f\x7f]/.test(config.reasoning)?string(config.reasoning,256):null,
@@ -111,6 +115,18 @@ function projectSession(value) {
       workspaceId: string(config.workspaceId, 128) || null
     }
   };
+}
+
+function projectChatConfigurationState(value) {
+  if (!value || typeof value !== 'object') return null;
+  return { revision: Number.isSafeInteger(value.revision) && value.revision >= 0 ? value.revision : 0,
+    changeId: string(value.changeId, 128) || null,
+    state: ['saved', 'prepared', 'runtime-confirmed', 'needs-reconciliation'].includes(value.state) ? value.state : 'needs-reconciliation',
+    application: ['next-turn', 'runtime-confirmed', 'requires-new-session'].includes(value.application) ? value.application : null,
+    durable: value.durable === true,
+    runtime: ['not-required', 'not-applied', 'confirmed', 'unknown'].includes(value.runtime) ? value.runtime : 'unknown',
+    at: Number.isFinite(value.at) ? value.at : null,
+    errorCode: /^[A-Z][A-Z0-9_]{0,99}$/.test(value.errorCode ?? '') ? value.errorCode : null };
 }
 
 function projectUsage(value) {
@@ -153,6 +169,51 @@ function projectUsage(value) {
   return result;
 }
 
+const MODEL_CAPABILITY_KEYS = ['tools', 'vision', 'reasoning', 'streaming', 'contextWindowTokens', 'maxOutputTokens', 'defaultOutputTokens'];
+const projectManualModelCapabilities = raw => Object.fromEntries(MODEL_CAPABILITY_KEYS.filter(key => typeof raw?.[key] === 'boolean'
+  || Number.isSafeInteger(raw?.[key]) && raw[key] > 0).map(key => [key, raw[key]]));
+const projectModelCapabilityFacts = raw => Object.fromEntries(MODEL_CAPABILITY_KEYS.filter(key => raw?.[key] && typeof raw[key] === 'object')
+  .map(key => [key, { value: typeof raw[key].value === 'boolean'
+    || Number.isSafeInteger(raw[key].value) && raw[key].value > 0 ? raw[key].value : null,
+    source: ['manual', 'protocol-declared', 'rule-inferred', 'unknown'].includes(raw[key].source) ? raw[key].source : 'unknown',
+    status: ['declared', 'unknown'].includes(raw[key].status) ? raw[key].status : 'unknown',
+    ruleId: string(raw[key].ruleId, 100) || null, version: string(raw[key].version, 100) || null }]));
+
+function projectModelConfiguration(value, { connectionId, modelOffset = 0, modelLimit = 50, preferenceOffset = 0, recoveryOffset = 0 } = {}) {
+  if (![modelOffset, preferenceOffset, recoveryOffset].every(offset => Number.isSafeInteger(offset) && offset >= 0)
+    || !Number.isSafeInteger(modelLimit) || modelLimit < 1 || modelLimit > 100) throw uiError('INVALID_PARAMS', 'Invalid model configuration page');
+  let remainingModels = 128;
+  const connections = (Array.isArray(value?.connections) ? value.connections : []).filter(row => !connectionId || row.id === connectionId);
+  if (connectionId && !connections.length) throw uiError('MODEL_PROVIDER_UNKNOWN', 'Unknown model connection');
+  const result = {
+    revision: Number.isSafeInteger(value?.revision) ? value.revision : null, derived: value?.derived === true,
+    defaults: selected(value?.defaults, ['provider', 'model', 'reasoningEffort']),
+    connections: connections.map(connection => {
+      const all = connection.models ?? [], page = all.slice(modelOffset, modelOffset + Math.min(modelLimit, remainingModels));
+      remainingModels -= page.length;
+      return { ...selected(connection, ['id', 'label', 'protocolProfile', 'enabled', 'configured', 'credentialRef']),
+        // Opaque store references are nonsecret handles needed for exact config
+        // roundtrips; raw credential values never cross this boundary.
+        ...(typeof connection.credentialRef === 'string' ? { credentialRef: string(connection.credentialRef, 80) } : {}),
+        modelCount: all.length, modelsOffset: modelOffset, modelsOmitted: all.length - page.length,
+        modelsNextOffset: modelOffset + page.length < all.length ? modelOffset + page.length : null,
+        models: page.map(model => ({ ...selected(model, ['id', 'label', 'enabled']),
+          manualCapabilities: projectManualModelCapabilities(model.manualCapabilities), discoveredCapabilities: projectModelCapabilityFacts(model.discoveredCapabilities),
+          capabilities: projectModelCapabilityFacts(model.capabilities), reasoning: projectModelCapabilities({ reasoning: model.reasoning }).reasoning })) };
+    }),
+    modelPreferences: (value?.modelPreferences ?? []).slice(preferenceOffset, preferenceOffset + 128).map(row => selected(row, ['connectionId', 'modelId', 'reasoningEffort'])),
+    preferencesTotal: value?.modelPreferences?.length ?? 0,
+    preferencesNextOffset: preferenceOffset + 128 < (value?.modelPreferences?.length ?? 0) ? preferenceOffset + 128 : null,
+    recovery: (value?.recovery ?? []).slice(recoveryOffset, recoveryOffset + 50).map(row => ({
+      ...selected(row, ['state', 'connectionId', 'expectedConfigurationRevision', 'preparedAt']),
+      credentialRef: string(row.credentialRef, 80), previousCredentialRef: string(row.previousCredentialRef, 80) || null })),
+    recoveryTotal: value?.recovery?.length ?? 0,
+    recoveryNextOffset: recoveryOffset + 50 < (value?.recovery?.length ?? 0) ? recoveryOffset + 50 : null
+  };
+  requireIpcItem(result);
+  return result;
+}
+
 function projectMessage(value) {
   const row = record(value);
   const role = ['user', 'assistant', 'system'].includes(row.role) ? row.role : 'assistant';
@@ -167,6 +228,8 @@ function projectMessage(value) {
   return {
     id: string(row.id, 128), role, text: string(row.text, MAX_TEXT), at: scalar(row.at),
     requestId: string(row.requestId, 200) || null,
+    ...(row.skillRefs ? { skillRefs: normalizeSkillReferences(row.skillRefs) } : {}),
+    ...chatConfigurationObservations(row),
     errorCode: /^[A-Z][A-Z0-9_]{0,99}$/.test(row.errorCode ?? '') ? row.errorCode : null,
     errorDetails: projectChatFailureDetails(row.errorDetails),
     failureStage: ['pre-dispatch', 'execution', 'unknown'].includes(row.failureStage) ? row.failureStage : null,
@@ -799,6 +862,42 @@ export function createDesktopUiService({ services = {}, system = services.system
   const onboarding = (method, params) => call(system.onboarding, method, params);
   const capability = (method, params) => call(services.capabilityService, method, params, true);
   const workspace = (method, params) => call(services.workspaceService, method, params);
+  const skillSourceSnapshot = () => {
+    const current = services.settingsService?.store.get();
+    if (!current) throw uiError('SERVICE_UNAVAILABLE', 'Skill source settings are unavailable');
+    return { sources: (current.settings.extensions.skillSources ?? []).map(row =>
+      selected(row, ['sourceId', 'root', 'revision', 'enabled'])), revision: current.revision };
+  };
+  async function changeSkillSource(action, params) {
+    await call(services.settingsService, 'settings.skillSources.' + action, params, true);
+    emit('plugin.updated', { status: 'skill-sources-changed' });
+    return skillSourceSnapshot();
+  }
+  async function skillRequest(params, signal, action) {
+    if (!services.skillContentService || !services.skillSourceAuthorizer || !services.chatService?.skillReferenceScope)
+      throw uiError('SERVICE_UNAVAILABLE', 'Skill references are unavailable');
+    const chatId = boundedText(params.chatId, 'chatId', 128);
+    const scope = services.chatService.skillReferenceScope({ id: chatId });
+    const request = { ...scope, principal: services.skillSourceAuthorizer.ownerPrincipal({ taskId: scope.taskId }), signal };
+    if (action === 'read') {
+      const [ref] = normalizeSkillReferences([{ skillId: params.skillId, sourceRevision: params.sourceRevision }]);
+      Object.assign(request, ref);
+      for (const [key, maximum] of [['offset', 65536], ['maxBytes', 8192]]) {
+        if (params[key] === undefined) continue;
+        if (!Number.isSafeInteger(params[key]) || params[key] < (key === 'offset' ? 0 : 1) || params[key] > maximum)
+          throw uiError('SKILL_REFERENCE_INVALID', 'Skill page is outside its bound');
+        request[key] = params[key];
+      }
+      if (params.resource !== undefined) request.resource = boundedText(params.resource, 'resource', 1000);
+    }
+    const result = await services.skillContentService[action](request);
+    const current = services.chatService.skillReferenceScope({ id: chatId });
+    if (current.taskId !== scope.taskId || current.workspaceId !== scope.workspaceId)
+      throw uiError('SKILL_SCOPE_CHANGED', 'Chat scope changed; refresh the Skill index');
+    signal?.throwIfAborted();
+    requireIpcItem(result);
+    return result;
+  }
   const enableReviewTokens = new Map();
   const previews = createReferencePreview({
     resolveMessage: source => chat('chat.reference.resolve', { id: source.sessionId, messageId: source.messageId, href: source.href }),
@@ -967,6 +1066,16 @@ export function createDesktopUiService({ services = {}, system = services.system
   }
 
   const handlers = {
+    'ui.skills.list': (p, { signal } = {}) => skillRequest(p, signal, 'list'),
+    'ui.skills.read': (p, { signal } = {}) => skillRequest(p, signal, 'read'),
+    'ui.skills.sources.list': () => skillSourceSnapshot(),
+    'ui.skills.sources.register': p => changeSkillSource('register', {
+      sourceId: p.sourceId, root: p.root, enabled: p.enabled, expectedRev: p.expectedRev
+    }),
+    'ui.skills.sources.setEnabled': p => changeSkillSource('setEnabled', {
+      sourceId: p.sourceId, enabled: p.enabled, expectedRev: p.expectedRev
+    }),
+    'ui.skills.sources.remove': p => changeSkillSource('remove', { sourceId: p.sourceId, expectedRev: p.expectedRev }),
     'ui.devices.overview': async p => {
       if (Object.keys(p).length) throw uiError('INVALID_INPUT', '设备状态不接受额外参数');
       if (!services.meshService) return {available:false,enabled:null,local:null,peers:[],audit:[],truncated:false};
@@ -1040,6 +1149,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       const turn = record(result.turn);
       return {
         id: string(result.id, 128), taskId: string(result.taskId, 128) || null,
+        configuration: projectChatConfigurationState(result.configuration),
+        ...chatConfigurationObservations(turn.configurationObservation || turn.configurationObservations ? turn : result),
         state: string(turn.state ?? result.lastState, 40),
         context: projectChatContext(turn.context??result.context,turn.context?'active-request':'last-request'),
         turnUsage: projectUsage(turn.usage??result.turnUsage),
@@ -1090,7 +1201,8 @@ export function createDesktopUiService({ services = {}, system = services.system
         return { name: boundedText(attachment.name, `attachments[${index}].name`, 200), content: boundedText(attachment.content, `attachments[${index}].content`, 256_000), ...(attachment.mimeType ? { mimeType: string(attachment.mimeType, 80) } : {}) };
       }) : [];
       const clientMessageId = p.clientMessageId === undefined ? undefined : boundedText(p.clientMessageId, 'clientMessageId', 128);
-      const result = await chat('chat.send', { id: idParam(p), text, attachments, ...(clientMessageId ? { clientMessageId } : {}) }, signal);
+      const skillRefs = normalizeSkillReferences(p.skillRefs);
+      const result = await chat('chat.send', { id: idParam(p), text, attachments, skillRefs, ...(clientMessageId ? { clientMessageId } : {}) }, signal);
       emit('chat.updated', { sessionId: p.id });
       return selected(result, ['userMessageId', 'requestId']);
     },
@@ -1103,12 +1215,50 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.chat.retry': async p => selected(await chat('chat.retry', { id: idParam(p) }), ['userMessageId', 'requestId']),
     'ui.chat.continue': async p => selected(await chat('chat.continue', { id: idParam(p) }), ['continued', 'requestId']),
+    'ui.models.configuration.get': p => {
+      if (!services.modelConfiguration) throw uiError('SERVICE_UNAVAILABLE', 'Model configuration is unavailable');
+      return projectModelConfiguration(services.modelConfiguration.get(), p);
+    },
+    'ui.models.configuration.update': p => {
+      if (!services.modelConfiguration) throw uiError('SERVICE_UNAVAILABLE', 'Model configuration is unavailable');
+      if (Array.isArray(p.connections) && p.connections.some(row => row?.modelsOmitted > 0)) throw uiError('MODEL_PAGE_REVIEW_REQUIRED', 'Load the complete connection before replacing its models');
+      const result = services.modelConfiguration.update({ expectedRevision: p.expectedRevision,
+        ...(Object.hasOwn(p, 'connections') ? { connections: p.connections } : {}),
+        ...(Object.hasOwn(p, 'defaults') ? { defaults: p.defaults } : {}),
+        ...(Object.hasOwn(p, 'modelPreferences') ? { modelPreferences: p.modelPreferences } : {}) });
+      emit('model.updated', { status: 'configuration-changed' });
+      return projectModelConfiguration(result);
+    },
+    'ui.models.configuration.edit': p => {
+      if (!services.modelConfiguration) throw uiError('SERVICE_UNAVAILABLE', 'Model configuration is unavailable');
+      const result = services.modelConfiguration.editConnection({ expectedRevision: p.expectedRevision,
+        connectionId: boundedText(p.connectionId, 'connectionId', 80), patch: record(p.patch) });
+      emit('model.updated', { status: 'configuration-changed' });
+      return projectModelConfiguration(result);
+    },
+    'ui.models.configuration.discover': async (p, { signal } = {}) => {
+      if (!services.modelConfiguration) throw uiError('SERVICE_UNAVAILABLE', 'Model configuration is unavailable');
+      const result = await services.modelConfiguration.discover({ connectionId: p.connectionId, candidate: p.candidate, signal });
+      const models = (result.models ?? []).map(row => ({ id: string(row.id, 256), enabled: false,
+        capabilities: projectModelCapabilityFacts(row.capabilities) }));
+      const projected = { connectionId: string(result.connectionId, 80), configurationRevision: result.configurationRevision,
+        models, truncated: result.truncated === true, attempts: (result.attempts ?? []).map(row => selected(row, ['status', 'code'])) };
+      requireIpcItem(projected); return projected;
+    },
+    'ui.models.configuration.commit': async (p, { signal } = {}) => {
+      if (!services.modelConfiguration) throw uiError('SERVICE_UNAVAILABLE', 'Model configuration is unavailable');
+      const result = await services.modelConfiguration.testAndCommitConnection({ expectedRevision: p.expectedRevision,
+        connection: p.connection, candidate: p.candidate, signal });
+      emit('model.updated', { status: 'configuration-changed' });
+      return projectModelConfiguration(result);
+    },
     'ui.chat.catalog': async p => {
       const result = await chat('chat.catalog', { refresh: p.refresh === true, ...(p.id ? {id:idParam(p)} : {}) });
       return {
         models: (result.models ?? []).map(item => selected(item, ['id', 'label', 'provider'])),
         modelProviders: (result.modelProviders ?? []).map(item => ({
           id: string(item.id, 80), label: string(item.label, 120), configured: item.configured === true || item.hasKey === true,
+          ...(typeof item.enabled === 'boolean' ? { enabled: item.enabled } : {}),
           catalogState: string(item.catalogState, 40) || 'unknown', reachable: typeof item.reachable === 'boolean' ? item.reachable : null,
           authenticated: typeof item.authenticated === 'boolean' ? item.authenticated : null,
           inferencing: typeof item.inferencing === 'boolean' ? item.inferencing : null,
@@ -1134,6 +1284,11 @@ export function createDesktopUiService({ services = {}, system = services.system
         if (Object.hasOwn(input, key)) config[key] = input[key];
       }
       const result = await chat('chat.config.set', { id: idParam(p), config });
+      return projectSession(result);
+    },
+    'ui.chat.config.reconcile': async p => {
+      const result = await chat('chat.config.reconcile', { id: idParam(p) });
+      emit('chat.updated', { sessionId: p.id });
       return projectSession(result);
     },
     'ui.task.overview': async p => {
@@ -1906,7 +2061,13 @@ export function createDesktopUiService({ services = {}, system = services.system
       const result = await onboarding('onboarding.testProvider', { provider: boundedText(input.provider, 'provider', 80), apiKey: boundedText(input.apiKey, 'apiKey', 500), baseUrl: string(input.baseUrl, 500), model: string(input.model, 120) });
       return selected(result, ['ok', 'provider', 'status', 'code', 'phase', 'configured', 'reachable', 'authenticated', 'inferencing', 'message', 'connectionStepCompleted']);
     },
-    'ui.onboarding.setModel': async p => selected(await onboarding('onboarding.setModel', { provider: boundedText(p.provider, 'provider', 80), model: boundedText(p.model, 'model', 200) }), ['provider', 'model', 'persisted']),
+    'ui.onboarding.setModel': async p => {
+      if (p.expectedRevision !== undefined && (!Number.isSafeInteger(p.expectedRevision) || p.expectedRevision < 1)) throw uiError('INVALID_PARAMS', 'Model configuration revision is required');
+      const model = safeModelIdentifier(p.model);
+      if (!model) throw uiError('INVALID_PARAMS', 'A valid exact model identifier of at most 256 characters is required');
+      return selected(await onboarding('onboarding.setModel', { provider: boundedText(p.provider, 'provider', 80),
+        model, ...(p.expectedRevision !== undefined ? { expectedRevision: p.expectedRevision } : {}) }), ['provider', 'model', 'persisted']);
+    },
     'ui.approvals.grant.revoke': async p => capability('capability.grant.revoke',{id:idParam(p)}),
     'ui.approvals.list': async () => ({grants:((await capability('capability.grant.list',{})).grants??[]).map(row=>selected(row,['id','status','taskId','workspaceId','capability','resources','expiresAt','uses','maxUses'])), approvals: ((await capability('capability.approval.list', {})).approvals ?? []).map(row=>{let entry;try{entry=services.capabilityService.broker.registry.require(row.request?.capability);}catch{entry=null; /* A removed plugin stays reviewable; it cannot qualify for finite L2 reuse. */ }return projectApproval(row,entry);}),
       operations: ((await capability('capability.operation.list', {})).operations ?? []).map(row => selected(row, ['operationId','approvalId','status','decision','code','turnResumed','resumePending','resumeError'])) }),

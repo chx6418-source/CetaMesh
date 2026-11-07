@@ -1,4 +1,5 @@
 import { create } from 'zustand';
+import type { SkillReference } from '../bridge/typed-client';
 
 export type ThemeMode = 'system' | 'light' | 'dark';
 type ApprovalChoice = 'pending' | 'approved' | 'denied';
@@ -14,6 +15,8 @@ interface UiState {
   setActivityExpanded(expanded: boolean): void;
   chatDrafts: Record<string, string>;
   setChatDraft(sessionId: string, value: string | ((current: string) => string)): void;
+  chatSkillRefs: Record<string, SkillReference[]>;
+  setChatSkillRefs(sessionId: string, value: SkillReference[] | ((current: SkillReference[]) => SkillReference[])): void;
 }
 
 export const useUi = create<UiState>((set) => ({
@@ -23,6 +26,16 @@ export const useUi = create<UiState>((set) => ({
   activityExpanded: false, setActivityExpanded: (activityExpanded) => set({ activityExpanded }),
   // Ephemeral editor state only: no IPC, localStorage or long-term Memory write.
   chatDrafts: {},
+  chatSkillRefs: {},
+  setChatSkillRefs: (sessionId, value) => set(state => {
+    if (!sessionId) return state;
+    const current = state.chatSkillRefs[sessionId] ?? [];
+    const next = typeof value === 'function' ? value(current) : value;
+    const chatSkillRefs = { ...state.chatSkillRefs };
+    if (next.length) chatSkillRefs[sessionId] = next.slice(0, 16).map(({skillId,sourceRevision,sourceKind}) => ({skillId,sourceRevision,sourceKind}));
+    else delete chatSkillRefs[sessionId];
+    return { chatSkillRefs };
+  }),
   setChatDraft: (sessionId, value) => set(state => {
     if (!sessionId) return state;
     const next = typeof value === 'function' ? value(state.chatDrafts[sessionId] ?? '') : value;

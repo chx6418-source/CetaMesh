@@ -542,7 +542,7 @@ export function createContinuityRuntime({
    * targetProvider 缺省 = 同 Provider Fresh Session（TASK-S2-009 第一优先）；
    * 指定其它 Provider 即 Cross Provider Handoff（TASK-S2-010）。
    */
-  async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, modelProvider, model, reasoningEffort, automatic = false, requireNativeReadiness = false, authorizationGuard = null } = {}) {
+  async function rollover({ taskId, reason, targetProvider, coding, relevantFiles, workspaceFacts, modelProvider, model, reasoningEffort, automatic = false, requireNativeReadiness = false, authorizationGuard = null, onBeforeEffects = null } = {}) {
     const task = requireTask(taskId);
     let missingSourceProof = null;
     async function requireMissingSourceStopped(snapshot) {
@@ -674,6 +674,18 @@ export function createContinuityRuntime({
           throw continuityError(preflight.consistent === null || onlyMissingGit ? 'WORKSPACE_UNVERIFIED' : 'WORKSPACE_CHANGED',
             workspacePreflightMessage(preflight, currentFacts, onlyMissingGit));
         }
+      }
+      if (onBeforeEffects !== null) {
+        if (typeof onBeforeEffects !== 'function') throw continuityError('INVALID_PARAMS', 'Handoff effect boundary requires a trusted Core callback');
+        const source = requireTask(task.id);
+        if (source.rev !== task.rev || source.workspaceId !== task.workspaceId
+          || source.currentAgent?.provider !== previousAgent.provider || source.currentAgent?.sessionId !== previousAgent.sessionId) {
+          throw continuityError('TASK_CONFLICT', 'Task source changed during Handoff preflight');
+        }
+        // This trusted Core callback must finish durably before Owner-context
+        // preparation, packet/journal writes, Task mutation or native effects.
+        await onBeforeEffects({ taskId: task.id, taskRevision: source.rev, workspaceId: source.workspaceId,
+          provider: previousAgent.provider, sessionId: previousAgent.sessionId });
       }
       if (typeof prepareHandoff === 'function') await prepareHandoff({ taskId: task.id });
       // Preparation refreshes Owner constraints and authorized Working Memory.

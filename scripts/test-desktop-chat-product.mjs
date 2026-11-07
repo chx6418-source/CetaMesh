@@ -348,8 +348,12 @@ const turnEnd = (id, kind, error) => ({ type: 'turn/end', data: { reason: { kind
   assert.equal(afterBindFailure.sessions.find(item => item.id === session.id).config.model, 'deepseek-coder',
     'a failed provider binding leaves the persisted model configuration unchanged');
   api.fail([]);
+  await assert.rejects(service.execute({ method: 'chat.config.set', params: {
+    id: session.id, config: { model: 'deepseek-coder' }
+  } }), { code: 'CONFIG_RECONCILIATION_REQUIRED' }, 'an unconfirmed native selection retains its durable recovery fence');
+  const validationSession = await service.execute({ method: 'chat.sessions.create', params: { title: 'Independent configuration validation' } });
   await assert.rejects(
-    service.execute({ method: 'chat.config.set', params: { id: session.id, config: { reasoning: 'ultra' } } }),
+    service.execute({ method: 'chat.config.set', params: { id: validationSession.id, config: { reasoning: 'ultra' } } }),
     (error) => error.code === 'INVALID_PARAMS'
   );
   ok('切换模型/reasoning/mode：即时 selectModel + 持久化 + 参数校验');
@@ -1231,12 +1235,12 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   ok('DSH → Model Runtime：Provider-only handover 关闭旧 Session/Follow，迟到事件不污染新回合');
 }
 
-// ── 17. catalog：Model Runtime 目录与 DSH 目录并存，无 Key 材料 ────────────────
+// ── 17. catalog：已配置的 Model Runtime 目录独立于可选 DSH，无 Key 材料 ──────
 {
   const f = sseFetch();
   const { service } = makeFullService({ fetchImpl: f });
   const catalog = await service.execute({ method: 'chat.catalog', params: {} });
-  assert.match(catalog.error, /ECONNREFUSED/, 'DSH 目录不可用如实上报');
+  assert.equal(catalog.error, null, 'an injected Model Runtime does not probe or depend on an unrelated DSH directory');
   assert.deepEqual(catalog.models, []);
   assert.equal(catalog.defaultModelProvider, 'deepseek-official');
   const deepseek = catalog.modelProviders.find((p) => p.id === 'deepseek-official');
@@ -1248,7 +1252,7 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   assert.equal(openai.hasKey, false, '未配 Key 的 Provider 如实标记');
   assert.deepEqual(openai.models, []);
   assert.ok(!JSON.stringify(catalog).includes(API_KEY), 'catalog 不含 Key 材料');
-  ok('catalog：DSH 目录错误不阻塞 Model 目录 / hasKey 标记 / 无 Key 泄漏');
+  ok('catalog：Model Runtime 目录独立 / hasKey 标记 / 无 Key 泄漏');
   service.close();
 }
 
@@ -1271,9 +1275,9 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   const first = await service.execute({ method: 'chat.catalog', params: {} });
   assert.equal(maxActive, 2, 'configured provider catalogs are requested concurrently');
   assert.deepEqual(first.modelProviders.map(provider => provider.catalogState), ['loaded', 'loaded']);
-  assert.ok(first.error, 'DSH catalog error remains observable independently');
+  assert.equal(first.error, null, 'unrelated DSH transport failure is not a Model Runtime catalog failure');
   const projected = await createDesktopUiService({ services: { chatService: service } }).execute({ method: 'ui.chat.catalog', params: {} });
-  assert.equal(projected.available, false, 'the legacy available field describes DSH catalog only');
+  assert.equal(projected.available, true, 'the selected Model Runtime catalog is available; inference remains independently unknown');
   assert.equal(projected.modelProviders[0].catalogState, 'loaded', 'DSH failure does not mark the independent Model catalog unavailable');
   assert.equal(projected.modelProviders[0].inferencing, null);
   const afterFirst = calls.length;
@@ -1369,7 +1373,9 @@ function makeFullService({ withKey = true, fetchImpl, baseUrl = 'https://api.dee
   assert.deepEqual(await service.execute({ method: 'chat.history', params: { id: emptySession.id } }), {
     id: emptySession.id, total: 0, messages: [], nextBeforeMessageId: null, hasMore: false,
     sessionUsage: { inputTokens: null, outputTokens: null, totalTokens: null, reasoningTokens: null,
-      cacheReadTokens: null, cacheWriteTokens: null, cacheHitRate: null, requestCount: null, accountingComplete: null },
+      cacheReadTokens: null, cacheWriteTokens: null, cacheHitRate: null, requestCount: null, accountingComplete: null,
+      knownUsage: { inputTokens: null, outputTokens: null, totalTokens: null, reasoningTokens: null, cacheReadTokens: null, cacheWriteTokens: null },
+      cacheCoverage: null },
     nextAfterMessageId: null, hasMoreAfter: false
   });
 
@@ -1448,7 +1454,7 @@ for (const terminal of ['cancelled', 'completed', 'failed']) {
       if (path.resolve(to) === path.resolve(file)) throw Object.assign(new Error('synthetic full disk'), { code: 'EIO' });
       return rename(from, to);
     };
-    await assert.rejects(service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'dsh' } } }), error => error.code === 'WRITE_FAILED');
+    await assert.rejects(service.execute({ method: 'chat.config.set', params: { id: session.id, config: { agentProvider: 'dsh' } } }), error => error.code === 'CONFIG_SAVE_FAILED');
   } finally { fs.renameSync = rename; }
   assert.deepEqual((await service.execute({ method: 'chat.sessions.list', params: {} })).sessions[0], before, 'rejected configuration retains the in-memory Task/config binding');
   assert.deepEqual(readJsonFile(file), storedBefore, 'rejected configuration retains persisted binding');
@@ -1510,17 +1516,28 @@ for (const terminal of ['cancelled', 'completed', 'failed']) {
   const api = fixtureApi();
   let shouldFail = true;
   const handoffs = [];
+  let handoffTask = { id: 'task-chat-handoff', rev: 1, status: 'running', workspaceId: 'ws-chat-handoff',
+    currentAgent: { provider: 'dsh', sessionId: 'dsh-old' } };
   const service = makeService({ stateDir: dir, api, options: {
     agentProviders: [
       { id: 'dsh', eventProtocol: 'dsh-session-events', workspaceBoundary: 'capability-broker' },
       { id: 'codex', eventProtocol: 'dsh-session-events', workspaceBoundary: 'capability-broker' }
     ],
-    resolveTask: () => ({ id: 'task-chat-handoff', workspaceId: 'ws-chat-handoff',
-      currentAgent: { provider: 'dsh', sessionId: 'dsh-old' } }),
+    resolveTask: () => structuredClone(handoffTask),
+    handoffTaskSupportsBeforeEffects: true,
+    agentExecute: async ({ method }) => {
+      assert.equal(method, 'agent.status', 'configuration must not directly select or create the Task Agent');
+      return { running: false, runtimeValid: true, modelControl: { status: 'unknown', application: 'new-session',
+        selection: { model: null, reasoningEffort: null }, model: null, reasoning: null } };
+    },
     handoffTask: async request => {
       handoffs.push(request);
       if (shouldFail) throw Object.assign(new Error('target unavailable'), { code: 'PROVIDER_UNAVAILABLE' });
-      return { to: { provider: 'codex', sessionId: 'codex-new' } };
+      await request.onBeforeEffects({ taskId: handoffTask.id, taskRevision: handoffTask.rev, workspaceId: handoffTask.workspaceId,
+        provider: handoffTask.currentAgent.provider, sessionId: handoffTask.currentAgent.sessionId });
+      const from = { ...handoffTask.currentAgent }, to = { provider: 'codex', sessionId: 'codex-new' };
+      handoffTask = { ...handoffTask, rev: handoffTask.rev + 1, currentAgent: to };
+      return { taskId: handoffTask.id, sequence: 1, from, to, task: structuredClone(handoffTask) };
     },
     agentFollow: async function* ({ signal }) {
       await new Promise(resolve => signal?.addEventListener('abort', resolve, { once: true }));

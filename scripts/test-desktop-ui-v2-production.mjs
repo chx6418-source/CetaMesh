@@ -164,12 +164,14 @@ check('MCP detail exposes real restart and masked configuration actions', () => 
 check('Models settings connect through the provider catalog without retaining API keys in React state', () => {
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   const client = read('desktop-ui/src/bridge/typed-client.ts');
-  assert.match(app, /function ModelConnectionSettings\(/);
-  assert.match(app, /chatClient\.catalog\(\)/);
-  assert.match(app, /onboardingClient\.testProvider\(provider, apiKey,/);
-  assert.match(app, /ref=\{apiKeyRef\}/);
+  const form = read('desktop-ui/src/app/ModelConnectionForm.tsx');
+  const panel = read('desktop-ui/src/app/ModelConnectionsPanel.tsx');
+  assert.ok((app.match(/<ModelConnectionsPanel\b/g) ?? []).length >= 2, 'Settings and Onboarding mount the same management component');
+  assert.match(panel, /<ModelConnectionForm/);
+  assert.match(form, /ref=\{password\}/);
+  assert.match(form, /type="password"/);
   assert.doesNotMatch(app, /const \[apiKey,\s*setApiKey\] = useState/);
-  assert.match(client, /testProvider:.*ui\.onboarding\.testProvider/);
+  assert.match(client, /commit:.*ui\.models\.configuration\.commit/);
 });
 check('About renders real build metadata and cached release notes', () => {
   const app = read('desktop-ui/src/app/AboutPage.tsx');
@@ -200,11 +202,12 @@ check('Agent registry states stay distinct and reflect real provider health', ()
   assert.match(projection, /not-checked/);
   assert.match(projection, /healthStatus/);
   assert.match(projection, /agent\('agent\.health'/);
-  assert.match(client, /export type AgentStatus = 'ready' \| 'needs-setup' \| 'descriptor-incomplete' \| 'not-installed' \| 'unavailable' \| 'not-supported' \| 'not-checked'/);
+  assert.match(client, /export type AgentStatus = 'ready' \| 'task-check-pending' \| 'needs-setup' \| 'descriptor-incomplete' \| 'not-installed' \| 'unavailable' \| 'not-supported' \| 'not-checked' \| 'connection-pending';/);
   assert.match(presentation, /'not-installed': '未安装'/);
   assert.match(presentation, /'not-supported': '不支持'/);
   assert.match(presentation, /'not-checked': '未检查'/);
-  assert.match(agents, /StatusBadge value=\{agent\.status === 'ready' && !isAgentReady\(agent\) \? 'not-checked' : agent\.status\} available=\{isAgentReady\(agent\)\}/);
+  assert.match(agents, /StatusBadge value=\{displayAgentStatus\(agent\)\} available=\{isAgentReady\(agent\)\}/);
+  assert.match(agents, /const displayAgentStatus = \(agent: Agent\) => \(agent\.status === 'ready' && !isAgentReady\(agent\)\) \|\| \(agent\.status === 'task-check-pending' && !isAgentTaskCheckPending\(agent\)\) \? 'not-checked' : agent\.status;/);
   assert.match(panels, /agent\.status === 'needs-setup'/);
   assert.match(agents, /mergeAgentHealth\(item, health\)/);
   assert.match(panels, /return \{ \.\.\.previous, \.\.\.health \}/);
@@ -251,10 +254,11 @@ check('Harbor reconciles optimistic sends, selections, activities, and retry by 
   assert.match(app, /<ChatFailureCard failure=\{sendError\}[^>]*onRetry=\{onRetry\}/,
     'optimistic-send failures reach the classified production failure component');
   assert.match(read('desktop-ui/src/app/ChatFailure.tsx'), /failure\.failureStage === 'pre-dispatch'[\s\S]*重新提交/);
-  assert.match(app, /onSessionUpdate\(await chatClient\.setConfig/);
+  assert.match(app, /await applyConfiguration\(\(\) => chatClient\.setConfig/);
+  assert.match(app, /const updated = await action\(\);\s*onSessionUpdate\(updated\)/, 'configuration display follows the acknowledged command');
   assert.match(app, /正在思考…/);
   assert.match(app, /status\.toolActivity/);
-  assert.match(client, /send: \(id: string, text: string, attachments: Attachment\[\] = \[\], clientMessageId\?: string\)/);
+  assert.match(client, /send: \(id: string, text: string, attachments: Attachment\[\] = \[\], clientMessageId\?: string, skillRefs: SkillReference\[\] = \[\]\)/);
   assert.match(projection, /clientMessageId/);
   assert.match(projection, /toolActivity: \(Array\.isArray\(turn\.toolActivity\)/);
   assert.match(chat, /MESSAGE_ID_CONFLICT/);
@@ -264,12 +268,17 @@ check('Harbor Chat history refresh does not wait for the remote Model Catalog', 
   const app = read('desktop-ui/src/app/HarborApp.tsx');
   const page = app.slice(app.indexOf('function ChatPage'), app.indexOf('function MessageBubble'));
   const loadAt = page.indexOf('const load = useCallback');
-  const loadEnd = page.indexOf('}, [session?.id, session?.title]);', loadAt);
+  const loadEnd = page.indexOf('}, [session?.id]);', loadAt);
   assert.ok(loadAt >= 0 && loadEnd > loadAt, 'ChatPage load callback is present');
   const load = page.slice(loadAt, loadEnd);
   assert.match(load, /chatClient\.history\(session\.id, 100\)/);
-  assert.match(load, /chatClient\.status\(session\.id\)/);
   assert.doesNotMatch(load, /chatClient\.catalog\(\)/, 'catalog latency cannot hold history and status refresh');
+  const contextAt = page.indexOf('const refreshContext = useCallback');
+  const contextEnd = page.indexOf('}, [session?.id, session?.title, refreshApprovals]);', contextAt);
+  assert.ok(contextAt >= 0 && contextEnd > contextAt, 'independent runtime status refresh is present');
+  const context = page.slice(contextAt, contextEnd);
+  assert.match(context, /chatClient\.status\(session\.id\)/);
+  assert.doesNotMatch(context, /chatClient\.catalog\(/, 'catalog latency cannot hold runtime status refresh');
   assert.match(page, /const refreshCatalog = useCallback/);
   assert.match(page, /useEffect\(\(\) => \{ void refreshCatalog\(\); \}, \[refreshCatalog,\s*status\.state\]\)/,
     'the model catalog refreshes independently after Chat mounts');

@@ -59,6 +59,56 @@ function fixture(dir, { officialDefaults = false, fetchImpl = fetch } = {}) {
 let checks = 0;
 const ok = label => console.log(`PASS ${++checks}: ${label}`);
 try {
+  const partial = fixture(path.join(temp, 'partial-edit'));
+  assert.equal(typeof partial.configuration.editConnection, 'function', 'Model Configuration exposes an authoritative incremental connection edit');
+  let partialView = await partial.configuration.testAndCommitConnection({ expectedRevision: 0,
+    connection: { id: 'partial-a', label: 'Partial A', protocolProfile: 'openai-chat-v1', enabled: true },
+    candidate: { apiKey: oldKey, baseUrl: `${base}/partial` } });
+  const catalogFact = { value: true, source: 'protocol-declared', status: 'declared', ruleId: null, version: 'model-catalog-v1' };
+  partialView = partial.configuration.update({ expectedRevision: partialView.revision,
+    connections: partialView.connections.map(entry => entry.id === 'partial-a' ? { ...entry, models: Array.from({ length: 160 }, (_, index) => ({
+      id: `review-${index}`, enabled: index === 159, manualCapabilities: { reasoning: true, vision: false }, discoveredCapabilities: { tools: catalogFact, ...(index === 139 ? { reasoning: { ...catalogFact, value: false } } : {}) }
+    })) } : entry),
+    modelPreferences: Array.from({ length: 140 }, (_, index) => ({ connectionId: 'partial-a', modelId: `review-${index}`, reasoningEffort: 'low' })) });
+  const partialBefore = structuredClone(partialView), secretBytes = fs.readFileSync(partial.secrets.filePath, 'utf8');
+  partialView = partial.configuration.editConnection({ expectedRevision: partialView.revision, connectionId: 'partial-a', patch: {
+    label: 'Reviewed A', modelChanges: [{ id: 'review-0', enabled: true }, { id: 'exact-manual', enabled: false, manualCapabilities: { reasoning: true, tools: false } }],
+    preferences: [{ modelId: 'review-0', reasoningEffort: 'high' }]
+  } });
+  const editedA = partialView.connections.find(entry => entry.id === 'partial-a'), beforeA = partialBefore.connections.find(entry => entry.id === 'partial-a');
+  assert.equal(partialView.revision, partialBefore.revision + 1);
+  assert.equal(editedA.models.length, 161);
+  assert.deepEqual(editedA.models.find(entry => entry.id === 'review-159'), beforeA.models.find(entry => entry.id === 'review-159'), 'unloaded rows retain all metadata');
+  assert.deepEqual(editedA.models[0].manualCapabilities, beforeA.models[0].manualCapabilities, 'an enabled-only patch preserves manual declarations');
+  assert.deepEqual(editedA.models[0].discoveredCapabilities, beforeA.models[0].discoveredCapabilities, 'catalog provenance survives a row edit');
+  assert.equal(editedA.credentialRef, beforeA.credentialRef);
+  assert.deepEqual(partialView.connections.filter(entry => entry.id !== 'partial-a'), partialBefore.connections.filter(entry => entry.id !== 'partial-a'));
+  assert.deepEqual(partialView.defaults, partialBefore.defaults);
+  assert.deepEqual(partialView.modelPreferences.slice(1), partialBefore.modelPreferences.slice(1), 'preferences outside the public page survive');
+  assert.equal(partialView.modelPreferences[0].reasoningEffort, 'high');
+  assert.equal(fs.readFileSync(partial.secrets.filePath, 'utf8'), secretBytes, 'incremental edits cannot rotate or rebind credentials');
+  ok('incremental edits preserve hidden models, provenance, other connections, credentials and unloaded preferences');
+  const invalidPatches = [
+    { credentialRef: 'openai' }, { protocolProfile: 'deepseek-chat-v1' }, { enabled: 'true' },
+    { modelChanges: [{ id: 'review-0', enabled: false }, { id: ' review-0 ', enabled: true }] },
+    { modelChanges: [{ id: 'review-0', discoveredCapabilities: {} }] },
+    { modelChanges: [{ id: 'review-0', manualCapabilities: { maxOutputTokens: 200, contextWindowTokens: 100 } }] },
+    { modelChanges: [{ id: 'review-0', remove: true, enabled: true }] },
+    { preferences: [{ modelId: 'review-0', reasoningEffort: 'high' }, { modelId: ' review-0 ', reasoningEffort: 'low' }] },
+    { preferences: [{ modelId: 'not-in-catalog', reasoningEffort: 'high' }] },
+    { preferences: [{ modelId: 'review-139', reasoningEffort: 'high' }] },
+    { modelChanges: [{ id: 'no-reasoning', manualCapabilities: { reasoning: false } }], preferences: [{ modelId: 'no-reasoning', reasoningEffort: 'high' }] }
+  ];
+  for (const patch of invalidPatches) {
+    assert.throws(() => partial.configuration.editConnection({ expectedRevision: partialView.revision, connectionId: 'partial-a', patch }), error => error.code === 'SETTINGS_INVALID');
+    assert.equal(partial.configuration.get().revision, partialView.revision, 'invalid row edits do not write');
+  }
+  assert.throws(() => partial.configuration.editConnection({ expectedRevision: partialView.revision - 1, connectionId: 'partial-a', patch: { enabled: false } }), error => error.code === 'SETTINGS_CONFLICT');
+  assert.throws(() => partial.configuration.editConnection({ expectedRevision: partialView.revision, connectionId: 'missing', patch: { enabled: false } }), error => error.code === 'MODEL_PROVIDER_UNKNOWN');
+  partialView = partial.configuration.editConnection({ expectedRevision: partialView.revision, connectionId: 'partial-a', patch: { enabled: false } });
+  partialView = partial.configuration.editConnection({ expectedRevision: partialView.revision, connectionId: 'partial-a', patch: { enabled: true, modelChanges: [{ id: 'review-1', enabled: true }] } });
+  assert.ok(partial.configuration.listEnabledModels({ connectionId: 'partial-a' }).some(entry => entry.id === 'review-1'));
+  ok('partial edits reject stale/duplicate/credential/capability errors and allow explicit disabled-connection recovery');
   const first = fixture(temp);
   first.secrets.set({ provider: 'openai', apiKey: oldKey, baseUrl: base });
   const legacy = first.configuration.get();

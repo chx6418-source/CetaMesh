@@ -1,6 +1,7 @@
 // One Settings-backed model configuration. This module owns validation and
 // derived adapters; Settings and ProviderSecrets remain the only durable stores.
 import { createOpenAiCompatibleModelProvider } from './providers/openai-compatible.js';
+import { createHash } from 'node:crypto';
 import { discoverModels, normalizeModelBaseUrl, safeModelIdentifier } from './model-discovery.js';
 
 export const MODEL_CAPABILITY_RULE_VERSION = '2026-11-07.1';
@@ -60,7 +61,7 @@ export function normalizeModelConnections(raw) {
     for (const entry of connection.models) {
       const modelId = safeModelIdentifier(entry?.id);
       if (!entry || typeof entry !== 'object' || Array.isArray(entry)
-        || Object.keys(entry).some(key => !['id', 'label', 'enabled', 'manualCapabilities', 'discoveredCapabilities', 'capabilities'].includes(key))
+        || Object.keys(entry).some(key => !['id', 'label', 'enabled', 'manualCapabilities', 'discoveredCapabilities', 'capabilities', 'reasoning'].includes(key))
         || !modelId || typeof entry.enabled !== 'boolean') invalid();
       if (seen.has(modelId)) continue;
       seen.add(modelId);
@@ -136,7 +137,8 @@ export function createModelConfiguration({ settingsStore, secrets, registry, fet
       managedIds.clear();
       adapterKeys.clear();
     }
-    return { revision: state.revision, derived, connections: derived ? legacyConnections() : normalizeModelConnections(models.connections),
+    return { revision: state.revision, configurationKey: createHash('sha256').update(JSON.stringify(models)).digest('hex'),
+      derived, connections: derived ? legacyConnections() : normalizeModelConnections(models.connections),
       defaults: { provider: models.provider, model: safeModelIdentifier(models.defaultModel) ?? models.defaultModel, reasoningEffort: models.reasoningEffort },
       modelPreferences: normalizeModelPreferences(models.modelPreferences ?? []) };
   }
@@ -163,9 +165,13 @@ export function createModelConfiguration({ settingsStore, secrets, registry, fet
         cursor = entries.find(entry => entry.provider === cursor)?.modelPreparation?.previousCredentialRef;
       }
     }
-    return { ...state, connections: state.connections.map(connection => ({ ...connection,
+    return { ...state, connections: state.connections.map(connection => {
+      const adapter = inspectionAdapter(connection, state);
+      return { ...connection,
       configured: entries.some(entry => entry.provider === credentialRef(connection)),
-      models: connection.models.map(entry => ({ ...entry, label: entry.id, capabilities: derivedCapabilities(connection, entry) })) })),
+      models: connection.models.map(entry => ({ ...entry, label: entry.id, capabilities: derivedCapabilities(connection, entry),
+        reasoning: adapter.modelCapabilities(entry.id).reasoning })) };
+    }),
       recovery: entries.filter(entry => entry.modelPreparation && !active.has(entry.provider) && !ancestors.has(entry.provider))
         .map(entry => ({ credentialRef: entry.provider, state: 'credential-prepared', ...entry.modelPreparation })) };
   }
@@ -193,6 +199,55 @@ export function createModelConfiguration({ settingsStore, secrets, registry, fet
     }
     settingsStore.update('models', patch, { expectedRev: expectedRevision });
     return get();
+  }
+  // Renderer pages are bounded projections. Apply reviewed row changes to the
+  // authoritative snapshot, never treat a loaded page as the complete catalog.
+  function editConnection({ expectedRevision, connectionId, patch } = {}) {
+    const current = assertRevision(expectedRevision);
+    if (!validId(connectionId) || !patch || typeof patch !== 'object' || Array.isArray(patch)
+      || Object.keys(patch).some(key => !['label', 'enabled', 'modelChanges', 'preferences'].includes(key))) invalid();
+    const connection = current.connections.find(entry => entry.id === connectionId);
+    if (!connection) fail('MODEL_PROVIDER_UNKNOWN', 'Unknown model connection');
+    const next = { ...connection, models: connection.models.map(entry => ({ ...entry })) };
+    if (Object.hasOwn(patch, 'label')) next.label = patch.label;
+    if (Object.hasOwn(patch, 'enabled')) next.enabled = patch.enabled;
+    if (Object.hasOwn(patch, 'modelChanges')) {
+      if (!Array.isArray(patch.modelChanges) || patch.modelChanges.length > 256) invalid();
+      const seen = new Set();
+      for (const change of patch.modelChanges) {
+        const id = safeModelIdentifier(change?.id);
+        if (!change || typeof change !== 'object' || Array.isArray(change) || !id || seen.has(id)
+          || Object.keys(change).some(key => !['id', 'enabled', 'manualCapabilities', 'remove'].includes(key))
+          || Object.hasOwn(change, 'enabled') && typeof change.enabled !== 'boolean'
+          || Object.hasOwn(change, 'remove') && typeof change.remove !== 'boolean') invalid();
+        seen.add(id);
+        const index = next.models.findIndex(entry => entry.id === id);
+        if (change.remove === true) {
+          if (index < 0 || Object.keys(change).some(key => !['id', 'remove'].includes(key))) invalid();
+          next.models.splice(index, 1);
+        } else {
+          const model = index < 0 ? { id, enabled: false, manualCapabilities: {}, discoveredCapabilities: {} } : next.models[index];
+          const edited = { ...model,
+            ...(Object.hasOwn(change, 'enabled') ? { enabled: change.enabled } : {}),
+            ...(Object.hasOwn(change, 'manualCapabilities') ? { manualCapabilities: manualCapabilities(change.manualCapabilities) } : {}) };
+          if (index < 0) next.models.push(edited); else next.models[index] = edited;
+        }
+      }
+    }
+    const preferences = [...current.modelPreferences];
+    if (Object.hasOwn(patch, 'preferences')) {
+      if (!Array.isArray(patch.preferences) || patch.preferences.length > 256
+        || patch.preferences.some(entry => !entry || typeof entry !== 'object' || Array.isArray(entry)
+          || Object.keys(entry).some(key => !['modelId', 'reasoningEffort'].includes(key)))) invalid();
+      const reviewed = normalizeModelPreferences(patch.preferences.map(entry => ({ ...entry, connectionId })));
+      for (const preference of reviewed) {
+        const model = next.models.find(entry => entry.id === preference.modelId);
+        if (!model || !inspectionAdapter(next, current).modelCapabilities(model.id).reasoning.levels.includes(preference.reasoningEffort)) invalid();
+        const index = preferences.findIndex(entry => entry.connectionId === connectionId && entry.modelId === preference.modelId);
+        if (index < 0) preferences.push(preference); else preferences[index] = preference;
+      }
+    }
+    return update({ expectedRevision, connections: current.connections.map(entry => entry.id === connectionId ? next : entry), modelPreferences: preferences });
   }
   function listEnabledModels({ connectionId = null } = {}) {
     const current = get();
@@ -226,25 +281,56 @@ export function createModelConfiguration({ settingsStore, secrets, registry, fet
     const { connection, state } = requireConnection(id);
     const ref = connection.credentialRef ?? connection.id;
     const entry = descriptor(ref);
-    const cacheKey = JSON.stringify([MODEL_CAPABILITY_RULE_VERSION, state.revision, entry?.revision ?? entry?.updatedAt, connection]);
+    const cacheKey = JSON.stringify([MODEL_CAPABILITY_RULE_VERSION, state.configurationKey, entry?.revision ?? entry?.updatedAt, connection]);
     if (adapterKeys.get(connection.id) !== cacheKey) {
-      const modelProfile = modelId => connection.models.find(entry => entry.id === safeModelIdentifier(modelId)) ?? null;
-      const enabled = connection.models.filter(entry => entry.enabled);
-      const defaultModel = enabled.find(entry => entry.id === state.defaults.model)?.id ?? enabled[0]?.id ?? null;
-      registry.upsert(createOpenAiCompatibleModelProvider({ id: connection.id, label: connection.label,
-        protocolProfile: connection.protocolProfile, baseUrl: BUILTIN_BASE_URLS[connection.id] ?? '', defaultModel, secrets: { raw: () => secrets.raw(ref) }, fetchImpl,
-        reasoningParam: connection.protocolProfile === 'deepseek-chat-v1' ? null : 'reasoning_effort',
-        supportsReasoning: modelId => connection.protocolProfile !== 'openai-compatible-v1'
-          || (modelProfile(modelId)?.manualCapabilities?.reasoning ?? settingsStore.get().settings.models.openaiCompatibleReasoningEffort === true),
-        supportsTools: modelId => {
-          const manual = modelProfile(modelId)?.manualCapabilities?.tools;
-          return manual ?? (connection.protocolProfile !== 'openai-compatible-v1' || settingsStore.get().settings.models.openaiCompatibleToolCalling === true);
-        },
-        supportsStreamOptions: connection.protocolProfile !== 'openai-compatible-v1', modelProfile }));
+      registry.upsert(createAdapter(connection, state, { raw: () => secrets.raw(ref) }));
       adapterKeys.set(connection.id, cacheKey);
       managedIds.add(connection.id);
     }
     return registry.require(connection.id);
+  }
+  // One adapter factory owns both wire dispatch and read-only capability
+  // metadata. Inspecting disabled/unconfigured connections grants no dispatch.
+  function createAdapter(connection, state, providerSecrets) {
+    const modelProfile = modelId => connection.models.find(entry => entry.id === safeModelIdentifier(modelId)) ?? null;
+    const enabled = connection.models.filter(entry => entry.enabled);
+    const defaultModel = enabled.find(entry => entry.id === state.defaults.model)?.id ?? enabled[0]?.id ?? null;
+    const flags = settingsStore.get().settings.models;
+    return createOpenAiCompatibleModelProvider({ id: connection.id, label: connection.label,
+        protocolProfile: connection.protocolProfile, baseUrl: BUILTIN_BASE_URLS[connection.id] ?? '', defaultModel, secrets: providerSecrets, fetchImpl,
+        reasoningParam: connection.protocolProfile === 'deepseek-chat-v1' ? null : 'reasoning_effort',
+        supportsReasoning: modelId => connection.protocolProfile !== 'openai-compatible-v1'
+          || (modelProfile(modelId)?.manualCapabilities?.reasoning ?? flags.openaiCompatibleReasoningEffort === true),
+        supportsTools: modelId => {
+          const manual = modelProfile(modelId)?.manualCapabilities?.tools;
+          return manual ?? (connection.protocolProfile !== 'openai-compatible-v1' || flags.openaiCompatibleToolCalling === true);
+        },
+        supportsStreamOptions: connection.protocolProfile !== 'openai-compatible-v1', modelProfile });
+  }
+  function inspectionAdapter(connection, state) {
+    const ref = credentialRef(connection);
+    let saved = null;
+    if (ref) {
+      try { saved = secrets.raw(ref); } catch (error) { if (error?.code !== 'PROVIDER_SECRET_NOT_FOUND') throw error; }
+    }
+    return createAdapter(connection, state, { raw() {
+      if (!saved) fail('PROVIDER_SECRET_NOT_FOUND', 'Model credential is not configured');
+      return saved;
+    } });
+  }
+  function readCatalog(id) {
+    const state = snapshot(), entries = secretEntries();
+    const connection = state.connections.find(entry => entry.id === (id || state.defaults.provider));
+    if (!connection) fail('MODEL_PROVIDER_UNKNOWN', 'Unknown model connection');
+    const configured = entries.some(entry => entry.provider === credentialRef(connection));
+    const adapter = inspectionAdapter(connection, state);
+    const models = !connection.enabled || !configured ? [] : connection.models.filter(entry => entry.enabled).map(entry => ({
+      ...entry, label: entry.id, connectionId: connection.id, providerId: connection.id, configured, connectionRevision: state.revision,
+      capabilities: { ...adapter.modelCapabilities(entry.id), configuration: derivedCapabilities(connection, entry) }
+    }));
+    return { provider: connection.id, models, configurationRevision: state.revision, error: null,
+      catalogState: !connection.enabled ? 'disabled' : !configured ? 'needs-setup' : models.length ? 'loaded' : 'needs-review',
+      source: 'configuration', observation: { authenticated: null, reachable: null } };
   }
   function resolveSelection({ providerId, model, reasoning } = {}) {
     const { connection, state } = requireConnection(providerId);
@@ -259,7 +345,7 @@ export function createModelConfiguration({ settingsStore, secrets, registry, fet
     const secretRevision = descriptor(ref)?.revision ?? null;
     return { provider: provider(connection.id), model: selected, reasoning: effort,
       assertCurrent() {
-        if (snapshot().revision !== state.revision || descriptor(ref)?.revision !== secretRevision) {
+        if (snapshot().configurationKey !== state.configurationKey || descriptor(ref)?.revision !== secretRevision) {
           fail('MODEL_CONFIGURATION_CHANGED', 'Model configuration changed before dispatch; refresh and start a new request');
         }
       },
@@ -306,7 +392,7 @@ export function createModelConfiguration({ settingsStore, secrets, registry, fet
   }
   async function testAndCommitConnection({ expectedRevision, connection, candidate, signal } = {}) {
     const before = assertRevision(expectedRevision);
-    const clean = normalizeModelConnections([connection])[0];
+    const clean = normalizeModelConnections([{ ...connection, models: connection?.models === undefined ? [] : connection.models }])[0];
     const existing = before.connections.find(entry => entry.id === clean.id);
     const priorModels = new Map((existing?.models ?? []).map(entry => [entry.id, entry]));
     for (const entry of clean.models) {
@@ -347,6 +433,6 @@ export function createModelConfiguration({ settingsStore, secrets, registry, fet
           configurationRevision: observed.revision, previousCredentialRef: existing?.credentialRef ?? null } });
     }
   }
-  return Object.freeze({ get, update, listEnabledModels, discover, testAndCommitConnection, hasKey, defaultProviderId,
+  return Object.freeze({ get, update, editConnection, readCatalog, listEnabledModels, discover, testAndCommitConnection, hasKey, defaultProviderId,
     provider, resolveSelection, isManaged: () => !snapshot().derived });
 }

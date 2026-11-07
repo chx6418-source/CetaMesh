@@ -175,17 +175,20 @@ export function createModelRuntimeService({ registry, secrets, configuration = n
   }
 
   async function listModels(providerId) {
+    // Managed catalogs are local inventory reads. A connection with no enabled
+    // model remains reviewable without satisfying request-dispatch admission.
+    if (configuration?.isManaged()) return configuration.readCatalog(providerId);
     const provider = resolveProvider(providerId);
-    if (configuration?.isManaged()) return { provider: provider.id,
-      models: configuration.listEnabledModels({ connectionId: provider.id }).map(model => ({ ...model,
-        capabilities: { ...modelCapabilities(provider.id, model.id), configuration: model.capabilities } })),
-      configurationRevision: configuration.get().revision, error: null };
     try {
       const models = await provider.listModels({});
-      return { provider: provider.id, models: models.map(model => ({ ...model, capabilities: modelCapabilities(provider.id, model.id) })), error: null };
+      return { provider: provider.id, models: models.map(model => ({ ...model, capabilities: modelCapabilities(provider.id, model.id) })), error: null,
+        // The legacy provider contract supplies rows, not an authentication
+        // receipt. A successful list is catalog availability only.
+        source: 'provider-catalog', observation: { authenticated: null, reachable: null } };
     } catch (error) {
       const code = typeof error?.code === 'string' ? error.code : MODEL_ERROR_CODES.MODEL_PROVIDER_ERROR;
-      return { provider: provider.id, models: [], error: String(error?.message ?? error), code };
+      return { provider: provider.id, models: [], error: String(error?.message ?? error), code,
+        source: 'provider-catalog', observation: { authenticated: null, reachable: null } };
     }
   }
 
@@ -240,12 +243,14 @@ export function createModelRuntimeService({ registry, secrets, configuration = n
     return provider.stream({
       maxOutputTokens: budget.reservedOutputTokens ?? maxOutputTokens,
       model: effectiveModel,
+      ...(provider.configurationControl?.observation === 'wire-v1' ? {
       requestedModel: typeof requestedModel === 'string' && requestedModel.trim() ? requestedModel.trim() : 'provider-default',
       configurationContext: selected?.configurationContext ?? { connectionRevision: null,
         requested: { model: typeof requestedModel === 'string' && requestedModel.trim() ? requestedModel.trim() : null, reasoning: reasoning ?? null },
         source: { model: requestedModel ? 'request' : 'provider-default', reasoning: 'request' } },
       onConfiguration,
       assertConfiguration: selected?.assertCurrent,
+      } : {}),
       messages,
       reasoning,
       tools,
@@ -274,9 +279,11 @@ export function createModelRuntimeService({ registry, secrets, configuration = n
     const contextBudget = enforceModelContextBudget({ provider, model: effectiveModel, messages, tools, maxOutputTokens });
     notifyContext(onContext, provider, effectiveModel, messages, tools, maxOutputTokens, contextBudget);
     const response = await provider.chat({ model: effectiveModel, messages, reasoning, signal, tools, toolChoice,
+      ...(provider.configurationControl?.observation === 'wire-v1' ? {
       onConfiguration, assertConfiguration: selected?.assertCurrent, configurationContext: selected?.configurationContext ?? { connectionRevision: null,
         requested: { model: typeof requestedModel === 'string' && requestedModel.trim() ? requestedModel.trim() : null, reasoning: reasoning ?? null },
         source: { model: requestedModel ? 'request' : 'provider-default', reasoning: 'request' } },
+      } : {}),
       maxOutputTokens: contextBudget.reservedOutputTokens ?? maxOutputTokens });
     return {
       ...(response && typeof response === 'object' ? response : { text: String(response ?? '') }),

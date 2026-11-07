@@ -446,7 +446,7 @@ export function createOpenAiCompatibleModelProvider({
     label,
     defaultModel,
     protocolProfile,
-    configurationControl: { mode: 'per-request', application: 'next-request', source: 'provider-adapter', status: 'declared' },
+    configurationControl: { mode: 'per-request', application: 'next-request', source: 'provider-adapter', status: 'declared', observation: 'wire-v1' },
     supportsTools: toolCallingEnabled,
     supportsToolsForModel: toolCallingEnabled,
     supportsReasoning: reasoningEnabled,

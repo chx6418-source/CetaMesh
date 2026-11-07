@@ -1,4 +1,5 @@
 import {projectChatContext,projectAgentModelControl} from './chat-telemetry.js';
+import { projectChatConfiguration, projectChatConfigurationObservation, chatConfigurationObservations } from './chat-configuration.js';
 import { projectChatFailureDetails, projectChatFailureMessage } from './chat-failure-details.js';
 import { explicitCollaborationIntent, explicitDelegationTarget } from './explicit-delegation.js';
 import { canDispatchTaskAgent, taskAgentUnavailableReason } from '../agent/execution-security.js';
@@ -40,6 +41,7 @@ import { blocksToText } from '../dsh-client.js';
 import { selectDshSessionModel } from '../dsh-model-selection.js';
 import { projectMessageBudget } from '../context/message-budget.js';
 import { PRODUCT_IDENTITY_PROMPT } from '../context/product-context.js';
+import { normalizeSkillReferences } from '../context/skill-references.js';
 import { OWNER_ACTOR } from '../capability/types.js';
 import { findMessageReference } from './reference-preview.js';
 import { buildOwnerContext, renderOwnerContext } from '../task/owner-context.js';
@@ -114,6 +116,7 @@ export function createChatService({
   agentExecute = null,
   agentProviders = [],
   modelRuntime = null,
+  modelCatalogRevision = null,
   buildProductContext = null,
   buildProductTurnContext = null,
   toolExecutionCoordinator = null,
@@ -139,6 +142,8 @@ export function createChatService({
   resolveWorkspace = null,
   resolveTask = null,
   handoffTask = null,
+  handoffTaskSupportsBeforeEffects = false,
+  readTaskHandoff = null,
   recordOwnerContext = null
 }) {
   // Agent Provider（阶段 06）：会话显式指定 agentProvider（如 'dsh'）时，其回合经标准
@@ -186,12 +191,14 @@ export function createChatService({
   let closePromise = null;
   let modelCatalogCache = null;
   let modelCatalogPending = null;
+  let modelCatalogSequence = 0;
 
   async function buildTurnContext(record, routing, resolved, model) {
     let snapshot = null;
     if (typeof buildProductTurnContext === 'function') {
       snapshot = await buildProductTurnContext({ record, routing, modelProvider: resolved.id, model,
         memoryQuery: readHistory(record.id).filter(message => message.role === 'user').at(-1)?.text ?? '',
+        skillRefs: normalizeSkillReferences(readHistory(record.id).findLast(message => message.role === 'user')?.skillRefs),
         requestedModel: model ?? 'provider-default',
         resolvedModel: record.lastModelResolution?.providerId === resolved.id ? record.lastModelResolution.resolvedModel : null,
         toolCalling: modelRuntime?.supportsToolCalling?.(resolved.id) ? 'supported' : 'unsupported' });
@@ -219,6 +226,7 @@ export function createChatService({
       const historyStore = loadChatFile(historyFile(record.id), null);
       if (historyStore?.activeTurn?.turnId && historyStore.activeTurn.id) {
         const interrupted = interruptedChatActivity(historyStore.activeTurn, now());
+        Object.assign(interrupted, chatConfigurationObservations(historyStore.activeTurn));
         const messages = Array.isArray(historyStore.messages) ? historyStore.messages : [];
         if (!messages.some(message => message.id === interrupted.id)) messages.push(interrupted);
         writeJsonAtomic(historyFile(record.id), { schemaVersion: SCHEMA_VERSION, messages });
@@ -251,6 +259,9 @@ export function createChatService({
       runtimeProvider: typeof record.runtimeProvider === 'string' ? record.runtimeProvider : null,
       taskId: typeof record.taskId === 'string' ? record.taskId : null,
       interruptedAt: Number(record.interruptedAt) || null,
+      configurationRevision: Number.isSafeInteger(record.configurationRevision) && record.configurationRevision >= 0 ? record.configurationRevision : 0,
+      configuration: record.configuration && typeof record.configuration === 'object' ? projectChatConfiguration({ ...record, pendingConfiguration: null }) : null,
+      pendingConfiguration: normalizePendingConfiguration(record.pendingConfiguration),
       lastModelResolution: record.lastModelResolution && typeof record.lastModelResolution === 'object'
         ? { providerId: String(record.lastModelResolution.providerId ?? ''),
             requestedModel: String(record.lastModelResolution.requestedModel ?? ''),
@@ -263,8 +274,7 @@ export function createChatService({
         reasoning: boundedModelValue(record.config?.reasoning) ? record.config.reasoning : baseConfig.reasoning,
         mode: CHAT_MODES.includes(record.config?.mode) ? record.config.mode : baseConfig.mode,
         modelProvider: typeof record.config?.modelProvider === 'string' && record.config.modelProvider
-          && (externalAgent(record.config?.agentProvider) ? boundedModelValue(record.config.modelProvider)
-            : !modelRuntime || modelRuntime.isRegistered(record.config.modelProvider))
+          && boundedModelValue(record.config.modelProvider)
           ? record.config.modelProvider
           : null,
         workspaceId: typeof record.config?.workspaceId === 'string' ? record.config.workspaceId : null,
@@ -277,6 +287,103 @@ export function createChatService({
 
   function saveStore() {
     writeJsonAtomic(sessionsFile, { schemaVersion: SCHEMA_VERSION, sessions: [...sessions.values()] });
+  }
+
+  function normalizePendingConfiguration(value) {
+    if (value == null) return null;
+    if (!value || typeof value !== 'object' || !boundedModelValue(value.changeId) || !value.changeId
+      || !['prepared', 'runtime-confirmed', 'needs-reconciliation'].includes(value.phase)
+      || !value.previous || !value.requested || !value.sourceBinding || value.sourceBinding.chatId === undefined) {
+      throw chatError('STORE_CORRUPT', '会话配置事务记录无效；请保留原数据并核对恢复证据');
+    }
+    return structuredClone(value);
+  }
+
+  function assertConfigurationOwner(record, state, pending = record.pendingConfiguration) {
+    if (closePromise) throw chatError('SERVICE_CLOSED', 'Chat service is closed');
+    if (sessions.get(record.id) !== record || runtime.get(record.id) !== state
+      || pending && (record.pendingConfiguration?.changeId !== pending.changeId
+        || pending.sourceBinding.chatId !== record.id
+        || record.configurationRevision !== pending.sourceBinding.configurationRevision
+        || record.taskId !== pending.sourceBinding.taskId)) {
+      throw chatError('CONFIG_RECONCILIATION_REQUIRED', '配置变更的会话归属已变化，请核对当前会话与任务');
+    }
+  }
+
+  function writeConfiguration(record, state, candidate) {
+    assertConfigurationOwner(record, state);
+    try {
+      writeJsonAtomic(sessionsFile, { schemaVersion: SCHEMA_VERSION,
+        sessions: [...sessions.values()].map(item => item === record ? candidate : item) });
+    } catch (error) {
+      if (error instanceof StorageError) throw chatError('CONFIG_SAVE_FAILED', '配置保存未完成；请核对当前配置与运行时回执后恢复');
+      throw error;
+    }
+    Object.assign(record, candidate);
+  }
+
+  function beginConfiguration(record, state, requested, task, { application, kind = 'local', before = null } = {}) {
+    assertConfigurationOwner(record, state);
+    const taskSource = kind === 'handoff' ? task?.currentAgent : null;
+    const pending = { changeId: crypto.randomUUID(), previous: { ...record.config }, requested: { ...requested },
+      sourceBinding: { chatId: record.id, taskId: record.taskId ?? null, taskRevision: task?.rev ?? null,
+        workspaceId: task?.workspaceId ?? record.config.workspaceId ?? null, provider: taskSource?.provider ?? record.runtimeProvider ?? modelAgentProvider(record) ?? null,
+        sessionId: taskSource?.sessionId ?? record.dshSessionId ?? null, configurationRevision: record.configurationRevision },
+      phase: 'prepared', kind, application, preparedAt: now(),
+      ...(before ? { before: projectAgentModelControl(before) } : {}) };
+    writeConfiguration(record, state, { ...record, pendingConfiguration: pending });
+    return pending;
+  }
+
+  function markConfigurationAttempt(record, state, pending) {
+    assertConfigurationOwner(record, state, pending);
+    const attempted = { ...pending, phase: 'needs-reconciliation', attemptedAt: now() };
+    writeConfiguration(record, state, { ...record, pendingConfiguration: attempted });
+    return attempted;
+  }
+
+  function confirmConfiguration(record, state, pending, config, binding, handoff = null, modelControl = null) {
+    assertConfigurationOwner(record, state, pending);
+    const confirmed = { ...pending, phase: pending.sessionCreated ? 'needs-reconciliation' : 'runtime-confirmed', confirmedAt: now(), confirmed: {
+      config: { ...config }, binding: { ...binding }, ...(modelControl ? { modelControl: projectAgentModelControl(modelControl) } : {}) },
+      ...(handoff ? { handoff: { taskId: handoff.taskId ?? record.taskId, sequence: handoff.sequence ?? null,
+        from: handoff.from ?? { provider: pending.sourceBinding.provider, sessionId: pending.sourceBinding.sessionId },
+        to: { ...binding }, taskRevision: handoff.task?.rev ?? null } } : {}) };
+    try { writeConfiguration(record, state, { ...record, pendingConfiguration: confirmed }); }
+    catch (error) {
+      // Preserve the real receipt even when its checkpoint write fails. A
+      // created native Session is not a model ACK; sessionCreated retains that
+      // distinction. Keep the old durable config and never report a rollback.
+      if (!closePromise && sessions.get(record.id) === record) record.pendingConfiguration = { ...confirmed, errorCode: 'CONFIG_SAVE_FAILED' };
+      throw error;
+    }
+    return confirmed;
+  }
+
+  function commitConfiguration(record, state, config, pending, changes = {}) {
+    assertConfigurationOwner(record, state, pending);
+    const candidate = { ...record, ...changes, config: { ...config }, updatedAt: now(), pendingConfiguration: null,
+      configurationRevision: record.configurationRevision + 1,
+      configuration: { changeId: pending.changeId, application: pending.application,
+        runtime: pending.sessionCreated ? 'unknown' : pending.application === 'next-turn' ? 'not-required' : pending.phase === 'runtime-confirmed' ? 'confirmed' : 'not-applied', at: now() } };
+    try { writeConfiguration(record, state, candidate); }
+    catch (error) {
+      if (!closePromise && record.pendingConfiguration?.changeId === pending.changeId) record.pendingConfiguration.errorCode = 'CONFIG_SAVE_FAILED';
+      throw chatError('CONFIG_SAVE_FAILED', '配置尚未完成保存；已保留原持久配置与运行时回执，请核对当前状态后恢复');
+    }
+    onEvent?.({ event: 'chat.updated', data: { sessionId: record.id, configuration: projectChatConfiguration(record), status: 'configuration-changed' } });
+    return publicSession(record);
+  }
+
+  function retainConfigurationFailure(record, state, pending, error) {
+    if (closePromise || sessions.get(record.id) !== record || record.pendingConfiguration?.changeId !== pending.changeId) return;
+    const retained = { ...record.pendingConfiguration, errorCode: String(error?.code ?? 'MODEL_BIND_FAILED').slice(0, 100) };
+    try { writeConfiguration(record, state, { ...record, pendingConfiguration: retained }); }
+    catch { record.pendingConfiguration = retained; }
+  }
+
+  function clearConfigurationIntent(record, state) {
+    writeConfiguration(record, state, { ...record, pendingConfiguration: null });
   }
 
   function historyFile(id) {
@@ -396,7 +503,7 @@ export function createChatService({
   }
 
   function retainActivity(record, turn, details = {}) {
-    appendChatActivity(turn, { at: now(), taskId: turn.accountingTaskId ?? record.taskId,
+    if (!details.configurationOnly) appendChatActivity(turn, { at: now(), taskId: turn.accountingTaskId ?? record.taskId,
       providerId: record.runtimeProvider ?? record.config.agentProvider ?? turn.accountingProviderId,
       sessionId: record.dshSessionId, ...details });
     turn.activityMessageId ??= `activity-${turn.id}`;
@@ -405,8 +512,10 @@ export function createChatService({
       messages: Array.isArray(store?.messages) ? store.messages : [],
       activeTurn: { id: turn.activityMessageId, role: 'assistant', text: (turn.displayText ?? '').slice(0, MAX_MESSAGE_CHARS_RETURNED),
         ...(turn.displayText?.length > MAX_MESSAGE_CHARS_RETURNED ? { textTruncated: true } : {}),
-        at: turn.activityTimeline.entries[0]?.at ?? now(),
+        at: turn.activityTimeline?.entries?.[0]?.at ?? now(),
         turnId: turn.id, requestId: turn.requestId ?? null, sourceWorkspaceId: record.config.workspaceId ?? null,
+        configurationRevision: turn.configurationRevision ?? record.configurationRevision,
+        ...chatConfigurationObservations(turn),
         toolActivity: (turn.toolActivity ?? []).map(projectChatToolActivity).filter(Boolean),
         ...(turn.agentActivity ? { agentActivity: { providerId: turn.agentActivity.providerId, label: turn.agentActivity.label, status: turn.agentActivity.status } } : {}),
         ...activityProjection(turn) } });
@@ -444,9 +553,11 @@ export function createChatService({
     return [...sessions.values()]
       .filter((record) => includeArchived || !record.archived)
       .sort((a, b) => b.updatedAt - a.updatedAt)
-      .map(({ id, title, createdAt, updatedAt, archived, config, taskId }) => ({
-        id, title, createdAt, updatedAt, archived, config, taskId: taskId ?? null
-      }));
+      .map(record => {
+        const { id, title, createdAt, updatedAt, archived, config, taskId } = record;
+        return { id, title, createdAt, updatedAt, archived, config: { ...config }, taskId: taskId ?? null,
+          configuration: projectChatConfiguration(record) };
+      });
   }
 
   function createSession({ title } = {}) {
@@ -472,7 +583,8 @@ export function createChatService({
 
   function publicSession(record) {
     const { id, title, createdAt, updatedAt, archived, config } = record;
-    return { id, title, createdAt, updatedAt, archived, config, taskId: record.taskId ?? null, dshSessionId: record.dshSessionId };
+    return { id, title, createdAt, updatedAt, archived, config: { ...config }, taskId: record.taskId ?? null, dshSessionId: record.dshSessionId,
+      configuration: projectChatConfiguration(record) };
   }
 
   function renameSession({ id, title }) {
@@ -493,6 +605,8 @@ export function createChatService({
     const record = sessionOrThrow(id);
     const sessionId = String(record.id);
     const state = runtimeOf(sessionId);
+    if (state.configChangeInFlight) throw chatError('CONFIG_BUSY', '配置变更尚未完成，请等待确认后再删除会话');
+    if (record.pendingConfiguration) throw chatError('CONFIG_RECONCILIATION_REQUIRED', '配置效果尚未对账，请先核对当前配置并保留会话证据');
     const activeProvider = record.runtimeProvider || record.config.agentProvider;
     if (state.modelTurn?.controller && !state.modelTurn.controller.signal.aborted) {
       state.modelTurn.controller.abort(Object.assign(new Error('Chat session deleted'), { code: 'INVOKE_CANCELLED' }));
@@ -582,8 +696,9 @@ export function createChatService({
       if (endIndex < 0) throw chatError('INVALID_CURSOR', '历史消息游标不存在');
       startIndex = Math.max(0, endIndex - count);
     }
-    const page = all.slice(startIndex, endIndex).map(({ modelContinuation, modelMessages, ...message }) => ({
+    const page = all.slice(startIndex, endIndex).map(({ modelContinuation, modelMessages, configurationObservation, configurationObservations, ...message }) => ({
       ...message,
+      ...chatConfigurationObservations({ configurationObservation, configurationObservations }),
       text: typeof message.text === 'string' && message.text.length > MAX_MESSAGE_CHARS_RETURNED
         ? message.text.slice(0, MAX_MESSAGE_CHARS_RETURNED)
         : message.text
@@ -618,6 +733,7 @@ export function createChatService({
     const record = sessionOrThrow(params.id);
     const state = runtimeOf(record.id);
     if (state.configChangeInFlight) throw chatError('CONFIG_BUSY', '当前会话正在应用配置变更');
+    if (record.pendingConfiguration) throw chatError('CONFIG_RECONCILIATION_REQUIRED', '前次配置变更尚未对账，请先核对当前状态后恢复');
     // Lock before asynchronous validation; one owner releases the transaction.
     state.configChangeInFlight = true;
     try { return await applyConfig(params); }
@@ -626,6 +742,8 @@ export function createChatService({
 
   async function applyConfig({ id, config } = {}) {
     const record = sessionOrThrow(id);
+    if (!config || typeof config !== 'object' || Array.isArray(config)) throw chatError('INVALID_PARAMS', 'config 必须是配置对象');
+    config = { ...config };
     const requestedAgent = config?.agentProvider === undefined || config.agentProvider === record.config.agentProvider
       ? modelAgentProvider(record) : config.agentProvider;
     if (config?.provider !== undefined && !PROVIDERS.includes(config.provider)) {
@@ -736,168 +854,280 @@ export function createChatService({
     if (modelConfigChanged && !agentProviderChanged && linkedTask?.currentAgent && !record.dshSessionId) {
       throw chatError('TASK_HANDOFF_REQUIRED','任务仍保留原执行者，请先在任务详情恢复并核验会话后再修改模型');
     }
+    assertConfigurationOwner(record, state);
     const previousAgentSession = agentProviderChanged ? previousProviderSession(record, previousAgentProvider) : null;
-    if (releasedTask && (agentProviderChanged || modelConfigChanged || workspaceChanged)) {
+    if (releasedTask && executionChanged) {
       if (externalAgent(nextConfig.agentProvider) && modelConfigChanged && !agentProviderChanged) {
-        throw chatError('AGENT_MODEL_SESSION_REQUIRED','任务已释放 Agent，请先从任务恢复入口建立并确认会话');
+        throw chatError('AGENT_MODEL_SESSION_REQUIRED', '任务已释放 Agent，请先从任务恢复入口建立并确认会话');
       }
-      // The authoritative Task has ended and released its executor. Keep its history,
-      // but do not require a live Handoff or reuse its obsolete Chat session binding.
-      const candidate = { ...record, taskId: null, dshSessionId: null, runtimeProvider: null,
-        config: nextConfig, updatedAt: now() };
-      // Commit the candidate before changing the live record or cancelling Follow.
-      writeJsonAtomic(sessionsFile, { schemaVersion: SCHEMA_VERSION,
-        sessions: [...sessions.values()].map(item => item === record ? candidate : item) });
-      Object.assign(record, candidate);
+      const pending = beginConfiguration(record, state, nextConfig, linkedTask, {
+        application: externalAgent(nextConfig.agentProvider) ? 'requires-new-session' : 'next-turn' });
+      const result = commitConfiguration(record, state, nextConfig, pending, { taskId: null, dshSessionId: null, runtimeProvider: null });
       stopFollow(record.id);
-      // This historical Chat no longer owns the provider session. Another Task may
-      // have acquired it; only its current execution owner may close it.
-      return publicSession(record);
+      return result;
     }
-    if (agentProviderChanged) {
-      if (record.taskId) {
-        const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
-        if (!task || !task.currentAgent
-          || task.currentAgent.provider !== (record.runtimeProvider || previousAgentProvider)
-          || (record.dshSessionId && task.currentAgent.sessionId !== record.dshSessionId)) {
-          throw chatError('TASK_SESSION_MISMATCH', 'Chat Agent Session does not own the attached Task');
-        }
-        if (!nextConfig.agentProvider || nextConfig.agentProvider === AGENT_PROVIDER_DISABLED || typeof handoffTask !== 'function') {
-          throw chatError('TASK_HANDOFF_REQUIRED', 'Task Agent changes require Continuity handoff');
-        }
-        await prepareTaskContext({ record, taskId: task.id });
-        const transferred = await handoffTask({ taskId: task.id, reason: 'provider-switch', targetProvider: nextConfig.agentProvider,
-          modelProvider: nextConfig.modelProvider || undefined, model: nextConfig.model || undefined, reasoningEffort: nextConfig.reasoning || undefined });
-        const confirmed = projectAgentModelControl(transferred.modelControl);
-        if (externalAgent(nextConfig.agentProvider) && confirmed?.status==='available' && confirmed.application==='runtime-confirmed') {
-          nextConfig.model=confirmed.selection?.model??'';
-          nextConfig.modelProvider=confirmed.selection?.modelProvider??null;
-          nextConfig.reasoning=confirmed.selection?.reasoningEffort??'';
-        }
-        stopFollow(record.id);
-        record.config = nextConfig;
-        record.dshSessionId = transferred.to.sessionId;
-        record.runtimeProvider = transferred.to.provider;
-        touch(record);
-        ensureFollow(record);
-        return publicSession(record);
-      }
-      record.config = nextConfig;
+    if (agentProviderChanged && !record.taskId) {
+      const pending = beginConfiguration(record, state, nextConfig, linkedTask, {
+        application: externalAgent(nextConfig.agentProvider) ? 'requires-new-session' : 'next-turn' });
+      const result = commitConfiguration(record, state, nextConfig, pending, { dshSessionId: null, runtimeProvider: null });
       stopFollow(record.id);
-      record.dshSessionId = null;
-      record.runtimeProvider = null;
-      touch(record);
-      saveStore();
       closePreviousProviderSession(record, previousAgentSession, '已切换到新 Agent');
-      return publicSession(record);
+      return result;
     }
-    // 模型/reasoning 变更即时生效：仍在 DSH 通道上的会话立即重新绑定（切换模型验收项）；
-    // 已走 Model Runtime 的会话没有 DSH 绑定可刷——丢弃遗留 DSH 会话，模型下次回合生效。
-    if (record.dshSessionId && modelConfigChanged) {
-      const agentActive = previousConfig.agentProvider !== AGENT_PROVIDER_DISABLED && (record.runtimeProvider || previousConfig.agentProvider);
-      if (agentActive) {
-        const provider = record.runtimeProvider || previousConfig.agentProvider;
-        if (typeof agentExecute !== 'function') {
-          throw chatError('PROVIDER_ERROR', `Agent 运行时不可用，无法应用 ${provider} 的模型/推理设置。`);
+    const handoffSource = agentProviderChanged && record.taskId ? linkedTask?.currentAgent : null;
+    const handoffProvider = record.runtimeProvider || previousAgentProvider || handoffSource?.provider;
+    if (agentProviderChanged && record.taskId) {
+      if (linkedTask?.id !== record.taskId || !linkedTask.currentAgent || linkedTask.currentAgent.provider !== handoffProvider
+        || record.dshSessionId && linkedTask.currentAgent.sessionId !== record.dshSessionId) {
+        throw chatError('TASK_SESSION_MISMATCH', 'Chat Agent Session does not own the attached Task');
+      }
+      if (record.config.workspaceId && linkedTask.workspaceId !== record.config.workspaceId) {
+        throw chatError('WORKSPACE_RECONCILIATION_REQUIRED', '已绑定 Task 的工作区已变化，请先在任务详情核对归属');
+      }
+      if (!nextConfig.agentProvider || nextConfig.agentProvider === AGENT_PROVIDER_DISABLED || typeof handoffTask !== 'function') {
+        throw chatError('TASK_HANDOFF_REQUIRED', 'Task Agent changes require Continuity handoff');
+      }
+    }
+    const agentActive = previousConfig.agentProvider !== AGENT_PROVIDER_DISABLED && (record.runtimeProvider || previousConfig.agentProvider);
+    if (agentProviderChanged && record.taskId || record.dshSessionId && modelConfigChanged && agentActive) {
+      const provider = agentProviderChanged && record.taskId ? handoffProvider : record.runtimeProvider || previousConfig.agentProvider;
+      // Restart invalidates Chat's live projection, not its persisted Task ID.
+      // Only a provider-changing handoff can use the matching Task's current
+      // source; Continuity still proves transport, execution and effects.
+      const sourceSessionId = record.dshSessionId ?? (agentProviderChanged && record.taskId ? linkedTask?.currentAgent?.sessionId : null);
+      const native = externalAgent(provider);
+      if (typeof agentExecute !== 'function') throw chatError('PROVIDER_ERROR', 'Agent 运行时不可用，无法应用模型设置');
+      let before = null;
+      if (!agentProviderChanged && native) {
+        const observed = await agentExecute({ method: 'agent.status', params: { provider, sessionId: record.dshSessionId } });
+        assertConfigurationOwner(record, state);
+        assertConfigurationStatus(observed);
+        before = projectAgentModelControl(observed.modelControl);
+        if (before?.status !== 'available') throw chatError('AGENT_MODEL_UNSUPPORTED', '当前 Agent 未提供已确认的模型控制能力');
+        if (before.application !== 'runtime-confirmed') throw chatError('TASK_HANDOFF_REQUIRED', '此 Agent 的配置需要通过任务交接或新会话应用');
+        if (nextConfig.modelProvider !== previousConfig.modelProvider && nextConfig.modelProvider
+          && before.selection?.modelProvider !== nextConfig.modelProvider) throw chatError('AGENT_MODEL_UNSUPPORTED', '所选模型提供方不属于当前 Agent 的已确认连接');
+        if (nextConfig.model !== previousConfig.model && !before.model?.options.some(option => option.value === nextConfig.model)) {
+          throw chatError('AGENT_MODEL_UNSUPPORTED', '所选模型不在当前 Agent 的目录中');
         }
-        try {
-          const native = externalAgent(provider);
-          let before;
-          if (native) {
-            const observed = await agentExecute({method:'agent.status',params:{provider,sessionId:record.dshSessionId}});
-            if (observed?.running || observed?.waitingForApproval || observed?.approvalId || Number(observed?.queued)>0) {
-              throw chatError('TURN_BUSY','Agent 正在执行或等待审批，请在安全点切换模型');
-            }
-            if (observed?.running !== false || observed?.runtimeValid === false || ['unknown','outcome-unknown','reconciliation-required'].includes(observed?.state)) {
-              throw chatError('CONFIG_RECONCILIATION_REQUIRED','Agent 执行状态尚未确认，请先在任务详情核验');
-            }
-            before = projectAgentModelControl(observed.modelControl);
-            if (before?.status !== 'available') throw chatError('AGENT_MODEL_UNSUPPORTED','当前 Agent 未提供已确认的模型控制能力');
-            if (before.application !== 'runtime-confirmed') throw chatError('TASK_HANDOFF_REQUIRED','此 Agent 的配置需要通过任务交接或新会话应用');
-            if (nextConfig.modelProvider !== previousConfig.modelProvider && nextConfig.modelProvider
-              && before.selection?.modelProvider !== nextConfig.modelProvider) {
-              throw chatError('AGENT_MODEL_UNSUPPORTED','所选模型提供方不属于当前 Agent 的已确认连接');
-            }
-            if (nextConfig.model !== previousConfig.model && !before.model?.options.some(option=>option.value===nextConfig.model)) {
-              throw chatError('AGENT_MODEL_UNSUPPORTED','所选模型不在当前 Agent 的目录中');
-            }
-            if (nextConfig.reasoning !== previousConfig.reasoning && !before.reasoning?.options.some(option=>option.value===nextConfig.reasoning)) {
-              throw chatError('MODEL_REASONING_UNSUPPORTED','当前 Agent 未声明所选推理选项');
-            }
+        if (nextConfig.reasoning !== previousConfig.reasoning && !before.reasoning?.options.some(option => option.value === nextConfig.reasoning)) {
+          throw chatError('MODEL_REASONING_UNSUPPORTED', '当前 Agent 未声明所选推理选项');
+        }
+      }
+      let configurationTask = linkedTask;
+      if (record.taskId && (native || agentProviderChanged)) {
+        if (!linkedTask?.currentAgent || linkedTask.currentAgent.provider !== provider
+          || linkedTask.currentAgent.sessionId !== sourceSessionId) throw chatError('TASK_SESSION_MISMATCH', '当前 Chat 不再拥有该任务执行会话');
+        if (typeof handoffTask !== 'function') throw chatError('TASK_HANDOFF_REQUIRED', '任务模型变更需要通过任务详情的交接或恢复入口完成');
+        await prepareTaskContext({ record, taskId: linkedTask.id });
+        configurationTask = await resolveTask(record.taskId);
+        assertConfigurationOwner(record, state);
+        if (configurationTask?.id !== record.taskId || configurationTask.currentAgent?.provider !== provider || configurationTask.currentAgent.sessionId !== sourceSessionId
+          || record.config.workspaceId && configurationTask.workspaceId !== record.config.workspaceId) throw chatError('TASK_SESSION_MISMATCH', '准备配置期间任务执行归属已变化');
+      }
+      let pending = beginConfiguration(record, state, nextConfig, configurationTask, {
+        application: externalAgent(nextConfig.agentProvider || provider) ? 'runtime-confirmed' : 'next-turn',
+        kind: record.taskId && (native || agentProviderChanged) ? 'handoff' : 'native', before });
+      try {
+        if (pending.kind !== 'handoff' || handoffTaskSupportsBeforeEffects !== true) pending = markConfigurationAttempt(record, state, pending);
+        let transferred = null, applied;
+        if (pending.kind === 'handoff') {
+          transferred = await handoffTask({ taskId: linkedTask.id, reason: agentProviderChanged ? 'provider-switch' : 'owner-request',
+            ...(handoffTaskSupportsBeforeEffects === true ? { onBeforeEffects: source => {
+              assertConfigurationOwner(record, state, pending);
+              const expected = pending.sourceBinding;
+              if (source?.taskId !== expected.taskId || source.taskRevision !== expected.taskRevision || source.workspaceId !== expected.workspaceId
+                || source.provider !== expected.provider || source.sessionId !== expected.sessionId) {
+                throw chatError('TASK_SESSION_MISMATCH', '交接效果边界的任务源与持久配置意图不一致');
+              }
+              pending = markConfigurationAttempt(record, state, pending);
+            } } : {}),
+            expectedConfigurationSource: { taskId: record.taskId, taskRevision: pending.sourceBinding.taskRevision,
+              workspaceId: pending.sourceBinding.workspaceId, provider: pending.sourceBinding.provider, sessionId: pending.sourceBinding.sessionId },
+            targetProvider: nextConfig.agentProvider || provider,
+            model: nextConfig.model !== previousConfig.model ? nextConfig.model || undefined : before?.selection?.model,
+            modelProvider: nextConfig.modelProvider || before?.selection?.modelProvider || undefined,
+            reasoningEffort: nextConfig.reasoning !== previousConfig.reasoning ? nextConfig.reasoning || undefined : before?.selection?.reasoningEffort ?? undefined });
+          assertConfigurationOwner(record, state, pending);
+          if (transferred?.to?.provider !== (nextConfig.agentProvider || provider) || !transferred.to.sessionId) {
+            throw chatError('TASK_SESSION_MISMATCH', '任务交接未返回确认的目标会话');
           }
-          let transferred = null;
-          let applied;
-          if (native && record.taskId) {
-            if (!linkedTask?.currentAgent || linkedTask.currentAgent.provider !== provider
-              || linkedTask.currentAgent.sessionId !== record.dshSessionId) throw chatError('TASK_SESSION_MISMATCH','当前 Chat 不再拥有该任务执行会话');
-            if (typeof handoffTask !== 'function') throw chatError('TASK_HANDOFF_REQUIRED','任务模型变更需要通过任务详情的交接或恢复入口完成');
-            await prepareTaskContext({record,taskId:linkedTask.id});
-            transferred = await handoffTask({taskId:linkedTask.id,reason:'owner-request',targetProvider:provider,
-              model:nextConfig.model !== previousConfig.model ? nextConfig.model : before.selection?.model,
-              modelProvider:nextConfig.modelProvider || before.selection?.modelProvider || undefined,
-              reasoningEffort:nextConfig.reasoning !== previousConfig.reasoning ? nextConfig.reasoning : before.selection?.reasoningEffort ?? undefined});
-            if (transferred?.to?.provider !== provider || !transferred.to.sessionId) throw chatError('TASK_SESSION_MISMATCH','任务交接未返回确认的目标会话');
-            applied = transferred.modelControl ? transferred : await agentExecute({method:'agent.status',params:transferred.to});
-          } else applied = await agentExecute({ method: 'agent.selectModel', params: {
-            provider,
-            sessionId: record.dshSessionId,
+          // Continuity remains the owner of the handoff and its Task revision.
+          // Keep its receipt even if target status or the Chat checkpoint fails.
+          pending = { ...pending, handoff: { taskId: transferred.taskId ?? record.taskId, sequence: transferred.sequence ?? null,
+            from: transferred.from ?? { provider, sessionId: pending.sourceBinding.sessionId }, to: { ...transferred.to }, taskRevision: transferred.task?.rev ?? null } };
+          writeConfiguration(record, state, { ...record, pendingConfiguration: pending });
+          const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
+          assertConfigurationOwner(record, state, pending);
+          if (!task?.currentAgent || task.currentAgent.provider !== transferred.to.provider || task.currentAgent.sessionId !== transferred.to.sessionId
+            || transferred.task?.rev != null && task.rev !== transferred.task.rev) throw chatError('TASK_SESSION_MISMATCH', '任务交接回执与当前执行归属不一致');
+          applied = transferred.modelControl ? transferred : await agentExecute({ method: 'agent.status', params: transferred.to });
+        } else {
+          applied = await agentExecute({ method: 'agent.selectModel', params: { provider, sessionId: record.dshSessionId,
             ...(native ? {
-              ...(nextConfig.model !== previousConfig.model ? {model:nextConfig.model} : {}),
-              ...(nextConfig.modelProvider !== previousConfig.modelProvider ? {modelProvider:nextConfig.modelProvider} : {}),
-              ...(nextConfig.reasoning !== previousConfig.reasoning ? {reasoningEffort:nextConfig.reasoning} : {})
-            } : {model:nextConfig.model,modelProvider:nextConfig.modelProvider,reasoningEffort:nextConfig.reasoning})
-          } });
-          if (native) {
-            const confirmed = projectAgentModelControl(applied?.modelControl);
-            if (confirmed?.status !== 'available' || confirmed.application !== 'runtime-confirmed'
-              || confirmed.selection?.model !== (nextConfig.model !== previousConfig.model ? nextConfig.model : before.selection?.model)
-              || (nextConfig.reasoning !== previousConfig.reasoning && confirmed.selection?.reasoningEffort !== nextConfig.reasoning)
-              || (nextConfig.modelProvider && confirmed.selection?.modelProvider !== nextConfig.modelProvider)) {
-              throw chatError('MODEL_ACK_MISMATCH','Agent 未确认所选模型或推理设置，已保留原配置；请重新核验运行时状态');
-            }
-            nextConfig.model = confirmed.selection.model;
-            nextConfig.reasoning = confirmed.selection.reasoningEffort ?? '';
-            nextConfig.modelProvider = confirmed.selection.modelProvider ?? null;
+              ...(nextConfig.model !== previousConfig.model ? { model: nextConfig.model } : {}),
+              ...(nextConfig.modelProvider !== previousConfig.modelProvider ? { modelProvider: nextConfig.modelProvider } : {}),
+              ...(nextConfig.reasoning !== previousConfig.reasoning ? { reasoningEffort: nextConfig.reasoning } : {})
+            } : { model: nextConfig.model, modelProvider: nextConfig.modelProvider, reasoningEffort: nextConfig.reasoning }) } });
+        }
+        assertConfigurationOwner(record, state, pending);
+        const confirmed = projectAgentModelControl(applied?.modelControl);
+        const targetNative = externalAgent(transferred?.to?.provider || provider);
+        const createdOnly = targetNative && agentProviderChanged && transferred
+          && (confirmed?.status !== 'available' || confirmed.application !== 'runtime-confirmed' || !confirmed.selection?.model);
+        if (createdOnly) {
+          // Continuity has completed the new Session and its bootstrap. Save
+          // the Agent assignment, while its model remains explicitly unknown.
+          pending = { ...pending, application: 'requires-new-session', sessionCreated: true };
+        } else if (targetNative) {
+          const expectedModel = agentProviderChanged ? null : nextConfig.model !== previousConfig.model ? nextConfig.model : before?.selection?.model;
+          const expectedReasoning = nextConfig.reasoning !== previousConfig.reasoning ? nextConfig.reasoning : before?.selection?.reasoningEffort;
+          const expectedModelProvider = nextConfig.modelProvider || before?.selection?.modelProvider || null;
+          if (confirmed?.status !== 'available' || confirmed.application !== 'runtime-confirmed' || !confirmed.selection?.model
+            || expectedModel && confirmed.selection.model !== expectedModel
+            || !agentProviderChanged && (confirmed.selection.reasoningEffort ?? null) !== (expectedReasoning ?? null)
+            || !agentProviderChanged && (confirmed.selection.modelProvider ?? null) !== expectedModelProvider) {
+            throw chatError('MODEL_ACK_MISMATCH', 'Agent 未确认所选模型或推理设置；已保留原持久配置，请核对实际运行时状态');
           }
-          const candidate={...record,config:nextConfig,updatedAt:now(),
-            ...(transferred?{dshSessionId:transferred.to.sessionId,runtimeProvider:transferred.to.provider}:{})};
-          writeJsonAtomic(sessionsFile,{schemaVersion:SCHEMA_VERSION,sessions:[...sessions.values()].map(item=>item===record?candidate:item)});
-          if(transferred)stopFollow(record.id);
-          Object.assign(record,candidate);
-          if(transferred)ensureFollow(record);
-          return publicSession(record);
-        } catch (error) {
-          if (['TURN_BUSY','CONFIG_RECONCILIATION_REQUIRED','AGENT_MODEL_UNSUPPORTED','MODEL_REASONING_UNSUPPORTED','TASK_HANDOFF_REQUIRED','MODEL_ACK_MISMATCH',
-            'WORKSPACE_UNVERIFIED','WORKSPACE_CHANGED','HANDOFF_RECOVERY_REQUIRED','ROLLOVER_NOT_SAFE','SESSION_EXECUTION_UNCONFIRMED','TASK_SESSION_MISMATCH'].includes(error?.code)) throw error;
-          throw chatError('MODEL_BIND_FAILED', `Agent 模型切换失败（${provider}）：${error?.message ?? error}`);
+          nextConfig.model = confirmed.selection.model;
+          nextConfig.reasoning = confirmed.selection.reasoningEffort ?? '';
+          nextConfig.modelProvider = confirmed.selection.modelProvider ?? null;
         }
-      }
-      const modelPathAvailable = Boolean(modelRuntime && (nextConfig.modelProvider || modelRuntime.defaultProviderId()));
-      if (!modelPathAvailable) {
-        try {
-          await selectModel(record, undefined, nextConfig);
-          record.config = nextConfig;
-          touch(record);
-          return publicSession(record);
-        } catch (error) {
-          throw chatError('MODEL_BIND_FAILED', `模型切换失败：${error?.message ?? error}`);
+        const binding = transferred?.to ?? { provider, sessionId: record.dshSessionId };
+        pending = confirmConfiguration(record, state, pending, nextConfig, binding, transferred, confirmed);
+        const result = commitConfiguration(record, state, nextConfig, pending,
+          transferred ? { dshSessionId: binding.sessionId, runtimeProvider: binding.provider } : {});
+        if (transferred) { stopFollow(record.id); ensureFollow(record); }
+        return result;
+      } catch (error) {
+        // Only a trusted Continuity boundary permits leaving the intent as
+        // prepared through read-only preflight. Older callbacks stay unknown.
+        if (!closePromise && pending.kind === 'handoff' && handoffTaskSupportsBeforeEffects === true && !Number.isFinite(pending.attemptedAt)) {
+          clearConfigurationIntent(record, state);
         }
+        // A rejected tuple can still have applied one native option. Only a
+        // fresh, exact runtime observation can establish no configuration effect.
+        if (!closePromise && pending.kind === 'native' && pending.before && pending.attemptedAt
+          && record.pendingConfiguration?.phase !== 'runtime-confirmed' && error?.code !== 'MODEL_ACK_MISMATCH') {
+          try {
+            const observed = await agentExecute({ method: 'agent.status', params: { provider, sessionId: pending.sourceBinding.sessionId } });
+            assertConfigurationOwner(record, state, pending); assertConfigurationStatus(observed);
+            const current = projectAgentModelControl(observed.modelControl);
+            if (current?.status === 'available' && current.application === 'runtime-confirmed'
+              && sameConfigurationSelection(current.selection, pending.before.selection)) clearConfigurationIntent(record, state);
+          } catch { /* Unknown effects retain their intent and remain non-replayable. */ }
+        }
+        if (record.pendingConfiguration) retainConfigurationFailure(record, state, pending, error);
+        if (error instanceof StorageError) throw chatError('CONFIG_SAVE_FAILED', '运行时回执尚未完成保存；请核对当前状态后恢复');
+        throw error;
       }
-      const previousModelSession = previousProviderSession(record, previousAgentProvider);
-      record.config = nextConfig;
-      stopFollow(record.id);
-      record.dshSessionId = null;
-      record.runtimeProvider = null;
-      touch(record);
-      closePreviousProviderSession(record, previousModelSession, '已切换到 Model Runtime');
-      return publicSession(record);
     }
     if (externalAgent(nextConfig.agentProvider) && modelConfigChanged && !agentProviderChanged) {
-      throw chatError('AGENT_MODEL_SESSION_REQUIRED','Agent 会话尚未连接，模型配置需先由运行时确认');
+      throw chatError('AGENT_MODEL_SESSION_REQUIRED', 'Agent 会话尚未连接，模型配置需先由运行时确认');
     }
-    record.config = nextConfig;
-    touch(record);
-    return publicSession(record);
+    // Managed configuration is a persisted next-turn request, not a native ACK.
+    // A configured Runtime with no enabled model must never silently call DSH.
+    if (record.dshSessionId && modelConfigChanged && !modelRuntime) {
+      let pending = beginConfiguration(record, state, nextConfig, linkedTask, { application: 'runtime-confirmed', kind: 'legacy-dsh' });
+      try {
+        pending = markConfigurationAttempt(record, state, pending);
+        await selectModel(record, undefined, nextConfig);
+        assertConfigurationOwner(record, state, pending);
+        pending = confirmConfiguration(record, state, pending, nextConfig, { provider: 'dsh', sessionId: record.dshSessionId });
+        return commitConfiguration(record, state, nextConfig, pending);
+      } catch (error) { retainConfigurationFailure(record, state, pending, error); throw chatError('MODEL_BIND_FAILED', 'DSH 配置结果或保存尚未确认，请核对原会话'); }
+    }
+    const pending = beginConfiguration(record, state, nextConfig, linkedTask, { application: 'next-turn' });
+    const previousModelSession = modelConfigChanged && record.dshSessionId ? previousProviderSession(record, previousAgentProvider) : null;
+    const result = commitConfiguration(record, state, nextConfig, pending,
+      previousModelSession ? { dshSessionId: null, runtimeProvider: null } : {});
+    if (previousModelSession) { stopFollow(record.id); closePreviousProviderSession(record, previousModelSession, '已切换到 Model Runtime'); }
+    return result;
+  }
+
+  function sameConfigurationSelection(left, right) {
+    return left?.model === right?.model && (left?.modelProvider ?? null) === (right?.modelProvider ?? null)
+      && (left?.reasoningEffort ?? null) === (right?.reasoningEffort ?? null);
+  }
+
+  function assertConfigurationStatus(observed) {
+    if (observed?.running || observed?.waitingForApproval || observed?.approvalId || Number(observed?.queued) > 0) {
+      throw chatError('TURN_BUSY', 'Agent 正在执行或等待审批，请在安全点核对配置');
+    }
+    if (observed?.running !== false || observed?.runtimeValid === false
+      || ['unknown', 'outcome-unknown', 'reconciliation-required'].includes(observed?.state)) {
+      throw chatError('CONFIG_RECONCILIATION_REQUIRED', 'Agent 执行状态尚未确认，请先在任务详情核验');
+    }
+  }
+
+  async function reconcileConfiguration({ id } = {}) {
+    const record = sessionOrThrow(id), state = runtimeOf(record.id);
+    if (state.configChangeInFlight) throw chatError('CONFIG_BUSY', '当前会话正在应用配置变更');
+    if (state.turn) throw chatError('TURN_BUSY', '请在当前回合结束后核对配置');
+    if (!record.pendingConfiguration) return publicSession(record);
+    state.configChangeInFlight = true;
+    const pending = record.pendingConfiguration;
+    try {
+      assertConfigurationOwner(record, state, pending);
+      if (!Number.isFinite(pending.attemptedAt)) { clearConfigurationIntent(record, state); return publicSession(record); }
+      if (pending.kind === 'legacy-dsh') throw chatError('CONFIG_RECONCILIATION_REQUIRED', '旧 DSH 通道无法提供独立配置观测，请通过原会话恢复入口核验');
+      let binding = { provider: pending.sourceBinding.provider, sessionId: pending.sourceBinding.sessionId };
+      let receipt = pending.handoff ?? null;
+      let taskSnapshot = null;
+      if (record.taskId) {
+        const task = typeof resolveTask === 'function' ? await resolveTask(record.taskId) : null;
+        assertConfigurationOwner(record, state, pending);
+        if (!task || task.workspaceId !== pending.sourceBinding.workspaceId
+          || ['running', 'starting', 'dispatching', 'waiting-approval', 'unknown', 'outcome-unknown', 'cancel-unconfirmed'].includes(task.executionObservation?.state)
+          || task.delegationProposal?.state === 'unknown') throw chatError('CONFIG_RECONCILIATION_REQUIRED', '任务执行状态尚未确认，请先在任务详情核验');
+        if (pending.kind === 'handoff') {
+          if (!receipt && typeof readTaskHandoff === 'function') receipt = await readTaskHandoff({ taskId: record.taskId, from: binding });
+          assertConfigurationOwner(record, state, pending);
+          if (!receipt) throw chatError('CONFIG_RECONCILIATION_REQUIRED', '任务交接尚无完成回执；原执行者的模型确认不能证明交接，请先在任务详情核验');
+          if (receipt) {
+            if (receipt.taskId !== record.taskId || receipt.from?.provider !== binding.provider || receipt.from?.sessionId !== binding.sessionId
+              || receipt.to?.provider !== (pending.requested.agentProvider || binding.provider)
+              || !receipt.to?.sessionId || receipt.taskRevision != null && task.rev < receipt.taskRevision) {
+              throw chatError('TASK_SESSION_MISMATCH', '交接回执不属于当前配置变更或任务版本');
+            }
+            binding = receipt.to;
+          }
+        }
+        if (!task.currentAgent || task.currentAgent.provider !== binding.provider || task.currentAgent.sessionId !== binding.sessionId) {
+          throw chatError('TASK_SESSION_MISMATCH', '配置恢复未取得当前 Task 执行归属的交接证据');
+        }
+        taskSnapshot = task;
+      } else if (record.dshSessionId && (record.dshSessionId !== binding.sessionId || record.runtimeProvider !== binding.provider)) {
+        throw chatError('TASK_SESSION_MISMATCH', '配置恢复的原 Agent 会话已变化');
+      }
+      if (!binding.provider || !binding.sessionId || typeof agentExecute !== 'function') throw chatError('CONFIG_RECONCILIATION_REQUIRED', '原运行时身份不可核验，请保留配置回执');
+      const observed = await agentExecute({ method: 'agent.status', params: binding });
+      assertConfigurationOwner(record, state, pending); assertConfigurationStatus(observed);
+      if (taskSnapshot) {
+        const current = await resolveTask(record.taskId);
+        assertConfigurationOwner(record, state, pending);
+        if (current?.rev !== taskSnapshot.rev || current.workspaceId !== taskSnapshot.workspaceId
+          || current.currentAgent?.provider !== binding.provider || current.currentAgent?.sessionId !== binding.sessionId) {
+          throw chatError('TASK_SESSION_MISMATCH', '核对运行时期间任务版本或执行归属已变化，请刷新后重新核对');
+        }
+      }
+      const confirmed = projectAgentModelControl(observed.modelControl);
+      const modelConfirmed = confirmed?.status === 'available' && confirmed.application === 'runtime-confirmed' && confirmed.selection?.model;
+      const createdOnly = !modelConfirmed && pending.kind === 'handoff' && receipt
+        && pending.requested.agentProvider !== pending.previous.agentProvider;
+      if (!modelConfirmed && !createdOnly) {
+        throw chatError('CONFIG_RECONCILIATION_REQUIRED', '当前 Agent 仍未确认实际模型配置，请通过任务或 Agent 恢复入口核验');
+      }
+      const config = createdOnly ? { ...pending.requested } : { ...pending.requested, model: confirmed.selection.model,
+        modelProvider: confirmed.selection.modelProvider ?? null, reasoning: confirmed.selection.reasoningEffort ?? '' };
+      const recoveredIntent = createdOnly ? { ...pending, application: 'requires-new-session', sessionCreated: true } : pending;
+      const checkpoint = confirmConfiguration(record, state, recoveredIntent, config, binding,
+        receipt ? { ...receipt, task: { rev: receipt.taskRevision } } : null, confirmed);
+      const result = commitConfiguration(record, state, config, checkpoint, { dshSessionId: binding.sessionId, runtimeProvider: binding.provider });
+      if (record.taskId) { stopFollow(record.id); ensureFollow(record); }
+      return result;
+    } catch (error) { retainConfigurationFailure(record, state, pending, error); throw error; }
+    finally { state.configChangeInFlight = false; }
   }
 
   async function selectModel(record, signal, config = record.config) {
@@ -974,37 +1204,24 @@ export function createChatService({
     const agentProviders = [...selectableAgentProviders.values()].map(chatAgentProvider);
     // Model Runtime 目录（独立于 DSH，DSH 不运行时依然可用）。
     // 只返回 hasKey 布尔与模型列表，绝不携带 API Key 材料。
-    let modelProviders = [];
+    const modelProviders = modelRuntime && !nativeProvider ? await cachedModelProviders(refresh) : [];
+    let defaultModelProvider = null, modelAvailabilityError = null;
     if (modelRuntime && !nativeProvider) {
-      const nowAt = now();
-      if (!refresh && modelCatalogCache && nowAt - modelCatalogCache.at < MODEL_CATALOG_CACHE_MS) {
-        modelProviders = modelCatalogCache.value;
-      } else {
-        if (!refresh && modelCatalogPending) modelProviders = await modelCatalogPending;
-        else {
-          modelCatalogPending = Promise.all(modelRuntime.listProviders().map(async entry => {
-            const common = { id: entry.id, label: entry.label, hasKey: entry.hasKey, configured: entry.hasKey,
-              toolCalling: entry.toolCalling === true, settingsFields: entry.settingsFields, inferencing: null };
-            if (!entry.hasKey) return { ...common, catalogState: 'needs-setup', reachable: null, authenticated: null, models: [], error: null };
-            const listing = await modelRuntime.listModels(entry.id);
-            return { ...common, catalogState: listing.error ? 'error' : 'loaded',
-              reachable: listing.error ? null : true, authenticated: listing.error ? null : true,
-              models: listing.models, error: listing.error };
-          }));
-          try {
-            modelProviders = await modelCatalogPending;
-            modelCatalogCache = { at: now(), value: modelProviders };
-          } finally { modelCatalogPending = null; }
-        }
+      try { defaultModelProvider = modelRuntime.defaultProviderId(); }
+      catch (error) {
+        if (!['MODEL_NO_ENABLED_MODELS', 'MODEL_PROVIDER_KEY_MISSING'].includes(error?.code)) throw error;
+        modelAvailabilityError = '暂无启用且已配置的模型，请在模型与服务设置中启用或恢复连接';
       }
     }
     const modelProviderBase = {
       modelProviders,
       ...(record ? {sessionId:record.id} : {}),
-      defaultModelProvider: !nativeProvider && modelRuntime ? modelRuntime.defaultProviderId() : null,
+      defaultModelProvider,
       ...(nativeProvider ? {agentProvider:nativeProvider,modelControl} : {})
     };
     if (nativeProvider) return {providers:[],agentProviders,modes:[...CHAT_MODES],reasoning:[],models:[],error:null,...modelProviderBase};
+    if (modelRuntime) return { providers: [], agentProviders, modes: [...CHAT_MODES], reasoning: [], models: [],
+      error: modelAvailabilityError, ...modelProviderBase };
     try {
       if (typeof controlExecute !== 'function') throw chatError('DSH_UNAVAILABLE', 'DSH model catalog is unavailable');
       const value = await controlExecute({ method: 'model.catalog.list', params: {} });
@@ -1034,6 +1251,46 @@ export function createChatService({
         ...modelProviderBase
       };
     }
+  }
+
+  function catalogIdentity() {
+    return JSON.stringify([typeof modelCatalogRevision === 'function' ? modelCatalogRevision() : null,
+      modelRuntime.listProviders().map(entry => [entry.id, entry.label, entry.hasKey, entry.enabled, entry.toolCalling])]);
+  }
+
+  async function cachedModelProviders(refresh) {
+    const identity = catalogIdentity();
+    if (!refresh && modelCatalogCache?.identity === identity && now() - modelCatalogCache.at < MODEL_CATALOG_CACHE_MS) return modelCatalogCache.value;
+    let pending = !refresh && modelCatalogPending?.identity === identity ? modelCatalogPending : null;
+    if (!pending) {
+      pending = { identity, sequence: ++modelCatalogSequence, promise: Promise.all(modelRuntime.listProviders().map(async entry => {
+        const common = { id: entry.id, label: entry.label, hasKey: entry.hasKey, configured: entry.hasKey,
+          ...(typeof entry.enabled === 'boolean' ? { enabled: entry.enabled } : {}),
+          toolCalling: entry.toolCalling === true, settingsFields: entry.settingsFields, inferencing: null };
+        if (entry.enabled === false || !entry.hasKey) return { ...common, catalogState: entry.enabled === false ? 'disabled' : 'needs-setup',
+          reachable: null, authenticated: null, models: [], error: null };
+        const listing = await modelRuntime.listModels(entry.id);
+        return { ...common, catalogState: listing.error ? 'error' : listing.catalogState ?? 'loaded', catalogSource: listing.source ?? null,
+          reachable: typeof listing.observation?.reachable === 'boolean' ? listing.observation.reachable : null,
+          authenticated: typeof listing.observation?.authenticated === 'boolean' ? listing.observation.authenticated : null,
+          models: listing.models, error: listing.error };
+      })) };
+      modelCatalogPending = pending;
+    }
+    try {
+      const value = await pending.promise;
+      if (closePromise) throw chatError('SERVICE_CLOSED', 'Chat service is closed');
+      if (identity !== catalogIdentity()) throw chatError('MODEL_CONFIGURATION_CHANGED', '模型连接或凭据已变化，请刷新当前目录');
+      if (modelCatalogPending !== pending) {
+        if (modelCatalogCache?.identity === identity && modelCatalogCache.sequence >= pending.sequence) return modelCatalogCache.value;
+        throw chatError('MODEL_CONFIGURATION_CHANGED', '已有更新的模型目录请求，请刷新当前目录');
+      }
+      modelCatalogCache = { identity, sequence: pending.sequence, at: now(), value };
+      return value;
+    } catch (error) {
+      if (identity !== catalogIdentity()) throw chatError('MODEL_CONFIGURATION_CHANGED', '模型连接或凭据已变化，请刷新当前目录');
+      throw error;
+    } finally { if (modelCatalogPending === pending) modelCatalogPending = null; }
   }
 
   // ── DSH 会话与 follow 流 ─────────────────────────────────────────────────
@@ -1201,6 +1458,11 @@ export function createChatService({
           missingCount: event.seq - previousSequence - 1 });
       }
       state.turn.activitySourceSequence = event.seq;
+    }
+    if (state.modelTurn?.kind === 'model' && data.configurationObservation) observeConfiguration(record, state, data.configurationObservation);
+    if (event.type === 'model/configuration') {
+      if (record.runtimeProvider !== 'cetamesh') return false;
+      observeConfiguration(record, state, data.configurationObservation); return true;
     }
     if (event.type === 'turn/start') {
       flushUiDelta(record, state);
@@ -1373,6 +1635,8 @@ export function createChatService({
         turnId: turn.id,
         requestId: turn.requestId,
         usage: turn.usage ?? null,
+        configurationRevision: turn.configurationRevision ?? record.configurationRevision,
+        ...chatConfigurationObservations(turn),
         ...(turn.context ? {context:projectChatContext(turn.context)} : {}),
         accountingSessionId: turn.accountingSessionId ?? record.id,
         ...(turn.state === 'done' && turn.modelContinuation ? { modelContinuation: turn.modelContinuation } : {}),
@@ -1689,9 +1953,30 @@ export function createChatService({
     state.turn.context=projectChatContext(value,'active-request');
     onEvent?.({event:'chat.streaming',data:{sessionId:record.id,requestId:state.turn.requestId,status:state.turn.state,context:state.turn.context}});
   }
+  function observeConfiguration(record, state, value) {
+    const turn = state.turn;
+    if (!turn || closePromise || sessions.get(record.id) !== record || runtime.get(record.id) !== state) return;
+    const observation = projectChatConfigurationObservation(value, { chatRequestId: turn.requestId, turnId: turn.id,
+      configurationRevision: turn.configurationRevision ?? record.configurationRevision });
+    if (!observation || state.modelTurn?.kind === 'model' && observation.providerId !== state.modelTurn.providerId) return;
+    const observations = [...(turn.configurationObservations ?? [])];
+    const index = observations.findIndex(row => row.requestId === observation.requestId && row.providerId === observation.providerId);
+    if (index >= 0) {
+      if (observations[index].stage !== 'serialized' && observation.stage === 'serialized') return;
+      if (JSON.stringify(observations[index]) === JSON.stringify(observation)) return;
+      observations[index] = observation;
+    } else observations.push(observation);
+    turn.configurationObservations = observations.slice(-16);
+    turn.configurationObservation = turn.configurationObservations.at(-1);
+    retainActivity(record, turn, { configurationOnly: true });
+    onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, requestId: turn.requestId, status: turn.state,
+      ...chatConfigurationObservations(turn) } });
+  }
   function displayedContext(record,value,phase){
     const snapshot=projectChatContext(value,phase);if(!snapshot)return null;
-    const provider=record.config.modelProvider||modelRuntime?.defaultProviderId?.();
+    let provider = record.config.modelProvider;
+    try { provider ||= modelRuntime?.defaultProviderId?.(); }
+    catch (error) { if (['MODEL_NO_ENABLED_MODELS', 'MODEL_PROVIDER_KEY_MISSING'].includes(error?.code)) return null; throw error; }
     if(provider&&snapshot.providerId!==provider)return null;
     if(record.config.model&&snapshot.model!==record.config.model)return null;
     return snapshot;
@@ -1723,6 +2008,7 @@ export function createChatService({
             model: model ?? undefined,
             reasoning: record.config.reasoning,
             onContext: value=>{ if (state.turn === originatingTurn) observeContext(record,state,value); },
+            onConfiguration: value => { if (state.turn === originatingTurn) observeConfiguration(record, state, value); },
             messages,
             manifest: productContext.manifest,
             actor: OWNER_ACTOR,
@@ -1770,6 +2056,8 @@ export function createChatService({
           settleOk();
           const turn = state.turn;
           if (turn && turn === originatingTurn) {
+            if (result.configurationObservation) observeConfiguration(record, state, result.configurationObservation);
+            for (const observation of result.configurationObservations ?? []) observeConfiguration(record, state, observation);
             turn.routing = { ...(routing ?? {}), toolCalling: result.toolCalling,
               requestedModel: model ?? 'provider-default', resolvedModel: result.resolvedModel ?? null };
             if (result.resolvedModel) {
@@ -1809,6 +2097,7 @@ export function createChatService({
           messages,
           reasoning: record.config.reasoning,
           onContext: value=>{ if (state.turn === originatingTurn) observeContext(record,state,value); },
+          onConfiguration: value => { if (state.turn === originatingTurn) observeConfiguration(record, state, value); },
           signal: controller.signal
         });
         for await (const event of events) {
@@ -1819,6 +2108,7 @@ export function createChatService({
         settleOk();
       } catch (error) {
         const turn = state.turn;
+        if (turn && turn === originatingTurn && error?.configurationObservation) observeConfiguration(record, state, error.configurationObservation);
         if (turn && turn === originatingTurn && error?.usage) turn.usage = error.usage;
         settleErr(error);
         if (turn && turn === originatingTurn) {
@@ -2047,12 +2337,14 @@ export function createChatService({
   }
 
   // ── 回合操作 ─────────────────────────────────────────────────────────────
-  async function send({ id, text, attachments, clientMessageId } = {}, signal = undefined) {
+  async function send({ id, text, attachments, clientMessageId, skillRefs } = {}, signal = undefined) {
     const record = sessionOrThrow(id);
     if (signal?.aborted) throw chatError('INVOKE_CANCELLED', 'Chat 请求在受理前已取消');
     const content = typeof text==='string'&&!text.trim()&&Array.isArray(attachments)&&attachments.length ? '' : requireText(text, '消息内容', MAX_PROMPT_CHARS);
+    const references = normalizeSkillReferences(skillRefs);
     const state = runtimeOf(record.id);
     if (state.configChangeInFlight) throw chatError('CONFIG_BUSY', '当前会话正在应用配置变更');
+    if (record.pendingConfiguration) throw chatError('CONFIG_RECONCILIATION_REQUIRED', '前次配置变更尚未对账，请先核对当前运行时配置');
     let promptText = content;
     const list = normalizeAttachments(attachments,record.id);
     if(list.some(r=>r.kind==='image')&&explicitDelegationTarget(content))throw chatError('IMAGE_AGENT_UNSUPPORTED','外部 Agent 图片传递尚未获能力与授权验证，请先用 CetaMesh 视觉模型分析');
@@ -2070,6 +2362,7 @@ export function createChatService({
     if (existingIndex >= 0) {
       const existing = history[existingIndex];
       if (existing.role !== 'user' || existing.text !== content
+        || JSON.stringify(normalizeSkillReferences(existing.skillRefs)) !== JSON.stringify(references)
         || JSON.stringify(existing.attachments ?? []) !== JSON.stringify(list.map(item => item.name))
         || (existing.attachmentFingerprint && existing.attachmentFingerprint !== attachmentHash)
         || (!existing.attachmentFingerprint && list.length > 0)) {
@@ -2098,6 +2391,7 @@ export function createChatService({
       throw chatError('ATTACHMENT_STORAGE_LIMIT', '附件存储达到设置配额，请清理不再需要的附件');
     }
     const userMessage = { id: messageId, role: 'user', text: content, at: now(), attachments: list.map(item => item.name),
+      ...(references.length ? { skillRefs: references } : {}),
       attachmentRefs:list.filter(item=>item.ref).map(({ref,name,kind,size,mimeType,quality,modelRef})=>({ref,name,kind,size,mimeType,quality,modelRef})),
       attachmentFingerprint: attachmentHash, attachmentFingerprints: list.map(item => contentFingerprint(item.content)), attachmentSizeChars };
     try {
@@ -2376,6 +2670,8 @@ export function createChatService({
   }
 
   async function startTurn(record, state, promptText, { attachments = [], sourceText, retryMessageId = null } = {}) {
+    if (state.configChangeInFlight) throw chatError('CONFIG_BUSY', '当前会话正在应用配置变更');
+    if (record.pendingConfiguration) throw chatError('CONFIG_RECONCILIATION_REQUIRED', '前次配置变更尚未对账，请先核对当前运行时配置');
     // Repair a missed Work/automatic-Handoff projection from authoritative Task state.
     if (record.taskId && (record.runtimeProvider || record.dshSessionId) && typeof resolveTask === 'function'
       && record.config.agentProvider !== AGENT_PROVIDER_DISABLED) {
@@ -2393,7 +2689,7 @@ export function createChatService({
     const agentActivity = null;
     const turnId = crypto.randomUUID();
     const requestId = `cetamesh-chat-${String(record.id).slice(0, 80)}-${turnId}`;
-    state.turn = { id: turnId, requestId, accountingSessionId: record.id, accountingTaskId: record.taskId ?? null, state: 'starting', displayText: '', toolActivity: [], ...(agentActivity ? { agentActivity } : {}), error: null, usage: null, routing: null };
+    state.turn = { id: turnId, requestId, configurationRevision: record.configurationRevision, accountingSessionId: record.id, accountingTaskId: record.taskId ?? null, state: 'starting', displayText: '', toolActivity: [], ...(agentActivity ? { agentActivity } : {}), error: null, usage: null, routing: null };
     discardUiDelta(record.id);
     lastUiStreamAt.delete(record.id);
     onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'starting', requestId, reset: true, toolActivity: [], agentActivity } });
@@ -2442,6 +2738,8 @@ export function createChatService({
       return {
         id: record.id,
         taskId: record.taskId ?? null,
+        configuration: projectChatConfiguration(record),
+        ...chatConfigurationObservations(last),
         turn: null,
         context: displayedContext(record,last?.context,'last-request'),
         turnUsage: last?.role==='assistant'?last.usage??null:null,
@@ -2463,6 +2761,7 @@ export function createChatService({
     return {
       id: record.id,
       taskId: record.taskId ?? null,
+      configuration: projectChatConfiguration(record),
       dshSessionAlive: Boolean(record.dshSessionId),
       turn: {
         id: turn.id,
@@ -2477,6 +2776,7 @@ export function createChatService({
         failureStage: turn.failureStage ?? null,
         usage: turn.usage,
         context: displayedContext(record,turn.context,'active-request'),
+        ...chatConfigurationObservations(turn),
         toolActivity: Array.isArray(turn.toolActivity) ? turn.toolActivity.slice(-32) : [],
         agentActivity: turn.agentActivity ?? null,
         ...activityProjection(turn),
@@ -2492,7 +2792,7 @@ export function createChatService({
     if (!target || target.kind !== 'chat') return null;
     const record = sessionOrThrow(target.sessionId);
     const state = runtimeOf(record.id);
-    if (!state.turn) state.turn = { id: target.turnId, state: 'waiting-approval', displayText: '', error: null, usage: null, routing: null };
+    if (!state.turn) state.turn = { id: target.turnId, configurationRevision: record.configurationRevision, state: 'waiting-approval', displayText: '', error: null, usage: null, routing: null };
     if (state.turn.id !== target.turnId) return null;
     const originatingTurn = state.turn;
     finishPublicSegment(record, state);
@@ -2511,6 +2811,7 @@ export function createChatService({
     state.modelTurn = { controller, providerId: resolved.id, kind: 'model' };
     try {
       const result = await toolExecutionCoordinator.resumeApproval({
+        onConfiguration: value => { if (state.turn === originatingTurn) observeConfiguration(record, state, value); },
         onContext: value=>{ if (state.turn === originatingTurn) observeContext(record,state,value); }, approvalId, requestFingerprint, decisionResult, signal: controller.signal,
         onActivity: activity => {
           const turn = state.turn;
@@ -2549,6 +2850,8 @@ export function createChatService({
       // Coordinator usage is cumulative across approval suspensions. Persist the
       // latest snapshot even when another approval is required, including cancel.
       if (state.turn !== originatingTurn) return { resumed: false, error: 'TURN_REPLACED' };
+      if (result.configurationObservation) observeConfiguration(record, state, result.configurationObservation);
+      for (const observation of result.configurationObservations ?? []) observeConfiguration(record, state, observation);
       state.turn.usage = result.usage ?? state.turn.usage ?? null;
       if (result.status === 'pending') {
         state.turn.state = 'waiting-approval';
@@ -2706,10 +3009,20 @@ export function createChatService({
     'chat.retry': (params) => retry(params ?? {}),
     'chat.continue': (params) => continueTurn(params ?? {}),
     'chat.config.set': (params) => setConfig(params ?? {}),
+    'chat.config.reconcile': (params) => reconcileConfiguration(params ?? {}),
     'chat.catalog': p => catalog({ refresh: p?.refresh === true, id:p?.id })
   };
 
   return {
+    skillReferenceScope({ id }) {
+      const record = sessionOrThrow(id);
+      return { taskId: record.taskId ?? null, workspaceId: record.config.workspaceId ?? null };
+    },
+    skillReferencesForTask({ taskId, workspaceId }) {
+      const record = [...sessions.values()].filter(row => !row.archived && row.taskId === taskId && row.config.workspaceId === workspaceId)
+        .sort((a, b) => b.updatedAt - a.updatedAt)[0];
+      return record ? normalizeSkillReferences(readHistory(record.id).findLast(row => row.role === 'user')?.skillRefs) : [];
+    },
     readScopedAttachment({taskId,workspaceId,ref,offset=0,maxBytes=16000}) {
       const record=[...sessions.values()].find(r=>r.taskId===taskId&&r.config.workspaceId===workspaceId&&readHistory(r.id).some(m=>m.attachmentRefs?.some(a=>a.ref===ref)));
       if(!record)throw chatError('ATTACHMENT_NOT_AUTHORIZED','此附件不属于当前 Task 与 Workspace 的已提交消息');

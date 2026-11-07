@@ -21,6 +21,7 @@ import {
   stepById
 } from './steps.js';
 import { describeProviderTestFailure } from '../product/provider-view.js';
+import { safeModelIdentifier } from '../model/model-discovery.js';
 
 const MAX_STEP_DATA_STRING = 200;
 const SECRET_KEY_RE = /(key|secret|token|password|credential|passwd)/i;
@@ -45,7 +46,8 @@ export function sanitizeStepData(data, depth = 0) {
   const out = {};
   for (const [key, value] of Object.entries(data)) {
     if (SECRET_KEY_RE.test(key)) continue; // 凭据字段一律不入库（含 apiKey/baseUrl 之外的任何 *key*）
-    const cleaned = sanitizeStepData(value, depth + 1);
+    // A model identifier is an exact bounded identity, not display prose.
+    const cleaned = key === 'model' ? safeModelIdentifier(value) : sanitizeStepData(value, depth + 1);
     if (cleaned !== null) out[key.slice(0, 60)] = cleaned;
   }
   return Object.keys(out).length ? out : null;
@@ -287,9 +289,9 @@ export function createOnboardingService({
   }
 
   /** 保存默认 Provider/Model 后才完成必填步骤；失败时进度不得前进。 */
-  async function setModel({ provider, model } = {}) {
+  async function setModel({ provider, model, expectedRevision } = {}) {
     const providerId = text(provider, 64);
-    const modelId = text(model, 120);
+    const modelId = safeModelIdentifier(model);
     if (!providerId || !modelId) throw onboardingError(ONBOARDING_ERROR_CODES.INVALID_PARAMS, '必须提供 provider 和 model');
     if (modelRuntime && (!modelRuntime.isRegistered(providerId) || !modelRuntime.hasKey(providerId))) {
       throw onboardingError(ONBOARDING_ERROR_CODES.INVALID_PARAMS, '请选择已配置凭据的 Model Provider');
@@ -298,7 +300,7 @@ export function createOnboardingService({
     const order = checkRequiredOrder('model', state.completed);
     if (!order.ok) throw onboardingError(ONBOARDING_ERROR_CODES.STEP_ORDER, '请先完成前面的必填步骤：' + order.missing.join('、'), { missing: order.missing });
     if (typeof setDefaultModel === 'function') {
-      await setDefaultModel({ provider: providerId, model: modelId });
+      await setDefaultModel({ provider: providerId, model: modelId, ...(expectedRevision !== undefined ? { expectedRevision } : {}) });
     } else if (settingsService?.store?.update) {
       settingsService.store.update('models', { provider: providerId, defaultModel: modelId });
     } else {

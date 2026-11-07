@@ -72,6 +72,10 @@ export function modelStreamEvent(type, data = {}) {
  * - countInputTokens({model,messages,tools}) is an optional synchronous exact
  *   counter including model framing/tools/native continuation; return
  *   {tokens,exact:true,tokenizer}. No approximate result may claim exactness.
+ * - configurationControl.observation: 'wire-v1' explicitly opts an adapter into
+ *   trusted onConfiguration/assertConfiguration options at its actual transport
+ *   boundary. Legacy adapters receive ordinary request data, not new callback
+ *   functions. A declared control alone is not evidence of effective wire data.
  * - 实例不可变（Object.freeze），Key 只能经注入的 secrets 在调用时解析，绝不缓存。
  */
 export function defineModelProvider({ id, label, defaultModel = null, protocolProfile = null, configurationControl = null, supportsTools = false, supportsToolsForModel = null, supportsReasoning = false, imageInputCapabilities = null, promptCacheCapabilities = null, contextCapabilities = null, modelCapabilities = null, countInputTokens = null, settingsFields = [], methods }) {

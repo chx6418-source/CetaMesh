@@ -125,6 +125,7 @@ try {
   const replacementDir = tmp('cetamesh-onb-candidate-');
   const replacementSecrets = createProviderSecrets({ root: replacementDir });
   replacementSecrets.set({ provider: 'deepseek-official', apiKey: 'sk-valid-before-abcdefgh', baseUrl: 'https://old-gateway.example/v1' });
+  const credentialBefore = replacementSecrets.raw('deepseek-official');
   const replacement = createOnboardingService({ stateDir: replacementDir, providerSecrets: replacementSecrets });
   let candidateRequest = null;
   const rejectedCandidate = await replacement.execute({ method: 'onboarding.testProvider', params: {
@@ -133,12 +134,14 @@ try {
   } });
   equal('候选 Key 与 URL 在认证失败后不覆盖旧凭据', [rejectedCandidate.ok, candidateRequest, replacementSecrets.raw('deepseek-official')], [false,
     { url: 'https://candidate.example/v1/models', authorization: 'Bearer sk-invalid-new-abcdefgh' },
-    { provider: 'deepseek-official', apiKey: 'sk-valid-before-abcdefgh', baseUrl: 'https://old-gateway.example/v1' }]);
+    credentialBefore]);
   const acceptedCandidate = await replacement.execute({ method: 'onboarding.testProvider', params: {
     provider: 'deepseek-official', apiKey: 'sk-valid-after-abcdefgh', baseUrl: 'https://new-gateway.example/v1', fetchImpl: okFetch
   } });
-  equal('候选凭据仅在连接测试成功后提交', [acceptedCandidate.ok, replacementSecrets.raw('deepseek-official')], [true,
-    { provider: 'deepseek-official', apiKey: 'sk-valid-after-abcdefgh', baseUrl: 'https://new-gateway.example/v1' }]);
+  const credentialAfter = replacementSecrets.raw('deepseek-official');
+  equal('候选凭据仅在连接测试成功后提交', [acceptedCandidate.ok, credentialAfter.provider, credentialAfter.apiKey, credentialAfter.baseUrl],
+    [true, 'deepseek-official', 'sk-valid-after-abcdefgh', 'https://new-gateway.example/v1']);
+  equal('成功替换获得新的凭据修订', typeof credentialAfter.revision === 'string' && credentialAfter.revision !== credentialBefore.revision, true);
 
   // 测试成功后自动标记 connection 步骤（顺序前提满足时）
   const autoDir = tmp('cetamesh-onb-auto-');

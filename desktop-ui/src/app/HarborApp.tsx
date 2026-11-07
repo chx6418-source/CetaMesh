@@ -3,6 +3,8 @@ export { WorkPage } from './WorkPage';
 export { TaskCreateForm, TaskDetails } from './WorkPage';
 import { confirmAgentExecution } from './AgentExecutionScope';
 import { UsageSummary } from './UsageSummary';
+import { ModelConnectionsPanel } from './ModelConnectionsPanel';
+import { SkillPicker, SkillSourceSettings } from './SkillPicker';
 export { UsageSummary } from './UsageSummary';
 import { taskDisplayStatus, taskProgressValue, taskProgressLabel, TaskProgress } from './TaskPresentation';
 export { taskListTitle, WorkTaskList, TaskCollaborationCard, TaskCollaborationStatus } from './TaskPresentation';
@@ -26,7 +28,7 @@ import {DevicesPage} from './DevicesPage';
 import {StartupDiagnosticsBoundary, DiagnosticsEntry, DiagnosticsStatusEntry, FeedbackDeveloperButton} from './StartupDiagnostics';
 import {useChatAttachments} from './ChatAttachments';
 import {AttachmentSettings,HistoryAttachments} from './AttachmentSettings';
-import type {ChatActivityObservation, ChatContextObservation, ChatModelProvider, ModelUsage, WorkspaceSummary, AgentModelControl} from '../bridge/typed-client';
+import type {ChatActivityObservation, ChatContextObservation, ChatModelProvider, ModelUsage, WorkspaceSummary, AgentModelControl, ChatConfigurationState, ChatConfigurationObservation, SkillReference} from '../bridge/typed-client';
 import {ChatModelPicker, ChatUsagePopover, configurationChangeBlocked, supportedReasoning, usesAgentModelControls} from './ChatComposerPanels';
 import {ChatActivity} from './ChatActivity';
 import { ChatFailureCard, chatFailureInHistory, type ChatFailure } from './ChatFailure';
@@ -37,7 +39,7 @@ import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages, recoverForwardHistory } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { productToolsClient, type Attachment, approvalClient, bridge, chatClient, hostClient, memoryClient, onboardingClient, settingsClient, taskClient, workspaceClient, type Agent, type Approval, type ApprovalDecisionResult, type ChatMessage as ChatMessageDto, type ChatSession, type Memory, type ProviderSettingField, type SettingField, type Settings, type Task } from '../bridge/typed-client';
+import { productToolsClient, type Attachment, approvalClient, bridge, chatClient, hostClient, memoryClient, onboardingClient, modelConfigurationClient, settingsClient, skillsClient, taskClient, workspaceClient, type Agent, type Approval, type ApprovalDecisionResult, type ChatMessage as ChatMessageDto, type ChatSession, type Memory, type SettingField, type Settings, type Task } from '../bridge/typed-client';
 import { Icon } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -341,6 +343,8 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const [sendErrors, setSendErrors] = useState<Record<string, ChatFailure>>({});
   const [retryingMessageId, setRetryingMessageId] = useState<string | null>(null);
   const [settlingReply, setSettlingReply] = useState<(Pick<ChatMessageDto, 'requestId' | 'text' | 'toolActivity' | 'agentActivity'> & ChatActivityObservation & { requestId: string | null }) | null>(null);
+  const configuringIdsRef = useRef(new Set<string>());
+  const [configuringIds, setConfiguringIds] = useState<Record<string, boolean>>({});
 
   const historySessionIdRef = useRef<string | null>(null);
   const lastHistoryMessageIdRef = useRef<string | null>(null);
@@ -359,7 +363,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const streamStatusFrameRef = useRef<number | null>(null);
   const streamUpdateRef = useRef<ChatStreamUpdate[]>([]);
   const seenMessageIdsRef = useRef<Set<string>>(new Set());
-  const pendingSendsRef = useRef(new Map<string, { text: string; attachments: Attachment[] }>());
+  const pendingSendsRef = useRef(new Map<string, { text: string; attachments: Attachment[]; skillRefs: SkillReference[] }>());
   const sendingIdsRef = useRef(new Set<string>());
   const previousStreamRef = useRef({ state: 'idle', text: '' });
 
@@ -587,7 +591,10 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
 
   const streaming = ['starting', 'streaming', 'recovering', 'cancelling'].includes(status.state);
   const cancellable = isChatTurnCancellable(status.state);
-  const configurationLocked = configurationChangeBlocked(status,linkedTask?.execution?.state);
+  const configuration = status.configuration ?? session?.configuration;
+  const configurationSaving = Boolean(session && configuringIds[session.id]);
+  const configurationLocked = configurationSaving || Boolean(configuration && (!configuration.durable || configuration.state !== 'saved'))
+    || configurationChangeBlocked(status,linkedTask?.execution?.state);
   useLayoutEffect(() => {
     if (streaming && (status.displayText || status.toolActivity.length || status.agentActivity) && status.requestId) {
       setSettlingReply(current => current?.requestId === status.requestId && current.text === status.displayText
@@ -667,7 +674,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     }
   };
 
-  async function send(text: string, attachments: Attachment[], clientMessageId: string) {
+  async function send(text: string, attachments: Attachment[], clientMessageId: string, skillRefs: SkillReference[] = []) {
     if (!session) return false;
     if (sendingIdsRef.current.has(clientMessageId)) return false;
     const preflight = managedWorkspacePreflight(session.config.agentProvider ?? '', session.config.workspaceId ?? '', activeWorkspaceId);
@@ -676,13 +683,13 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     setRetryingMessageId(clientMessageId);
     const historyCursorBeforeSend = lastHistoryMessageIdRef.current;
     setError('');
-    pendingSendsRef.current.set(clientMessageId, { text, attachments });
+    pendingSendsRef.current.set(clientMessageId, { text, attachments, skillRefs });
     setMessages(current => current.some(message => message.id === clientMessageId) ? current : mergeLatestChatMessages(current, [{
-      id: clientMessageId, role: 'user', text, at: Date.now(), attachments: attachments.map(item => item.name), toolActivity: [], error: null, cancelled: false
+      id: clientMessageId, role: 'user', text, at: Date.now(), attachments: attachments.map(item => item.name), skillRefs, toolActivity: [], error: null, cancelled: false
     }]));
     try {
       await confirmAgentExecution(session.config.agentProvider ?? '', session.config.workspaceId ?? activeWorkspaceId ?? '');
-      await chatClient.send(session.id, text, attachments, clientMessageId);
+      await chatClient.send(session.id, text, attachments, clientMessageId, skillRefs);
       pendingSendsRef.current.delete(clientMessageId);
       setSendErrors(current => { const next = { ...current }; delete next[clientMessageId]; return next; });
       void refreshHistory(historyCursorBeforeSend);
@@ -702,7 +709,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   }
   async function retrySend(messageId: string) {
     const pending = pendingSendsRef.current.get(messageId);
-    if (pending) await send(pending.text, pending.attachments, messageId);
+    if (pending) await send(pending.text, pending.attachments, messageId, pending.skillRefs);
     else if (session) {
       try { await resumeChat('retry'); setSendErrors(current => { const next = { ...current }; delete next[messageId]; return next; }); void load(); }
       catch (cause) { setError(messageOf(cause)); }
@@ -710,44 +717,57 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   }
   async function updateAgent(provider: string) {
     if (!session || configurationLocked) return;
+    await applyConfiguration(() => chatClient.setConfig(session.id, { ...session.config, agentProvider: provider || null, ...agentModelSelection(session.config, provider) }));
+  }
+  async function applyConfiguration(action: () => Promise<ChatSession>) {
+    const id = session?.id;
+    if (!id || configuringIdsRef.current.has(id)) return;
+    configuringIdsRef.current.add(id);
+    setConfiguringIds(current => ({ ...current, [id]: true }));
     try {
-      const updated = await chatClient.setConfig(session.id, { ...session.config, agentProvider: provider || null, ...agentModelSelection(session.config, provider) });
+      const updated = await action();
       onSessionUpdate(updated);
-      await load();
+      if (activeSessionIdRef.current === id) { await refreshCatalog(); await load(); }
+    } catch (cause) {
+      if (activeSessionIdRef.current === id) {
+        const refusal = messageOf(cause);
+        await refreshCatalog(); await load();
+        if (activeSessionIdRef.current === id) setError(refusal);
+      }
+    } finally {
+      configuringIdsRef.current.delete(id);
+      setConfiguringIds(current => { const next = { ...current }; delete next[id]; return next; });
     }
-    catch (cause) { setError(messageOf(cause)); }
+  }
+  async function reconcileConfiguration() {
+    if (session) await applyConfiguration(() => chatClient.reconcileConfig(session.id));
   }
   async function updateModel(provider: string, model: string) {
     if (!session || configurationLocked) return;
     if(usesAgentModelControls(modelAgent)){
-      try{onSessionUpdate(await chatClient.setConfig(session.id,{model,...(provider?{modelProvider:provider}:{})}));await refreshCatalog();await load();}
-      catch(cause){setError(messageOf(cause));await refreshCatalog();}return;
+      await applyConfiguration(() => chatClient.setConfig(session.id,{model,...(provider?{modelProvider:provider}:{})})); return;
     }
     const selected = catalog?.modelProviders.find(item=>item.id===provider)?.models.find(item=>(item.id||item.name||item.modelName)===model);
     const reasoning = supportedReasoning(selected?.capabilities).includes(session.config.reasoning ?? '') ? session.config.reasoning : 'off';
-    try { onSessionUpdate(await chatClient.setConfig(session.id, { ...session.config, modelProvider: provider, model, reasoning })); await load(); void refreshContext(); }
-    catch (cause) { setError(messageOf(cause)); }
+    await applyConfiguration(() => chatClient.setConfig(session.id, { ...session.config, modelProvider: provider, model, reasoning }));
+    void refreshContext();
   }
   async function updateReasoning(reasoning:string) {
     if (!session || configurationLocked) return;
     if(usesAgentModelControls(modelAgent)){
       if(!modelControl?.reasoning?.options.some(option=>option.value===reasoning))return;
-      try{onSessionUpdate(await chatClient.setConfig(session.id,{reasoning}));await refreshCatalog();await load();}
-      catch(cause){setError(messageOf(cause));await refreshCatalog();}return;
+      await applyConfiguration(() => chatClient.setConfig(session.id,{reasoning})); return;
     }
     const [providerId, modelId] = JSON.parse(selectedModelKey) as [string, string];
     const provider = providers.find(item=>item.id===providerId);
     const model = provider?.models.find(item=>(item.id||item.name||item.modelName)===modelId);
     if (!supportedReasoning(model?.capabilities).includes(reasoning)) return;
-    try { onSessionUpdate(await chatClient.setConfig(session.id, {...session.config, modelProvider:providerId, model:modelId, reasoning})); await load(); void refreshContext(); }
-    catch (cause) { setError(messageOf(cause)); }
+    await applyConfiguration(() => chatClient.setConfig(session.id, {...session.config, modelProvider:providerId, model:modelId, reasoning}));
+    void refreshContext();
   }
   async function updateWorkspace(workspaceId: string) {
     if (!session || configurationLocked) return;
-    try {
-      onSessionUpdate(await chatClient.setConfig(session.id, { ...session.config, workspaceId: workspaceId || null }));
-      setError('');
-    } catch (cause) { setError(messageOf(cause)); }
+    await applyConfiguration(() => chatClient.setConfig(session.id, { ...session.config, workspaceId: workspaceId || null }));
   }
   async function decideApproval(id: string, approve: boolean) {
     if (!session || submittingApprovalIdsRef.current.has(id)
@@ -814,9 +834,38 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         }}>有新消息 · 跳到最新</Button> : null}
         render={renderTimelineItem}
       />
-      <div className="composer-dock"><ChatContextPanel key={session.id} task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} /><ChatComposer sessionId={session.id} busy={cancellable} configurationLocked={configurationLocked} context={status.context} turnUsage={status.turnUsage??null} sessionUsage={historySessionIdRef.current===session.id?sessionUsage:null} reasoning={session.config.reasoning} onReasoningChange={value=>void updateReasoning(value)} onConfigureModels={onConfigureModels} models={providers} modelControl={modelControl} modelAgent={modelAgent} onOpenTask={session.taskId?()=>onReviewTask(session.taskId!):undefined} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} workspaces={workspaces} workspaceId={session.config.workspaceId ?? ''} activeWorkspaceId={activeWorkspaceId} onWorkspaceChange={updateWorkspace} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
+      <div className="composer-dock"><ChatContextPanel key={session.id} task={linkedTask} memories={memories} approvals={approvals} onOpenMemory={onOpenMemory} /><ChatComposer sessionId={session.id} busy={cancellable} configurationLocked={configurationLocked} configuration={configuration} configurationObservation={status.configurationObservation} configurationSaving={configurationSaving} onReconcileConfiguration={()=>void reconcileConfiguration()} context={status.context} turnUsage={status.turnUsage??null} sessionUsage={historySessionIdRef.current===session.id?sessionUsage:null} reasoning={session.config.reasoning} onReasoningChange={value=>void updateReasoning(value)} onConfigureModels={onConfigureModels} models={providers} modelControl={modelControl} modelAgent={modelAgent} onOpenTask={session.taskId?()=>onReviewTask(session.taskId!):undefined} selectedModelKey={selectedModelKey} agentProviders={catalog?.agentProviders ?? []} selectedAgent={session.config.agentProvider ?? ''} workspaces={workspaces} workspaceId={session.config.workspaceId ?? ''} activeWorkspaceId={activeWorkspaceId} onWorkspaceChange={updateWorkspace} onModelChange={value => { try { const [provider, model] = JSON.parse(value) as [string, string]; void updateModel(provider, model); } catch { setError('无法识别所选模型。'); } }} onAgentChange={updateAgent} onSend={send} onStop={() => void chatClient.stop(session.id).then(load).catch(cause => setError(messageOf(cause)))} /></div>
     </section>
   </div>;
+}
+
+function HistorySkillReferences({ chatId, refs }: { chatId: string; refs: SkillReference[] }) {
+  const [preview, setPreview] = useState<{ ref: SkillReference; content: string; nextOffset: number | null } | null>(null);
+  const [error, setError] = useState(''), [reading, setReading] = useState(false);
+  const generation = useRef(0);
+  const referenceKey = refs.map(ref => ref.skillId + ':' + ref.sourceRevision).join('|');
+  useEffect(() => { generation.current++; setPreview(null); setError(''); setReading(false); return () => { generation.current++; }; }, [chatId, referenceKey]);
+  async function read(ref: SkillReference, offset = 0) {
+    const epoch = ++generation.current; setReading(true); setError('');
+    try {
+      const page = await skillsClient.readSkill({ chatId, skillId: ref.skillId, sourceRevision: ref.sourceRevision, offset, maxBytes: 8192 });
+      if (generation.current !== epoch) return;
+      setPreview(previous => ({ ref, content: ((offset && previous?.ref.skillId === ref.skillId ? previous.content : '') + page.content).slice(0, 65536), nextOffset: page.nextOffset }));
+    } catch (cause) {
+      if (generation.current !== epoch) return;
+      setPreview(null);
+      const code = (cause as { code?: string }).code;
+      setError(code === 'SKILL_SOURCE_STALE' || code === 'SKILL_SOURCE_UNAVAILABLE'
+        ? '原技能来源已变化或不可用。历史引用保持原版本；可在输入框重新选择当前来源。' : messageOf(cause));
+    } finally { if (generation.current === epoch) setReading(false); }
+  }
+  return <details className="message-skill-references"><summary>技能参考 · {refs.length} 个固定版本</summary>
+    <ul>{refs.map(ref => <li key={ref.skillId}><code>{ref.skillId.slice(0, 18)} · {ref.sourceRevision.slice(0, 12)}</code>
+      <Button compact variant="ghost" disabled={reading || !chatId} onClick={() => void read(ref)}>读取此版本参考</Button></li>)}</ul>
+    {error && <p role="alert">{error}</p>}
+    {preview && <div><small>低信任参考文本 · {preview.ref.sourceRevision.slice(0, 12)}</small><pre>{preview.content}</pre>
+      {preview.nextOffset !== null && preview.content.length < 65536 && <Button compact disabled={reading} onClick={() => void read(preview.ref, preview.nextOffset ?? 0)}>继续读取参考</Button>}</div>}
+  </details>;
 }
 
 export function MessageBubble({ message, reference, streaming = false, sendError, onRetry, retrying = false, activityState, taskId, onOpenTask }: { message: ChatMessageDto; reference?: { sessionId: string; messageId: string }; streaming?: boolean; sendError?: ChatFailure; onRetry?(): void; retrying?: boolean; activityState?:string;taskId?:string|null;onOpenTask?(id:string):void }) {
@@ -825,16 +874,17 @@ export function MessageBubble({ message, reference, streaming = false, sendError
   }
   const role = message.role === 'user' ? 'user' : 'assistant';
   const agentActivity = message.agentActivity;
-  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.attachmentRefs?.length ? <HistoryAttachments files={message.attachmentRefs} sessionId={reference?.sessionId??''}/> : null}<ChatActivity tools={message.toolActivity} agentActivity={agentActivity} timeline={message.activityTimeline} omitted={message.activityOmitted} state={message.activityState ?? activityState} taskId={message.activityTimeline?.taskId ?? taskId} onOpenTask={onOpenTask} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <ChatFailureCard failure={sendError} taskId={taskId} onOpenTask={onOpenTask} onRetry={onRetry} retrying={retrying} />}{message.error && <ChatFailureCard failure={message} taskId={taskId} onOpenTask={onOpenTask} />}{message.cancelled && <small>本轮已停止</small>}{message.interrupted && <small>本轮执行中断；保留的活动仅供核对，未确认操作不会自动重放。</small>}</div></article>;
+  return <article className={`chat-message ${role} ${streaming ? 'streaming' : ''}`}><div className="message-avatar">{role === 'assistant' ? <Icon name="sparkles" size={16} /> : '你'}</div><div className="message-body"><div className="message-meta"><strong>{role === 'assistant' ? 'CetaMesh' : '你'}</strong><span>{dateLabel(message.at)}</span>{streaming && <Badge tone="accent">生成中</Badge>}</div>{message.text ? <Markdown reference={reference}>{message.text}</Markdown> : <span className="muted">（没有文本内容）</span>}{message.attachments.length > 0 && <div className="message-attachments">{message.attachments.map(name => <span key={name}><Icon name="attach" size={13} />{name}</span>)}</div>}{message.attachmentRefs?.length ? <HistoryAttachments files={message.attachmentRefs} sessionId={reference?.sessionId??''}/> : null}{message.skillRefs?.length ? <HistorySkillReferences chatId={reference?.sessionId??''} refs={message.skillRefs}/> : null}<ChatActivity tools={message.toolActivity} agentActivity={agentActivity} timeline={message.activityTimeline} omitted={message.activityOmitted} state={message.activityState ?? activityState} taskId={message.activityTimeline?.taskId ?? taskId} onOpenTask={onOpenTask} />{role === 'assistant' && !streaming && <UsageSummary usage={message.usage} />}{sendError && <ChatFailureCard failure={sendError} taskId={taskId} onOpenTask={onOpenTask} onRetry={onRetry} retrying={retrying} />}{message.error && <ChatFailureCard failure={message} taskId={taskId} onOpenTask={onOpenTask} />}{message.cancelled && <small>本轮已停止</small>}{message.interrupted && <small>本轮执行中断；保留的活动仅供核对，未确认操作不会自动重放。</small>}</div></article>;
 }
 
-export function ChatComposer({ sessionId = '', busy, models, modelControl, modelAgent, onOpenTask, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop, context, turnUsage, sessionUsage, reasoning, onReasoningChange=()=>{}, onConfigureModels=()=>{}, configurationLocked=false }: {
+export function ChatComposer({ sessionId = '', busy, models, modelControl, modelAgent, onOpenTask, selectedModelKey, agentProviders, selectedAgent, workspaces, workspaceId, activeWorkspaceId, onWorkspaceChange, onModelChange, onAgentChange, onSend, onStop, context, turnUsage, sessionUsage, reasoning, onReasoningChange=()=>{}, onConfigureModels=()=>{}, configurationLocked=false, configuration, configurationObservation, configurationSaving=false, onReconcileConfiguration }: {
   busy: boolean; models: ChatModelProvider[]; modelControl?:AgentModelControl|null; modelAgent?:string|null; onOpenTask?():void;
   selectedModelKey: string; agentProviders: Agent[]; selectedAgent: string;
   workspaces: { id: string; name: string; status: string }[]; workspaceId: string; activeWorkspaceId: string | null;
   onWorkspaceChange(workspaceId: string): void; onModelChange(value: string): void; onAgentChange(provider: string): void;
-  sessionId?:string; onSend(text: string, attachments: Attachment[], clientMessageId: string): void|Promise<boolean|void>; onStop(): void;
+  sessionId?:string; onSend(text: string, attachments: Attachment[], clientMessageId: string, skillRefs?: SkillReference[]): void|Promise<boolean|void>; onStop(): void;
   context?:ChatContextObservation|null;turnUsage?:ModelUsage|null;sessionUsage?:ModelUsage|null;reasoning?:string;onReasoningChange?(value:string):void;onConfigureModels?():void;configurationLocked?:boolean;
+  configuration?:ChatConfigurationState|null;configurationObservation?:ChatConfigurationObservation|null;configurationSaving?:boolean;onReconcileConfiguration?():void;
 }) {
   const attachmentDraft=useChatAttachments({sessionId,call:productToolsClient.call,disabled:busy,capabilityKey:selectedModelKey+'|'+selectedAgent});
   const [sending,setSending]=useState(false);
@@ -842,7 +892,11 @@ export function ChatComposer({ sessionId = '', busy, models, modelControl, model
   const draft = useUi(state => state.chatDrafts[sessionId] ?? '');
   const setDraft = useCallback((value: string | ((current: string) => string)) => useUi.getState().setChatDraft(sessionId, value), [sessionId]);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
-  useEffect(()=>{sendIdentity.current=null;},[attachments,attachmentDraft.files]);
+  const skillRefs = useUi(state => state.chatSkillRefs[sessionId]);
+  const [skillEntry, setSkillEntry] = useState<'add' | 'slash' | null>(null);
+  const setSkillRefs = useCallback((refs: SkillReference[]) => useUi.getState().setChatSkillRefs(sessionId, refs), [sessionId]);
+  useEffect(()=>{sendIdentity.current=null;},[attachments,attachmentDraft.files,skillRefs]);
+  useEffect(()=>{setSkillEntry(null);},[sessionId,workspaceId]);
   const [attachmentError, setAttachmentError] = useState('');
   const textarea = useRef<HTMLTextAreaElement>(null);
   const [contextOpen, setContextOpen] = useState(false);
@@ -889,24 +943,27 @@ export function ChatComposer({ sessionId = '', busy, models, modelControl, model
     const text = draft.trim();
     if ((!text&&!attachments.length&&!attachmentDraft.files.length)||busy||sending||attachmentDraft.pending||workspaceWarning||agentWarning)return;
     setSending(true);sendIdentity.current??=crypto.randomUUID();
-    try{const accepted=await onSend(text,[...attachments,...attachmentDraft.files],sendIdentity.current);if(accepted===false)return;setDraft(current=>current.trim()===text?'':current);setAttachments(current=>current.filter(item=>!attachments.includes(item)));const sentRefs=new Set(attachmentDraft.files.map(f=>f.ref));attachmentDraft.setFiles(current=>current.filter(f=>!sentRefs.has(f.ref)));sendIdentity.current=null;}catch(error){setAttachmentError(messageOf(error));}finally{setSending(false);}
+    try{const submittedSkills=skillRefs??[];const accepted=await onSend(text,[...attachments,...attachmentDraft.files],sendIdentity.current,submittedSkills);if(accepted===false)return;setDraft(current=>current.trim()===text?'':current);setAttachments(current=>current.filter(item=>!attachments.includes(item)));const sentRefs=new Set(attachmentDraft.files.map(f=>f.ref));attachmentDraft.setFiles(current=>current.filter(f=>!sentRefs.has(f.ref)));useUi.getState().setChatSkillRefs(sessionId,current=>current.filter(ref=>!submittedSkills.some(sent=>sent.skillId===ref.skillId&&sent.sourceRevision===ref.sourceRevision)));sendIdentity.current=null;}catch(error){setAttachmentError(messageOf(error));}finally{setSending(false);}
   }
   return <div className="chat-composer" onPaste={attachmentDraft.onPaste} onDrop={attachmentDraft.onDrop} onDragOver={attachmentDraft.onDragOver}><div className="composer-field">{attachmentDraft.ui}
-    <textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={1} onChange={event => {setDraft(event.target.value);sendIdentity.current=null;}} onKeyDown={event => {
+    {skillEntry && <SkillPicker client={skillsClient} chatId={sessionId} entryPoint={skillEntry} selectedRefs={skillRefs??[]} onClose={()=>setSkillEntry(null)} onChange={refs=>{setSkillRefs(refs);if(skillEntry==='slash'&&/^\/(?:skills?)?\s*$/i.test(draft.trim()))setDraft('');}}/>}
+    <textarea ref={textarea} aria-label="输入消息" placeholder="告诉 CetaMesh 你想做什么。" value={draft} rows={1} onChange={event => {setDraft(event.target.value);sendIdentity.current=null;if(/^\/(?:skills?)?\s*$/i.test(event.target.value.trim()))setSkillEntry('slash');}} onKeyDown={event => {
       if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing && event.keyCode !== 229) { event.preventDefault(); submit(); }
     }} />
     <div className="composer-bottom">
       <div className="composer-left">
         {attachmentDraft.trigger}
+        <Button compact variant="ghost" aria-label="添加技能" disabled={busy||sending||configurationLocked||!sessionId} onClick={()=>setSkillEntry(current=>current==='add'?null:'add')}>+ 技能</Button>
         <div className="composer-context" ref={contextMenuRef}>
           <button type="button" className="composer-context-trigger" aria-label={'工作区和 Agent：' + workspaceLabel + ' · ' + agentLabel} title={workspaceLabel + ' · ' + agentLabel} aria-expanded={contextOpen} aria-controls={contextMenuId} onClick={() => setContextOpen(value => !value)} disabled={busy||configurationLocked}><span>{workspaceLabel} · {agentLabel}</span><Icon name="down" size={14} /></button>
           <MotionPopup open={contextOpen} id={contextMenuId} className="composer-context-options" role="group" aria-label="工作区和 Agent 设置"><div className="composer-setting"><span>工作区</span><Select label="任务工作区" disabled={busy||configurationLocked} value={workspaceId} onChange={event => onWorkspaceChange(event.target.value)}><option value="">自动（当前工作区{activeWorkspaceId ? '' : '，未指定'}）</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{normalizeSelectOptionLabel(workspace.name, workspace.id)}</option>)}</Select></div><div className="composer-setting"><span>Agent</span><Select label="选择 Agent" disabled={busy||configurationLocked} value={selectedAgent} onChange={event => onAgentChange(event.target.value)}><option value="">能力</option><option value="none">不使用 Agent</option>{agentProviders.map(agent => { const disabled = !selectableAgent(agent); const state = agent.eligible ? '' : availabilityReasonLabel(agent.reason) || availabilityReasonLabel(agent.status) || (agent.available ? '当前不可使用' : '不可用'); return <option key={agent.id} value={agent.id} disabled={disabled}>{`${normalizeSelectOptionLabel(agent.name, agent.id)}${state ? ` · ${state}` : ''}`}</option>; })}{selectedAgent && !agentProviders.some(agent => agent.id === selectedAgent) && <option value={selectedAgent} disabled>{`${normalizeSelectOptionLabel(selectedAgent)} · 不可用`}</option>}</Select></div></MotionPopup>
         </div>
       </div>
-      <div className="composer-right"><ChatModelPicker models={models} modelControl={modelControl} onOpenTask={onOpenTask} selectedModelKey={selectedModelKey} selectedAgent={modelAgent??selectedAgent} agentLabel={modelAgent?agentProviders.find(item=>item.id===modelAgent)?.name||modelAgent:agentLabel} selectedReasoning={reasoning} disabledReason={busy || configurationLocked ? '回合正在运行或结果尚未确认，请先结束或核验后再切换。' : null} onModelChange={onModelChange} onReasoningChange={onReasoningChange} onConfigure={onConfigureModels}/><ChatUsagePopover context={context} turnUsage={turnUsage} sessionUsage={sessionUsage}/>
+      <div className="composer-right"><ChatModelPicker models={models} modelControl={modelControl} configuration={configuration} configurationObservation={configurationObservation} saving={configurationSaving} onReconcile={onReconcileConfiguration} onOpenTask={onOpenTask} selectedModelKey={selectedModelKey} selectedAgent={modelAgent??selectedAgent} agentLabel={modelAgent?agentProviders.find(item=>item.id===modelAgent)?.name||modelAgent:agentLabel} selectedReasoning={reasoning} disabledReason={busy || configurationLocked ? '回合正在运行或结果尚未确认，请先结束或核验后再切换。' : null} onModelChange={onModelChange} onReasoningChange={onReasoningChange} onConfigure={onConfigureModels}/><ChatUsagePopover context={context} turnUsage={turnUsage} sessionUsage={sessionUsage}/>
         <button type="button" className="composer-submit" aria-label={busy ? '停止生成' : '发送消息'} title={busy ? '停止生成' : '发送消息'} onClick={busy ? onStop : submit} disabled={!busy && ((!draft.trim()&&!attachments.length&&!attachmentDraft.files.length)||sending||attachmentDraft.pending||Boolean(workspaceWarning)||Boolean(agentWarning))}>{busy ? <Icon name="square" size={17} /> : <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 19V5m-6 6 6-6 6 6" /></svg>}</button>
       </div>
     </div>
+    {!!skillRefs?.length && <div className="composer-skill-selection"><Button compact variant="ghost" onClick={()=>setSkillEntry('add')}>已选 {skillRefs.length} 个技能 · 固定版本</Button><small>输入 / 可选择参考；选择不会授予工具权限。</small></div>}
     {attachments.length > 0 && <div className="attachment-list">{attachments.map((file, index) => <span key={file.name + '-' + index}><Icon name="file" size={13} />{file.name}<button type="button" aria-label={'移除 ' + file.name} onClick={() => setAttachments(current => current.filter((_, item) => item !== index))} disabled={busy||configurationLocked}><Icon name="close" size={13} /></button></span>)}</div>}
     {workspaceWarning && <p className="inline-error" role="status">{workspaceWarning}</p>}{agentWarning && <p className="inline-error" role="status">{agentWarning}</p>}{attachmentError && <p className="inline-error" role="alert">{attachmentError}</p>}
   </div></div>;
@@ -962,64 +1019,6 @@ const SETTING_FIELD_LABELS: Record<string, string> = {
   showEngineeringPages: '显示诊断页面', logLevel: '日志级别', diagnosticsVerbosity: '诊断信息级别'
 };
 
-function ModelConnectionSettings({ provider, model, values, onChange }: { provider: string; model: string; values: Record<string, string | number | boolean | null>; onChange(key: string, value: string | number | boolean): void }) {
-  const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof chatClient.catalog>> | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState(false);
-  const [configured, setConfigured] = useState<boolean | null>(null);
-  const [apiKeyPresent, setApiKeyPresent] = useState(false);
-  const [baseUrl, setBaseUrl] = useState('');
-  const [message, setMessage] = useState('');
-  const [error, setError] = useState('');
-  const apiKeyRef = useRef<HTMLInputElement>(null);
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try {
-      const next = await chatClient.catalog();
-      setCatalog(next);
-      const item = next.modelProviders.find(candidate => candidate.id === provider);
-      setConfigured(item?.configured ?? null);
-      setError('');
-    } catch (cause) { setError(messageOf(cause)); }
-    finally { setLoading(false); }
-  }, [provider]);
-  useEffect(() => { void refresh(); }, [refresh]);
-  const providerRows = catalog?.modelProviders ?? [];
-  const selected = providerRows.find(item => item.id === provider);
-  const modelOptions = (selected?.models ?? []).map(item => ({ id: item.id ?? item.name ?? item.label ?? '', label: item.label ?? item.name ?? item.id ?? '' })).filter(item => item.id);
-  const advancedFields = selected?.settingsFields ?? [];
-  async function testConnection() {
-    const apiKey = apiKeyRef.current?.value.trim() ?? '';
-    if (apiKeyRef.current) apiKeyRef.current.value = '';
-    setApiKeyPresent(false); setBusy(true); setMessage(''); setError('');
-    try {
-      const result = await onboardingClient.testProvider(provider, apiKey, baseUrl, model);
-      if (!result.ok) { setError(result.message ?? '连接测试失败。'); return; }
-      setMessage(result.message ?? '连接测试成功，凭据已保存在本机。');
-      await refresh();
-    } catch (cause) { setError(messageOf(cause)); }
-    finally { setBusy(false); }
-  }
-  return <div className="model-connection-settings">
-    <h4>模型服务商连接</h4>
-    <p className="muted">凭据保存在本机 Core；页面只显示配置状态。</p>
-    <Select label="模型服务商" value={provider} onChange={event => { const next = providerRows.find(item => item.id === event.target.value); onChange('provider', event.target.value); if (next?.models[0]) onChange('defaultModel', next.models[0].id ?? next.models[0].name ?? next.models[0].label ?? ''); }}>
-      <option value="">选择服务商</option>{providerRows.map(item => <option key={item.id} value={item.id}>{item.label}{item.configured ? ' · 已配置' : ''}</option>)}
-    </Select>
-    {modelOptions.length ? <Select label="默认模型" value={model} onChange={event => onChange('defaultModel', event.target.value)}><option value="">选择模型</option>{modelOptions.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</Select> : <Input aria-label="默认模型 ID" placeholder="默认模型 ID" value={model} onChange={event => onChange('defaultModel', event.target.value)} />}
-    <div className="model-key-row"><Input ref={apiKeyRef} aria-label="API Key" type="password" autoComplete="new-password" placeholder="输入新 API Key；留空时测试已保存的凭据" onChange={event => setApiKeyPresent(Boolean(event.target.value))} /><Button compact disabled={loading || busy || !provider || (!apiKeyPresent && configured !== true)} onClick={() => void testConnection()}>{busy ? '正在测试…' : '测试连接'}</Button></div>
-    {advancedFields.length > 0 && <details className="model-advanced"><summary>高级连接设置</summary>{advancedFields.map((field: ProviderSettingField) => {
-      if (field.key === 'baseUrl') return <label key={field.key}>{field.label}<Input value={baseUrl} onChange={event => setBaseUrl(event.target.value)} placeholder="仅自建或代理网关需要填写" /></label>;
-      const value = values[field.key] ?? '';
-      if (field.choices?.length) return <label key={field.key}>{field.label}<Select label={field.label} value={String(value)} onChange={event => onChange(field.key, event.target.value)}>{field.choices.map(choice => <option key={choice} value={choice}>{choice}</option>)}</Select></label>;
-      if (field.type === 'number') return <label key={field.key}>{field.label}<Input type="number" min={field.min} max={field.max} value={String(value)} onChange={event => onChange(field.key, event.target.value === '' ? '' : Number(event.target.value))} /></label>;
-      if (field.type === 'boolean') return <label key={field.key}>{field.label}<Input type="checkbox" checked={value === true} onChange={event => onChange(field.key, event.target.checked)} /></label>;
-      return <label key={field.key}>{field.label}<Input value={String(value)} onChange={event => onChange(field.key, event.target.value)} /></label>;
-    })}{advancedFields.some(field => field.key === 'baseUrl') && <small>Base URL 与凭据由本机 Core 保存，不会在设置 DTO 中回显。</small>}</details>}
-    {message && <p className="inline-success" role="status">{message}</p>}{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}
-    {!loading && provider && configured === false && <p className="muted">该服务商尚未配置凭据。</p>}
-  </div>;
-}
 export function mergeSettingsSaveResult(settings:Settings,changes:Record<string,Record<string,unknown>>,section:string,submitted:Record<string,unknown>){
   const remaining={...changes,[section]:Object.fromEntries(Object.entries(changes[section]??{}).filter(([key,value])=>!Object.hasOwn(submitted,key)||submitted[key]!==value))};
   const draft={...settings};for(const [key,values] of Object.entries(remaining))draft[key]={...(settings[key]??{}),...values} as Settings[string];
@@ -1033,6 +1032,8 @@ export function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: '
   const [draft, setDraft] = useState<Settings>({});
   const [changes, setChanges] = useState<Record<string, Record<string, unknown>>>({});
   const changesRef=useRef(changes);changesRef.current=changes;
+  const settingsRevisionRef = useRef(revision); settingsRevisionRef.current = revision;
+  const settingsRefreshEpochRef = useRef(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState('');
   const [windowSyncPending,setWindowSyncPending]=useState<boolean|null>(null);
@@ -1051,6 +1052,33 @@ export function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: '
     finally { setLoading(false); }
   }, []);
   useEffect(() => { void refresh(); }, [refresh]);
+  const refreshPreservingDrafts = useCallback(async () => {
+    const epoch = ++settingsRefreshEpochRef.current;
+    const current = await settingsClient.get();
+    if (current.revision === null || !Number.isSafeInteger(current.revision)) throw new Error('设置修订不可用，请通过诊断确认本机设置。');
+    if (epoch !== settingsRefreshEpochRef.current || current.revision < (settingsRevisionRef.current ?? 0)) return;
+    const reconciled = mergeSettingsSaveResult(current.settings, changesRef.current, 'models', {});
+    changesRef.current = reconciled.changes; settingsRevisionRef.current = current.revision;
+    setDraft(reconciled.draft); setChanges(reconciled.changes); setRevision(current.revision);
+    setRecoveryRequired(current.recoveryRequired); setError('');
+  }, []);
+  useEffect(() => {
+    let active = true;
+    const off = bridge.subscribe('model.updated', () => { void refreshPreservingDrafts().catch(cause => {
+      if (active) { setRetryTarget({ kind: 'load' }); setError('模型已保存，设置视图需要刷新：' + messageOf(cause)); }
+    }); });
+    return () => { active = false; settingsRefreshEpochRef.current++; off(); };
+  }, [refreshPreservingDrafts]);
+  useEffect(() => {
+    let active = true;
+    const off = bridge.subscribe('plugin.updated', event => {
+      if (event.status !== 'skill-sources-changed') return;
+      void refreshPreservingDrafts().catch(cause => {
+        if (active) { setRetryTarget({ kind: 'load' }); setError('参考来源已保存，设置视图需要刷新：' + messageOf(cause)); }
+      });
+    });
+    return () => { active = false; off(); };
+  }, [refreshPreservingDrafts]);
   function change(section: string, key: string, value: string | number | boolean) {
     setDraft(current => ({ ...current, [section]: { ...(current[section] ?? {}), [key]: value } }));
     setChanges(current => ({ ...current, [section]: { ...(current[section] ?? {}), [key]: value } }));
@@ -1099,11 +1127,11 @@ export function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: '
       : activeSection === 'extensions' ? sections.filter(section => section.section === 'extensions')
         : sections.filter(section => section.section === activeSection);
     return <>
-      {activeSection === 'extensions' && <Surface className="privacy-summary"><span className="grow"><strong>扩展、插件与 MCP 连接</strong><small>启用开发者模式后可从本地导入扩展。导入包会先进入 Core 权限审查，并以未验证状态安装为停用。</small></span><Button compact onClick={onOpenPlugins}>打开插件中心</Button></Surface>}
+      {activeSection === 'extensions' && <><Surface className="privacy-summary"><span className="grow"><strong>扩展、插件与 MCP 连接</strong><small>启用开发者模式后可从本地导入扩展。导入包会先进入 Core 权限审查，并以未验证状态安装为停用。</small></span><Button compact onClick={onOpenPlugins}>打开插件中心</Button></Surface><SkillSourceSettings client={skillsClient}/></>}
       {groups.map(section => <div className="settings-group" key={section.section}><h2>{activeSection === 'general' ? '常规行为' : SETTING_SECTION_LABELS[section.section] ?? section.label}</h2>
-        {section.section === 'models' && <ModelConnectionSettings provider={String(draft.models?.provider ?? '')} model={String(draft.models?.defaultModel ?? '')} values={draft.models ?? {}} onChange={(key, value) => change('models', key, value)} />}
-        <div className="settings-fields">{section.fields.filter(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel'].includes(field.key))).map(field => renderField(section.section, field))}</div>
-        {section.fields.some(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel'].includes(field.key))) && <div className="settings-save"><small>{Object.keys(changes[section.section]??{}).length?'有未保存的更改':'当前没有待保存的更改'}</small><Button compact variant="primary" disabled={recoveryRequired || Boolean(saving) || !Object.keys(changes[section.section]??{}).length} onClick={() => void save(section.section)}>{saving === section.section ? '正在保存…' : '保存设置'}</Button></div>}
+        {section.section === 'models' && <ModelConnectionsPanel heading="模型与服务" />}
+        <div className="settings-fields">{section.fields.filter(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel', 'reasoningEffort', 'connections', 'modelPreferences'].includes(field.key))).map(field => renderField(section.section, field))}</div>
+        {section.fields.some(field => !(section.section === 'general' && field.key === 'theme') && (section.section !== 'models' || !['provider', 'defaultModel', 'reasoningEffort', 'connections', 'modelPreferences'].includes(field.key))) && <div className="settings-save"><small>{Object.keys(changes[section.section]??{}).length?'有未保存的更改':'当前没有待保存的更改'}</small><Button compact variant="primary" disabled={recoveryRequired || Boolean(saving) || !Object.keys(changes[section.section]??{}).length} onClick={() => void save(section.section)}>{saving === section.section ? '正在保存…' : '保存设置'}</Button></div>}
       </div>)}
       {activeSection === 'security' && <Surface className="privacy-summary"><span className="policy-icon"><Icon name="approval" size={19} /></span><span className="grow"><strong>本地数据与权限</strong><small>会话和配置保存在本机。敏感操作遵循逐次审批。</small></span><Badge tone="success">Core 策略</Badge></Surface>}
       {activeSection === 'devices' && !groups.length && <EmptyNotice icon="plug" title="设备网格设置由 Core 提供" detail="当前没有可调整的设备字段。设备配对和在线状态仍可在 Agents 页面查看。" />}
@@ -1111,88 +1139,63 @@ export function SettingsPage({ theme, onThemeChange, onOpenPlugins }: { theme: '
     </>;
   }
   return <div className="content-page settings-page"><SettingsLayout search={<SearchInput label="搜索设置" placeholder="搜索设置名称或说明" value={settingsQuery} onChange={event=>setSettingsQuery(event.target.value)}/>} items={settingPages} selected={activeSection} onChange={setActiveSection}>
-    {error && <ErrorNotice error={error} onRetry={() => {if(retryTarget?.kind==='save'&&retryTarget.section)void save(retryTarget.section);else if(retryTarget?.kind==='window-sync')void syncWindowBehavior();else if(!Object.values(changes).some(value=>Object.keys(value).length))void refresh();else setError('当前有未保存的更改，请先保存后再重新读取设置。');}} />}{notice && <p className="inline-success" role="status">{notice}</p>}{windowSyncPending!==null&&<p role="status">窗口行为待同步。<Button compact disabled={Boolean(saving)} onClick={()=>void syncWindowBehavior()}>重试同步</Button></p>}
+    {error && <ErrorNotice error={error} onRetry={() => {if(retryTarget?.kind==='save'&&retryTarget.section)void save(retryTarget.section);else if(retryTarget?.kind==='window-sync')void syncWindowBehavior();else void refreshPreservingDrafts().catch(cause=>setError(messageOf(cause)));}} />}{notice && <p className="inline-success" role="status">{notice}</p>}{windowSyncPending!==null&&<p role="status">窗口行为待同步。<Button compact disabled={Boolean(saving)} onClick={()=>void syncWindowBehavior()}>重试同步</Button></p>}
     {loading ? <LoadingState label="正在读取本机设置…" /> : <section className="settings-section"><div className="settings-section-main">{renderSettingsContent()}</div></section>}
     <div className="diagnostics-settings-entry"><DiagnosticsEntry/><FeedbackDeveloperButton/></div>
   </SettingsLayout></div>;
 }
 
-function OnboardingPage({ onComplete }: { onComplete(): Promise<void> }) {
-  const [status, setStatus] = useState<{ complete: boolean; currentStep: string | null; steps: { id: string; title: string; description: string; status: string; optional: boolean }[] } | null>(null);
-  const [catalog, setCatalog] = useState<Awaited<ReturnType<typeof chatClient.catalog>> | null>(null);
-  const [provider, setProvider] = useState('');
-  const [model, setModel] = useState('');
-  const apiKeyRef = useRef<HTMLInputElement>(null);
-  const [apiKeyEntered, setApiKeyEntered] = useState(false);
-  const [baseUrl, setBaseUrl] = useState('');
+export function OnboardingPage({ onComplete }: { onComplete(): Promise<void> }) {
+  const [status, setStatus] = useState<Awaited<ReturnType<typeof onboardingClient.status>> | null>(null);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
-  const [connectionResult, setConnectionResult] = useState('');
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    try { const next = await onboardingClient.status(); setStatus(next); setError(''); }
-    catch (cause) { setError(messageOf(cause)); }
-    finally { setLoading(false); }
+  const refresh = useCallback(async () => { setStatus(await onboardingClient.status()); }, []);
+  useEffect(() => {
+    let current = true;
+    void onboardingClient.start().then(state => { if (current) setStatus(state); })
+      .catch(cause => { if (current) setError(messageOf(cause)); }).finally(() => { if (current) setLoading(false); });
+    return () => { current = false; };
   }, []);
-  useEffect(() => { void onboardingClient.start().then(setStatus).catch(cause => setError(messageOf(cause))); void chatClient.catalog().then(result => { setCatalog(result); const selected = result.defaultModelProvider ?? result.modelProviders.find(item => item.configured)?.id ?? result.modelProviders[0]?.id ?? ''; setProvider(selected); }).catch(() => setCatalog(null)); void refresh(); }, [refresh]);
   const activeStep = status?.steps.find(step => step.id === status.currentStep) ?? null;
-  const providerOptions = catalog?.modelProviders ?? [];
-  const selectedProvider = providerOptions.find(item => item.id === provider);
-  const modelOptions = (selectedProvider?.models ?? []).map(item => ({ id: item.id ?? item.name ?? item.label ?? '', label: item.label ?? item.name ?? item.id ?? '' })).filter(item => item.id);
-  async function finishStep(stepId: string, data: Record<string, unknown> = {}) {
+  async function action(work: () => Promise<unknown>, confirmation = '') {
+    if (busy) return;
     setBusy(true); setError(''); setNotice('');
-    try { await onboardingClient.completeStep(stepId, data); await refresh(); }
+    try { await work(); await refresh(); if (confirmation) setNotice(confirmation); }
     catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(false); }
   }
-  async function skipStep(stepId: string) {
-    setBusy(true); setError(''); setNotice('');
-    try { await onboardingClient.skipStep(stepId); await refresh(); }
-    catch (cause) { setError(messageOf(cause)); }
-    finally { setBusy(false); }
+  async function confirmedConnection(configurationRevision: number) {
+    await action(async () => {
+      const current = await onboardingClient.status();
+      if (current.steps.some(step => step.id === 'provider' && step.status !== 'completed')) {
+        await onboardingClient.completeStep('provider', { configurationRevision });
+      }
+      const afterProvider = await onboardingClient.status();
+      if (afterProvider.steps.some(step => step.id === 'connection' && step.status !== 'completed')) {
+        await onboardingClient.completeStep('connection', { configurationRevision });
+      }
+    }, '连接已测试并保存。请启用需要的模型并选择默认模型。');
   }
-  async function testConnection(saveProvider: boolean) {
-    setBusy(true); setError(''); setNotice(''); setConnectionResult('');
-    const key = apiKeyRef.current?.value ?? '';
-    if (apiKeyRef.current) apiKeyRef.current.value = '';
-    setApiKeyEntered(false);
-    try {
-      const result = await onboardingClient.testProvider(provider, key, baseUrl, model);
-      if (!result.ok) { setConnectionResult(String(result.message ?? '连接测试失败。')); return; }
-      if (saveProvider && status?.steps.some(step => step.id === 'provider' && step.status !== 'completed')) await onboardingClient.completeStep('provider', { provider });
-      if (status?.steps.some(step => step.id === 'connection' && step.status !== 'completed')) await onboardingClient.completeStep('connection', { provider });
-      // Credential validation may have changed configured providers since the cached first-run catalog.
-      setCatalog(await chatClient.catalog(true));
-      setConnectionResult(String(result.message ?? '连接成功。'));
-      await refresh();
-    } catch (cause) { setConnectionResult(messageOf(cause)); }
-    finally { setBusy(false); }
-  }
-  async function selectModel() {
-    if (!provider || !model) return;
-    setBusy(true); setError(''); setNotice('');
-    try { await onboardingClient.setModel(provider, model); await refresh(); setNotice('默认模型已保存。'); }
-    catch (cause) { setError(messageOf(cause)); }
-    finally { setBusy(false); }
-  }
-  async function completeSetup() {
-    setBusy(true); setError('');
-    try { await onboardingClient.finish(); await onComplete(); }
-    catch (cause) { setError(messageOf(cause)); }
-    finally { setBusy(false); }
+  async function confirmDefault() {
+    await action(async () => {
+      const current = await modelConfigurationClient.get();
+      await onboardingClient.setModel(current.defaults.provider, current.defaults.model, current.revision);
+    }, '默认模型已保存。');
   }
   if (loading) return <div className="content-page"><LoadingState label="正在准备首次设置…" /></div>;
-  return <div className="content-page onboarding-page"><div className="onboarding-card"><div className="onboarding-mark"><Icon name="sparkles" size={29} /></div><p className="eyebrow">WELCOME TO CETAMESH</p><h1>开始使用 CetaMesh</h1><p className="page-description">先完成模型服务商和默认模型设置。Agent 与插件可以稍后配置。</p>{error && <ErrorNotice error={error} onRetry={() => void refresh()} />}{notice && <p className="inline-success" role="status">{notice}</p>}{connectionResult && <p className="connection-result" role="status">{connectionResult}</p>}
-    {status && <ol className="onboarding-steps">{status.steps.map((step, index) => <li className={step.status === 'completed' || step.status === 'skipped' ? 'done' : step.id === status.currentStep ? 'current' : ''} key={step.id}><span>{step.status === 'completed' ? <Icon name="check" size={15} /> : index + 1}</span><div><strong>{step.title}{step.optional && <small> · 可选</small>}</strong><small>{step.description}</small></div></li>)}</ol>}
-    {!activeStep && status?.complete && <Surface><strong>首次设置已完成。</strong><p>你可以随时在 Settings、Agents 和 Plugins 中调整偏好。</p><Button variant="primary" onClick={() => void onComplete()}>进入 Chat</Button></Surface>}
-    {activeStep?.id === 'welcome' && <Button variant="primary" disabled={busy} onClick={() => void finishStep('welcome')}>继续设置</Button>}
-    {activeStep?.id === 'provider' && <div className="onboarding-form"><Select label="模型服务商" value={provider} onChange={event => setProvider(event.target.value)}><option value="">选择服务商</option>{providerOptions.map(item => <option key={item.id} value={item.id}>{item.label}{item.configured ? ' · 已配置' : ''}</option>)}</Select><Input ref={apiKeyRef} aria-label="API Key" type="password" autoComplete="new-password" placeholder="输入 API Key；仅发送给本机 Core" onChange={event => setApiKeyEntered(Boolean(event.target.value))} /><Input aria-label="服务商 Base URL（可选）" placeholder="Base URL（可选）" value={baseUrl} onChange={event => setBaseUrl(event.target.value)} /><Button variant="primary" disabled={busy || !provider || (!apiKeyEntered && !selectedProvider?.configured)} onClick={() => void testConnection(true)}>{busy ? '正在测试…' : '保存并测试连接'}</Button><small>凭据由本机 Core 保存。输入内容不会在页面状态中保留。</small></div>}
-    {activeStep?.id === 'connection' && <div className="onboarding-form"><p>使用已保存的服务商凭据测试连接。若要更换 Key，请返回服务商步骤。</p><Button variant="primary" disabled={busy || !provider} onClick={() => void testConnection(false)}>{busy ? '正在测试…' : '测试连接'}</Button></div>}
-    {activeStep?.id === 'model' && <div className="onboarding-form"><Select label="默认模型服务商" value={provider} onChange={event => { setProvider(event.target.value); setModel(''); }}><option value="">选择服务商</option>{providerOptions.filter(item => item.configured).map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</Select>{modelOptions.length ? <Select label="默认模型" value={model} onChange={event => setModel(event.target.value)}><option value="">选择默认模型</option>{modelOptions.map(item => <option key={item.id} value={item.id}>{item.label}</option>)}</Select> : <Input aria-label="默认模型 ID" placeholder="输入模型 ID" value={model} onChange={event => setModel(event.target.value)} />}<Button variant="primary" disabled={busy || !provider || !model} onClick={() => void selectModel()}>{busy ? '正在保存…' : '保存默认模型'}</Button></div>}
-    {(activeStep?.id === 'agent' || activeStep?.id === 'integration') && <div className="onboarding-form"><p>此步骤可稍后在 {activeStep.id === 'agent' ? 'Agents' : 'Plugins'} 页面完成。</p><div className="row"><Button onClick={() => void finishStep(activeStep.id)}>现在完成此步骤</Button><Button variant="primary" disabled={busy} onClick={() => void skipStep(activeStep.id)}>稍后设置</Button></div></div>}
-    {activeStep?.id === 'done' && <Surface className="onboarding-done"><Icon name="check" size={22} /><strong>必需设置已完成</strong><p>你可以进入 CetaMesh 并开始新的会话。</p><Button variant="primary" disabled={busy} onClick={() => void completeSetup()}>{busy ? '正在完成…' : '完成并进入 Chat'}</Button></Surface>}
+  return <div className="content-page onboarding-page"><div className="onboarding-card"><div className="onboarding-mark"><Icon name="sparkles" size={29} /></div><p className="eyebrow">WELCOME TO CETAMESH</p><h1>开始使用 CetaMesh</h1><p className="page-description">先完成模型连接和默认模型设置。Agent 与插件可以稍后配置。</p>
+    {error && <ErrorNotice error={error} onRetry={() => void action(refresh)} />}{notice && <p className="inline-success" role="status">{notice}</p>}
+    {status && <ol className="onboarding-steps">{status.steps.map((step,index) => <li className={step.status === 'completed' || step.status === 'skipped' ? 'done' : step.id === status.currentStep ? 'current' : ''} key={step.id}><span>{step.status === 'completed' ? <Icon name="check" size={15} /> : index+1}</span><div><strong>{step.title}{step.optional && <small> · 可选</small>}</strong><small>{step.description}</small></div></li>)}</ol>}
+    {!activeStep && status?.complete && <Surface><strong>首次设置已完成。</strong><Button variant="primary" onClick={() => void action(onComplete)}>进入 Chat</Button></Surface>}
+    {activeStep?.id === 'welcome' && <Button variant="primary" disabled={busy} onClick={() => void action(() => onboardingClient.completeStep('welcome'))}>继续设置</Button>}
+    {['provider','connection','model'].includes(activeStep?.id ?? '') && <>
+      <ModelConnectionsPanel heading="连接模型服务" onConfigured={current => void confirmedConnection(current.revision)} />
+      {activeStep?.id === 'connection' && <p>请在同一个连接表单中测试并保存，成功后自动进入模型选择。</p>}
+      {activeStep?.id === 'model' && <Button variant="primary" disabled={busy} onClick={() => void confirmDefault()}>使用已选默认模型继续</Button>}
+    </>}
+    {(activeStep?.id === 'agent' || activeStep?.id === 'integration') && <div className="onboarding-form"><p>此步骤可稍后在 {activeStep.id === 'agent' ? 'Agents' : 'Plugins'} 页面完成。</p><div className="row"><Button disabled={busy} onClick={() => void action(() => onboardingClient.completeStep(activeStep.id))}>现在完成此步骤</Button><Button variant="primary" disabled={busy} onClick={() => void action(() => onboardingClient.skipStep(activeStep.id))}>稍后设置</Button></div></div>}
+    {activeStep?.id === 'done' && <Surface className="onboarding-done"><Icon name="check" size={22} /><strong>必需设置已完成</strong><Button variant="primary" disabled={busy} onClick={() => void action(async () => { await onboardingClient.finish(); await onComplete(); })}>完成并进入 Chat</Button></Surface>}
   </div></div>;
 }
-

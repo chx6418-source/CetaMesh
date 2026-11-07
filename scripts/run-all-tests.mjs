@@ -39,6 +39,11 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-model-configuration-core.mjs': { category: 'integration', timeoutMs: 120000, note: 'Ordinary composed Core Owner model settings, local requests and all-disabled recovery' },
+  'test-model-connection-form-ui.mjs': { category: 'desktop', timeoutMs: 240000, note: 'Shared model connection management through production UI and isolated Owner Core' },
+  'test-chat-configuration-transaction.mjs': { category: 'security', timeoutMs: 120000, note: 'Durable Chat configuration intent, runtime acknowledgement and partial-success recovery' },
+  'test-chat-configuration-ui.mjs': { category: 'desktop', timeoutMs: 120000, note: 'Production Chat retains actionable configuration refusal and explicit Skill references after refresh' },
+  'test-chat-skill-references.mjs': { category: 'integration', timeoutMs: 120000, note: 'Actual Core and local model request with authorized, persistent, versioned Skill references and stale-source recovery' },
   'test-context-synopsis.mjs': { category: 'security', timeoutMs: 120000, note: 'Deterministic layered history projection, retained source identity, native pair preservation and bounded authorized retrieval' },
   'test-git-index-actions.mjs': { category: 'security', timeoutMs: 180000, note: 'Exact normal Git index staging and unstaging with source, repository metadata and lock checks' },
   'test-git-staged-commit.mjs': { category: 'security', timeoutMs: 240000, note: 'Commit reviewed staged OIDs while preserving unrelated index and working bytes, including actual native metadata races, ref formats and cleanup recovery' },

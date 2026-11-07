@@ -248,6 +248,7 @@ export function createProductContextService({
   agentBroker,
   modelRuntime = null,
   skillContentService = null,
+  skillPrincipalForContext = null,
   memorySettings = () => ({ enabled: true, retrievalLimit: 50 }),
   onMemoryError = null
 } = {}) {
@@ -272,7 +273,9 @@ export function createProductContextService({
         ['user:desktop', 'global'], memoryQuery, onMemoryError)
     ], settings);
 
-    const skills = skillContentService ? await skillContentService.buildContext({ principal: OWNER_ACTOR,
+    const skillPrincipal = skillContentService && typeof skillPrincipalForContext === 'function'
+      ? skillPrincipalForContext({ kind: 'owner', taskId: task?.id ?? null, workspaceId: workspace?.id ?? null }) : OWNER_ACTOR;
+    const skills = skillContentService ? await skillContentService.buildContext({ principal: skillPrincipal,
       taskId: task?.id ?? null, workspaceId: workspaceReconciliation?.required ? null : workspace?.id ?? null,
       selectedRefs: skillRefs ?? source.skillRefs ?? [], signal }) : null;
 
@@ -332,7 +335,9 @@ export function createProductContextService({
          agentMemoryScopes, task.goal, onMemoryError))
     ], settings);
     const grantedIds = Array.isArray(liveActor.grants?.capabilities) ? liveActor.grants.capabilities : [];
-    const skills = skillContentService ? await skillContentService.buildContext({ principal: { ...principal, actor: liveActor },
+    const skillPrincipal = skillContentService && typeof skillPrincipalForContext === 'function'
+      ? skillPrincipalForContext({ kind: 'agent', taskId: task.id, workspaceId: workspace?.id ?? null }) : { ...principal, actor: liveActor };
+    const skills = skillContentService ? await skillContentService.buildContext({ principal: skillPrincipal,
       taskId: task.id, workspaceId: workspaceReconciliation.required ? null : workspace?.id ?? null,
       selectedRefs: skillRefs ?? [], signal }) : null;
     return serializeContext({

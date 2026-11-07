@@ -44,18 +44,23 @@ try{
  await check('native reasoning survives load, exact ACK, UI projection and restart',async()=>{
   const f=fixture();try{await f.bind();assert.equal(f.saved().config.reasoning,'medium');
    const changed=await f.set({reasoning:'xhigh'});assert.equal(changed.config.reasoning,'xhigh');
+   assert.equal(changed.configuration.application,'runtime-confirmed');assert.equal(changed.configuration.durable,true);
    assert.equal(f.saved().config.reasoning,'xhigh');await f.service.close();
    const reloaded=createChatService({stateDir:f.stateDir});try{assert.equal((await reloaded.execute({method:'chat.sessions.list',params:{}})).sessions[0].config.reasoning,'xhigh');}finally{await reloaded.close();}
   }finally{await f.service.close();}
  });
  await check('native ACK mismatch rejects without replacing confirmed Chat config',async()=>{
   const f=fixture({selection:async()=>({confirmed:true,modelControl:control('model-a','medium')})});
-  try{await f.bind();const before=f.saved();await assert.rejects(f.set({model:'model-b'}),{code:'MODEL_ACK_MISMATCH'});assert.deepEqual(f.saved().config,before.config);assert.equal(f.saved().dshSessionId,'agent-session');}finally{await f.service.close();}
+  try{await f.bind();const before=f.saved();await assert.rejects(f.set({model:'model-b'}),{code:'MODEL_ACK_MISMATCH'});assert.deepEqual(f.saved().config,before.config);assert.equal(f.saved().dshSessionId,'agent-session');
+   assert.equal(f.saved().pendingConfiguration.phase,'needs-reconciliation');
+   const status=await f.ui.execute({method:'ui.chat.status',params:{id:'chat'}});assert.equal(status.configuration.runtime,'unknown');assert.equal(status.configuration.durable,false);
+  }finally{await f.service.close();}
  });
  await check('pending runtime ACK does not appear current or allow another config transaction',async()=>{
   let release,entered;const started=new Promise(r=>{entered=r;});const gate=new Promise(r=>{release=r;});
   const f=fixture({selection:async p=>{entered();await gate;return{confirmed:true,modelControl:control(p.model,p.reasoningEffort)};}});
   try{await f.bind();const pending=f.set({model:'model-b'});await started;assert.equal(f.saved().config.model,'model-a');
+   assert.equal(f.saved().pendingConfiguration.phase,'needs-reconciliation');assert.ok(f.saved().pendingConfiguration.changeId);
    await assert.rejects(f.set({reasoning:'xhigh'}),{code:'CONFIG_BUSY'});release();assert.equal((await pending).config.model,'model-b');
   }finally{release?.();await f.service.close();}
  });

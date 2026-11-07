@@ -21,6 +21,19 @@ export type DiagnosticsSummary = Pick<DiagnosticsReport, 'id' | 'generatedAt' | 
 export interface ChatSession {
   id: string; title: string; createdAt: string | number | null; updatedAt: string | number | null;
   archived: boolean; taskId: string | null; config: { mode: string; modelProvider: string | null; model: string; reasoning?: string; agentProvider: string | null; workspaceId: string | null };
+  configuration?: ChatConfigurationState | null;
+}
+export interface ChatConfigurationState {
+  revision: number; changeId: string | null; state: 'saved' | 'prepared' | 'runtime-confirmed' | 'needs-reconciliation';
+  application: 'next-turn' | 'runtime-confirmed' | 'requires-new-session' | null; durable: boolean;
+  runtime: 'not-required' | 'not-applied' | 'confirmed' | 'unknown'; at: number | null; errorCode: string | null;
+}
+export interface ChatConfigurationObservation {
+  schemaVersion: 1; requestId: string; providerId: string; connectionRevision: number | null;
+  requested: { model: string | null; reasoning: string | null }; effective: { model: string | null; reasoning: string | null };
+  response: { model: string | null }; source: { model: string | null; reasoning: string | null; effective: string | null };
+  application: 'current-request'; stage: 'serialized' | 'response' | 'aborted'; overrideReason: string | null; at: number | null;
+  chatRequestId: string | null; turnId: string | null; configurationRevision: number;
 }
 export type EvidenceStatus = 'actual' | 'estimated' | 'unknown';
 export interface ChatContextObservation {
@@ -38,7 +51,7 @@ export interface ChatModelCapabilities {
   context: { status: 'verified' | 'declared' | 'unknown'; contextWindowTokens?: number | null; maxOutputTokens?: number | null; defaultOutputTokens?: number | null; outputTokenParameter?: string | null; source: string | null; version?: string | null };
 }
 export interface ChatCatalogModel { id?: string; name?: string; label?: string; displayName?: string; modelName?: string; toolCalling?: string; streaming?: string; reasoning?: string; capabilities?: ChatModelCapabilities }
-export interface ChatModelProvider { id: string; label: string; configured: boolean; catalogState?: string; reachable?: boolean | null; authenticated?: boolean | null; inferencing?: boolean | null; toolCalling?: boolean; error?: string | null; settingsFields?: ProviderSettingField[]; models: ChatCatalogModel[] }
+export interface ChatModelProvider { id: string; label: string; configured: boolean; enabled?: boolean; catalogState?: string; reachable?: boolean | null; authenticated?: boolean | null; inferencing?: boolean | null; toolCalling?: boolean; error?: string | null; settingsFields?: ProviderSettingField[]; models: ChatCatalogModel[] }
 export interface AgentModelControl {
   status: 'available' | 'unsupported' | 'unknown'; source: string | null; runtimeVersion?: string | null;
   application: 'runtime-confirmed' | 'next-turn' | 'requires-new-session' | null;
@@ -70,13 +83,31 @@ export interface ChatActivityTimeline {
 }
 export interface ChatActivityObservation {
   activityTimeline?: ChatActivityTimeline | null; activityOmitted?: number; activityState?: string | null;
+  configuration?: ChatConfigurationState | null; configurationObservation?: ChatConfigurationObservation | null;
+  configurationObservations?: ChatConfigurationObservation[];
 }
 export interface ChatFailureDetails {
   recoveryCode: 'CODEX_HOST_RESTART_REQUIRED' | 'CODEX_LEGACY_STOP_EVIDENCE_MISSING' | 'CODEX_HOST_RESTART_UNVERIFIED';
 }
+export interface SkillReference { skillId: string; sourceRevision: string; sourceKind?: 'project' | 'user' | 'installed' }
+export interface SkillEntry extends SkillReference {
+  name: string; description: string; sourceKind: 'project' | 'user' | 'installed'; sourceId: string;
+  always?: boolean; packageVersion?: string; sha256?: string;
+}
+export interface SkillIndex {
+  indexRevision: string; entries: SkillEntry[];
+  shadowed: (SkillEntry & { reason?: string; shadowedBy?: string })[];
+  omissions: { skillId?: string; sourceKind?: SkillEntry['sourceKind']; sourceId?: string; name?: string; reason: string }[];
+  truncated?: boolean;
+}
+export interface SkillContentPage { content: string; sourceRevision: string; nextOffset: number | null; truncated: boolean; sha256?: string }
+export interface SkillSourcesState {
+  sources: { sourceId: string; root: string; revision: number; enabled: boolean }[]; revision: number;
+}
 export interface ChatMessage extends ChatActivityObservation {
   id: string; role: 'user' | 'assistant' | 'system'; text: string; at: string | number | null;
   requestId?: string | null;
+  skillRefs?: SkillReference[];
   errorCode?: string | null;
   errorDetails?: ChatFailureDetails | null;
   failureStage?: 'pre-dispatch' | 'execution' | 'unknown' | null;
@@ -287,13 +318,15 @@ export interface DesktopEventData extends ChatActivityObservation {
   delta?: string; replaceText?: string; reset?: boolean; toolActivity?: ChatMessage['toolActivity']; agentActivity?: ChatMessage['agentActivity'];
 }
 type UiMethod =
+  | 'ui.skills.list' | 'ui.skills.read' | 'ui.skills.sources.list' | 'ui.skills.sources.register' | 'ui.skills.sources.setEnabled' | 'ui.skills.sources.remove'
+  | `ui.models.configuration.${'get' | 'update' | 'edit' | 'discover' | 'commit'}`
   | `ui.simulation.${'overview' | 'role.list' | 'role.get' | 'role.save' | 'role.export' | 'role.import' | 'role.restore' | 'role.searchExamples' | 'role.examples.search' | 'role.context' | 'role.preview' | 'legacy.inventory' | 'legacy.import' | 'room.list' | 'room.create' | 'room.get' | 'room.update' | 'room.search' | 'message.send' | 'discussion.start' | 'discussion.pause' | 'discussion.cancel' | 'discussion.resume' | 'discussion.end' | 'project.create' | 'project.start' | 'project.refresh' | 'memory.list' | 'memory.propose' | 'memory.confirm'}`
   | 'ui.devices.overview' |
   'ui.chat.attachment.list' | 'ui.chat.attachment.begin' | 'ui.chat.attachment.chunk' | 'ui.chat.attachment.finish' | 'ui.chat.attachment.read' | 'ui.chat.attachment.derive' | 'ui.chat.attachment.describe' | 'ui.chat.attachment.remove' | 'ui.chat.attachment.cleanup' | 'ui.chat.attachment.limits' | 'ui.chat.attachment.limits.set' | 'ui.chat.attachment.capabilities' | 'ui.chat.attachment.import' | 'ui.workspace.git.overview' | 'ui.workspace.git.diff' | 'ui.workspace.git.commit' | 'ui.workspace.git.branch.create' | 'ui.workspace.git.worktree.create' | 'ui.developer.forge.describe' | 'ui.developer.forge.save' | 'ui.developer.forge.invoke' | 'ui.developer.forge.credentials.save'
   | 'ui.preview.open' | 'ui.preview.read' | 'ui.preview.close'
   | 'ui.events.next'
   | 'ui.chat.sessions.list' | 'ui.chat.sessions.create' | 'ui.chat.sessions.rename' | 'ui.chat.sessions.archive' | 'ui.chat.sessions.delete'
-  | 'ui.chat.history' | 'ui.chat.status' | 'ui.chat.send' | 'ui.chat.stop' | 'ui.chat.retry' | 'ui.chat.continue' | 'ui.chat.catalog' | 'ui.chat.config.set'
+  | 'ui.chat.history' | 'ui.chat.status' | 'ui.chat.send' | 'ui.chat.stop' | 'ui.chat.retry' | 'ui.chat.continue' | 'ui.chat.catalog' | 'ui.chat.config.set' | 'ui.chat.config.reconcile'
   | 'ui.task.overview' | 'ui.task.get' | 'ui.task.outcome.verify' | 'ui.task.child.create' | 'ui.task.child.review' | 'ui.task.child.complete' | 'ui.task.child.verify' | 'ui.task.complete' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.recovery.inspect' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
   | 'ui.workshop.proposals' | 'ui.workshop.proposal' | 'ui.workshop.review' | 'ui.workshop.retry' | 'ui.workshop.task.status' | 'ui.workshop.deliver'
   | 'ui.workspace.version' | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
@@ -393,6 +426,66 @@ function send<T>(method: HostMethod | UiMethod, params: object): Promise<T> {
 }
 export const uiCall = <T>(method: UiMethod, params: object = {}) => send<T>(method, params);
 
+// Model Configuration is independent of external Agent model catalogs. These
+// bounded DTOs contain no saved API key or endpoint; candidates are write-only.
+export type ModelReasoningEffort = 'off' | 'low' | 'high' | 'max';
+export type ModelProtocolProfile = 'openai-compatible-v1' | 'openai-chat-v1' | 'deepseek-chat-v1';
+export interface ModelManualCapabilities {
+  tools?: boolean; vision?: boolean; reasoning?: boolean; streaming?: boolean;
+  contextWindowTokens?: number; maxOutputTokens?: number; defaultOutputTokens?: number;
+}
+export interface ModelCapabilityFact {
+  value: boolean | number | null; source: 'manual' | 'protocol-declared' | 'rule-inferred' | 'unknown';
+  status: 'declared' | 'unknown'; ruleId: string | null; version: string | null;
+}
+export type ModelCapabilityFacts = Partial<Record<keyof ModelManualCapabilities, ModelCapabilityFact>>;
+export interface ModelConfigurationModel {
+  id: string; label?: string; enabled: boolean; manualCapabilities: ModelManualCapabilities;
+  capabilities: ModelCapabilityFacts; discoveredCapabilities?: ModelCapabilityFacts;
+  reasoning: { levels: ModelReasoningEffort[]; status: 'declared' | 'unsupported' | 'unknown'; source: string | null };
+}
+export interface ModelConfigurationConnection {
+  id: string; label: string; protocolProfile: ModelProtocolProfile; enabled: boolean; configured: boolean;
+  credentialRef?: string; models: ModelConfigurationModel[]; modelCount: number; modelsOffset: number;
+  modelsOmitted: number; modelsNextOffset: number | null;
+}
+export interface ModelConfigurationState {
+  revision: number; derived: boolean; defaults: { provider: string; model: string; reasoningEffort: ModelReasoningEffort };
+  connections: ModelConfigurationConnection[];
+  modelPreferences: { connectionId: string; modelId: string; reasoningEffort: ModelReasoningEffort }[];
+  preferencesTotal: number; preferencesNextOffset: number | null;
+  recovery: { state: string; connectionId: string; credentialRef: string; previousCredentialRef: string | null; expectedConfigurationRevision?: number; preparedAt?: number }[];
+  recoveryTotal?: number; recoveryNextOffset?: number | null;
+}
+export interface ModelConfigurationPage {
+  connectionId?: string; modelOffset?: number; modelLimit?: number; preferenceOffset?: number; recoveryOffset?: number;
+}
+export interface ModelConnectionCandidate { apiKey?: string; baseUrl?: string; credentialRef?: string }
+export interface ModelConnectionCommitInput {
+  expectedRevision: number;
+  connection: { id: string; label: string; protocolProfile: ModelProtocolProfile; enabled: boolean; credentialRef?: string;
+    models?: { id: string; enabled: boolean; manualCapabilities?: ModelManualCapabilities }[] };
+  candidate?: ModelConnectionCandidate;
+}
+export interface ModelConnectionEditInput {
+  expectedRevision: number; connectionId: string; patch: { label?: string; enabled?: boolean;
+    modelChanges?: { id: string; enabled?: boolean; manualCapabilities?: ModelManualCapabilities; remove?: boolean }[];
+    preferences?: { modelId: string; reasoningEffort: ModelReasoningEffort }[] };
+}
+export interface ModelConfigurationDiscovery {
+  connectionId: string; configurationRevision: number; truncated: boolean;
+  models: { id: string; enabled: false; capabilities: ModelCapabilityFacts }[];
+  attempts: { status?: string; code?: string }[];
+}
+export const modelConfigurationClient = {
+  get: (page: ModelConfigurationPage = {}) => uiCall<ModelConfigurationState>('ui.models.configuration.get', page),
+  update: (input: { expectedRevision: number; defaults: Partial<ModelConfigurationState['defaults']> }) => uiCall<ModelConfigurationState>('ui.models.configuration.update', input),
+  edit: (input: ModelConnectionEditInput) => uiCall<ModelConfigurationState>('ui.models.configuration.edit', input),
+  discover: (input: { connectionId: string; candidate?: ModelConnectionCandidate }) => uiCall<ModelConfigurationDiscovery>('ui.models.configuration.discover', input),
+  commit: (input: ModelConnectionCommitInput) => uiCall<ModelConfigurationState>('ui.models.configuration.commit', input)
+};
+export type ModelConfigurationClient = typeof modelConfigurationClient;
+
 window.__cetameshReceive = (reply) => {
   const request = pending.get(reply.id);
   if (!request) return;
@@ -472,8 +565,9 @@ export const chatClient = {
     id: string; total: number; messages: ChatMessage[]; sessionUsage?: ModelUsage | null; nextBeforeMessageId: string | null; hasMore: boolean; nextAfterMessageId: string | null; hasMoreAfter: boolean
   }>('ui.chat.history', { id, limit, beforeMessageId, afterMessageId }),
   status: (id: string) => uiCall<ChatActivityObservation & { id: string; taskId: string | null; dshSessionAlive: boolean; state: string; requestId: string | null; statusMessage: string | null; retryCount: number; followState: string; followError: string | null; displayText: string; toolActivity: ChatMessage['toolActivity']; agentActivity: ChatMessage['agentActivity']; context?: ChatContextObservation | null; turnUsage?: ModelUsage | null; quota?: { status: 'unknown'; reason: string }; error: string | null; errorCode: string | null; errorDetails?: ChatFailureDetails | null; failureStage?: ChatMessage['failureStage']; approvalId: string | null; approvalExpiresAt: string | number | null; routing: Record<string, unknown> }>('ui.chat.status', { id }),
-  send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string) => {
-    const params = { id, text, attachments:attachments.map(a=>a.ref?{ref:a.ref}:a), ...(clientMessageId ? { clientMessageId } : {}) };
+  send: (id: string, text: string, attachments: Attachment[] = [], clientMessageId?: string, skillRefs: SkillReference[] = []) => {
+    const params = { id, text, attachments:attachments.map(a=>a.ref?{ref:a.ref}:a), ...(clientMessageId ? { clientMessageId } : {}),
+      skillRefs: skillRefs.map(({skillId,sourceRevision}) => ({skillId,sourceRevision})) };
     return uiCall<{ userMessageId?: string; requestId?: string }>('ui.chat.send', params).catch(error => {
       // The Core may have accepted the request while its ACK was lost. Retry only
       // with a stable message ID; Chat's persisted ID makes this idempotent.
@@ -485,7 +579,19 @@ export const chatClient = {
   retry: (id: string) => uiCall<{ userMessageId?: string }>('ui.chat.retry', { id }),
   continue: (id: string) => uiCall<{ continued?: boolean }>('ui.chat.continue', { id }),
   catalog: (refresh = false, id?:string) => uiCall<{ models: unknown[]; modelProviders: ChatModelProvider[]; agentProviders: Agent[]; sessionId?:string|null;agentProvider?:string|null;modelControl?:AgentModelControl|null;modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', { refresh, ...(id?{id}:{}) }),
-  setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config })
+  setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config }),
+  reconcileConfig: (id: string) => uiCall<ChatSession>('ui.chat.config.reconcile', { id })
+};
+export const skillsClient = {
+  listSkills: (input: { chatId: string }) => uiCall<SkillIndex>('ui.skills.list', input),
+  readSkill: (input: { chatId: string; skillId: string; sourceRevision: string; offset?: number; maxBytes?: number }) =>
+    uiCall<SkillContentPage>('ui.skills.read', input),
+  listSkillSources: () => uiCall<SkillSourcesState>('ui.skills.sources.list', {}),
+  registerSkillSource: (input: { sourceId: string; root: string; enabled: boolean; expectedRev: number }) =>
+    uiCall<SkillSourcesState>('ui.skills.sources.register', input),
+  setSkillSourceEnabled: (input: { sourceId: string; enabled: boolean; expectedRev: number }) =>
+    uiCall<SkillSourcesState>('ui.skills.sources.setEnabled', input),
+  removeSkillSource: (input: { sourceId: string; expectedRev: number }) => uiCall<SkillSourcesState>('ui.skills.sources.remove', input)
 };
 export const taskClient = {
   inspectRecovery: (id:string, automatic = false) => uiCall<TaskRecoveryPreview>('ui.task.recovery.inspect',{id,...(automatic ? {automatic:true} : {})}),
@@ -634,7 +740,7 @@ export const onboardingClient = {
   skipStep: (stepId: string) => uiCall<unknown>('ui.onboarding.skipStep', { stepId }),
   finish: () => uiCall<unknown>('ui.onboarding.finish', {}),
   testProvider: (provider: string, apiKey: string, baseUrl = '', model = '') => uiCall<{ ok: boolean; provider: string; message?: string; code?: string; phase?: string; configured?: boolean | null; reachable?: boolean | null; authenticated?: boolean | null; inferencing?: boolean | null; connectionStepCompleted?: boolean }>('ui.onboarding.testProvider', { provider, apiKey, baseUrl, model }),
-  setModel: (provider: string, model: string) => uiCall<Record<string, unknown>>('ui.onboarding.setModel', { provider, model })
+  setModel: (provider: string, model: string, expectedRevision?: number) => uiCall<Record<string, unknown>>('ui.onboarding.setModel', { provider, model, ...(expectedRevision !== undefined ? { expectedRevision } : {}) })
 };
 export const searchClient = { search: (query: string) => uiCall<{ sessions: ChatSession[]; tasks: Task[]; plugins: Plugin[] }>('ui.search', { query }) };
 export interface DevicePeer {id:string;name:string;role:string;trust:string;presence:string;grants:string[];lastSeenAt:number|null;lastError:string|null}

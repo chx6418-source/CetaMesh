@@ -10,6 +10,7 @@ import { createToolEvidenceStore } from '../context/tool-evidence.js';
 import { createTaskWorkingMemoryRecorder } from '../memory/task-working-memory.js';
 import os from 'node:os';
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { APP_PATHS } from '../app-paths.js';
 import { DEFAULT_MODEL } from '../config/migrate.js';
 import { PRIVILEGE_CONSOLE } from '../bridge-privilege.js';
@@ -22,7 +23,7 @@ import { createAutonomousHandoff } from '../continuity/autonomous-handoff.js';
 import { searchWeb } from '../mcp-web-search-safe.js';
 import { createProviderSecrets } from '../providers/secrets.js';
 import { createAgentRuntimeConfiguration } from '../agent/runtime-configuration.js';
-import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCompatibleModelProvider, createToolExecutionCoordinator } from '../model/index.js';
+import { createModelProviderRegistry, createModelRuntimeService, createOpenAiCompatibleModelProvider, createToolExecutionCoordinator, createModelConfiguration } from '../model/index.js';
 import { createRouterService } from '../router/index.js';
 import { createMemoryService, DESKTOP_USER_PRINCIPAL } from '../memory/service.js';
 import { explicitMemoryCandidate } from '../memory/auto-candidate.js';
@@ -58,6 +59,8 @@ import { buildDiagnostics } from '../product/diagnostics.js';
 import { loadReleaseConfig } from '../product/release-config.js';
 import { createPluginCenterService } from '../plugin-center/service.js';
 import { createProductContextService } from '../context/service.js';
+import { createSkillContentService } from '../context/skills.js';
+import { createSkillSourceAuthorizer } from '../context/skill-source-authorization.js';
 import { OWNER_ACTOR } from '../capability/types.js';
 import { createDesktopUiEventBus, createDesktopUiService } from '../desktop/ui-service.js';
 
@@ -193,8 +196,10 @@ export function createCetaMeshServices(options = {}) {
       })
     ]
   });
+  const modelConfiguration = createModelConfiguration({ settingsStore: settingsService.store, secrets: providerSecrets, registry: modelRegistry });
   const modelRuntime = createModelRuntimeService({
     registry: modelRegistry, secrets: providerSecrets,
+    configuration: modelConfiguration,
     preferredProviderId: () => settingsService.store.get().settings.models.provider,
     log
   });
@@ -223,7 +228,11 @@ export function createCetaMeshServices(options = {}) {
     modelRuntime,
     evidenceStore,
     toolExecutionCoordinator: toolExecutionProxy,
-    buildProductTurnContext: request => productContextService?.buildForAgentTurn(request),
+    buildProductTurnContext: request => productContextService?.buildForAgentTurn({
+      ...request, skillRefs: chatService.skillReferencesForTask({
+        taskId: request.principal?.taskId, workspaceId: request.principal?.expectedWorkspaceId
+      })
+    }),
     requireProductContext: true,
     capabilityExecutor: request => capabilityService.broker.execute(request),
     taskPrincipalResolver: ({ provider, sessionId }) => {
@@ -269,13 +278,33 @@ export function createCetaMeshServices(options = {}) {
     agentExecute: command => agentService.execute(command),
     modelRuntime,
     toolExecutionCoordinator: toolExecutionProxy,
+    modelCatalogRevision: () => {
+      const models = settingsService.store.get().settings.models;
+      const active = new Set(modelConfiguration.get().connections.map(row => row.credentialRef ?? row.id));
+      const credentials = providerSecrets.list().filter(row => active.has(row.provider))
+        .map(row => [row.provider, row.revision ?? null, row.updatedAt ?? null]).sort((a, b) => a[0].localeCompare(b[0]));
+      return createHash('sha256').update(JSON.stringify([models, credentials])).digest('hex');
+    },
     buildProductTurnContext: request => productContextService?.buildForChatTurn(request),
     requireProductContext: true,
     router: routerService,
     buildProductContext: request => productContextService?.buildForChat(request),
     resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId),
     resolveTask: taskId => taskService.runtime.get({ id: taskId }).task,
-    handoffTask: request => continuityService.runtime.rollover(request),
+    handoffTaskSupportsBeforeEffects: true,
+    handoffTask: ({ expectedConfigurationSource, ...request }) => {
+      if (expectedConfigurationSource) {
+        const expected = expectedConfigurationSource;
+        const current = taskService.runtime.get({ id: request.taskId }).task;
+        if (current.id !== expected.taskId || current.rev !== expected.taskRevision || current.workspaceId !== expected.workspaceId
+          || current.currentAgent?.provider !== expected.provider || current.currentAgent?.sessionId !== expected.sessionId) {
+          throw Object.assign(new Error('Task configuration source changed before handoff; refresh its current assignment'), { code: 'TASK_SESSION_MISMATCH' });
+        }
+      }
+      return continuityService.runtime.rollover(request);
+    },
+    readTaskHandoff: ({ taskId, from }) => continuityService.runtime.history({ taskId }).rollovers
+      .findLast(row => row.from?.provider === from.provider && row.from?.sessionId === from.sessionId) ?? null,
     recordOwnerContext: request => taskService.runtime.recordOwnerContext(request),
     platformRoute: request => platformRuntime.route(request),
     recoverTask: request => platformRuntime.recoverTask(request),
@@ -508,6 +537,15 @@ export function createCetaMeshServices(options = {}) {
   // 发行配置 release-config.json 与"最近错误码"是 About 与产品服务共用的事实源，各建一份。
   const releaseConfig = loadReleaseConfig({ rootDir: resourceRoot });
   const errorRegistry = createErrorRegistry();
+  const skillSources = () => settingsService.store.get().settings.extensions.skillSources ?? [];
+  const skillSourceAuthorizer = createSkillSourceAuthorizer({
+    capabilityService, taskRuntime: taskService.runtime, workspaceService,
+    userSources: skillSources, extensionRuntime: extensionService.runtime
+  });
+  const skillContentService = createSkillContentService({
+    workspaceService, extensionRuntime: extensionService.runtime,
+    userSources: skillSources, authorizeSource: skillSourceAuthorizer.authorizeSource
+  });
   productContextService = createProductContextService({
     taskRuntime: taskService.runtime,
     workspaceService,
@@ -516,6 +554,9 @@ export function createCetaMeshServices(options = {}) {
     extensionService,
     agentBroker,
     modelRuntime,
+    skillContentService,
+    skillPrincipalForContext: ({ kind, taskId }) => kind === 'owner'
+      ? skillSourceAuthorizer.ownerPrincipal({ taskId }) : skillSourceAuthorizer.principalForTask(taskId),
     memorySettings: () => settingsService.store.get().settings.memory,
     onMemoryError: error => uiEventBus.publish('memory.updated', { status: 'unavailable',
       code: error?.code ?? 'MEMORY_UNAVAILABLE' })
@@ -603,6 +644,14 @@ export function createCetaMeshServices(options = {}) {
     settingsService,
     extensionService,
     pluginCenterService,
+    setDefaultModel: ({ provider, model, expectedRevision }) => {
+      const current = modelConfiguration.get();
+      if (expectedRevision !== undefined && expectedRevision !== current.revision) {
+        throw Object.assign(new Error('Model configuration changed; refresh before selecting the default'), { code: 'SETTINGS_CONFLICT' });
+      }
+      modelConfiguration.resolveSelection({ providerId: provider, model });
+      return modelConfiguration.update({ expectedRevision: current.revision, defaults: { provider, model } });
+    },
     log
   });
   const systemServices = {
@@ -644,7 +693,8 @@ export function createCetaMeshServices(options = {}) {
     services: {
       chatService, taskService, workshopService, workspaceService, memoryService, capabilityService, agentBroker, continuityService, platformRuntime,
       agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices,
-      toolExecutionCoordinator, usageLedger, modelRuntime,forgeService,simulationService,onebotConfiguration
+      toolExecutionCoordinator, usageLedger, modelRuntime,modelConfiguration,forgeService,simulationService,onebotConfiguration,
+      skillContentService, skillSourceAuthorizer
     },
     system: systemServices,
     eventBus: uiEventBus
@@ -660,10 +710,13 @@ export function createCetaMeshServices(options = {}) {
     agentBroker,
     managedAgent,
     modelRegistry,
+    modelConfiguration,
     modelRuntime,
     usageLedger,
     toolExecutionCoordinator,
     productContextService,
+    skillContentService,
+    skillSourceAuthorizer,
     routerService,
     chatService,
     memoryService,
