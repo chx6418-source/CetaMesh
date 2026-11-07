@@ -12,7 +12,7 @@ import { createVmExtensionHost } from './host.js';
 import { createProcessExtensionHost } from './process-host.js';
 import { createExtensionInstaller } from './installer.js';
 import { reviewSummaryLines, permissionDelta } from './review.js';
-import { extensionError } from './types.js';
+import { extensionError, normalizeVersion } from './types.js';
 import { createMemoryPackHost } from './memory-pack.js';
 import { manifestFingerprint } from './manifest.js';
 import { createCapabilityBroker } from '../capability/broker.js';
@@ -21,6 +21,7 @@ import { fingerprintExtensionPackage } from './package-fingerprint.js';
 import {isHttpDataManifest,createHttpExtensionHost,httpRequestFor,projectHttpResult} from './http-host.js';
 import {validateSchema} from '../model/input-schema.js';
 import {isEventDataManifest,createEventExtensionHost,eventRequestFor,projectEventResult} from './event-host.js';
+import { isSkillDataManifest, createSkillDataHost, skillHash } from './skill-data.js';
 const isDataManifest=manifest=>isHttpDataManifest(manifest)||isEventDataManifest(manifest);
 
 export function createExtensionRuntime({
@@ -31,6 +32,7 @@ export function createExtensionRuntime({
   processHostFactory = createProcessExtensionHost,
   vmHostFactory = createVmExtensionHost,
   memoryPackHostFactory = createMemoryPackHost,
+  supportedSkillContent = true,
   isTrustedVmExtension = () => false,
   now = () => Date.now(),
   monitorIntervalMs = 15_000,
@@ -42,7 +44,7 @@ export function createExtensionRuntime({
   stopTimeoutMs = 4500
 } = {}) {
   if (!store) throw new Error('createExtensionRuntime 需要 store');
-  const installer = createExtensionInstaller({ store, now });
+  const installer = createExtensionInstaller({ store, now, supportedSkillContent });
   const hosts = new Map(); // id -> host
   const runtimeRecords = new Map();
   const pendingReviews = new Map();
@@ -64,7 +66,8 @@ export function createExtensionRuntime({
     if (!runtimeRecords.has(key)) runtimeRecords.set(key, {
       state: 'stopped', startedAt: null, healthySince: null, heartbeatMisses: 0,
       restartTimes: [], monitorTimer: null, recovering: false, switching: false,
-      suppressRecovery: false, lastError: null, lifecycle: new AbortController(), stopPromise: null
+      suppressRecovery: false, lastError: null, lifecycle: new AbortController(), stopPromise: null,
+      generation: 0, lastCall: null, errorCode: null, errorStage: null
     });
     return runtimeRecords.get(key);
   }
@@ -107,8 +110,20 @@ export function createExtensionRuntime({
     const record = runtimeRecord(id);
     record.state = 'running';
     const context = { request: authority, next: 0 };
-    try { return await invocationAuthority.run(context,()=>host.invoke(capability, input, { signal,
-      runWithAuthority: callback => invocationAuthority.run(context, callback) })); }
+    const generation = record.generation;
+    const startedAt = now();
+    try {
+      const result = await invocationAuthority.run(context,()=>host.invoke(capability, input, { signal,
+        runWithAuthority: callback => invocationAuthority.run(context, callback) }));
+      if (generation === record.generation && hosts.get(String(id)) === host && !record.stopping)
+        record.lastCall = { capability, generation, startedAt, completedAt: now(), status: result?.isError ? 'failed' : result?.status === 'pending' ? 'pending' : 'completed' };
+      return result;
+    } catch (error) {
+      if (generation === record.generation && hosts.get(String(id)) === host && !record.stopping)
+        record.lastCall = { capability, generation, startedAt, completedAt: now(), status: signal?.aborted ? 'cancelled' : 'failed',
+          code: /^[A-Z0-9_]{1,80}$/.test(error?.code ?? '') ? error.code : 'EXTENSION_CALL_FAILED' };
+      throw error;
+    }
     finally {
       if (hosts.get(String(id)) === host && host.available()) {
         const health = host.health?.() || {};
@@ -123,6 +138,8 @@ export function createExtensionRuntime({
   }
 
   function validateInstalledEntry(entry) {
+    if (isSkillDataManifest(entry.manifest) && entry.revokedSkillVersions?.includes(entry.version))
+      throw extensionError('SKILL_SOURCE_REVOKED', 'This Skill package version was revoked; review a supported replacement version');
     // Catalog discovery performs the same package review as installation, without
     // executing its code. Persisted metadata alone must never create authority.
     const expectedRoot = path.resolve(store.packagesDir, entry.id, entry.version);
@@ -266,6 +283,14 @@ export function createExtensionRuntime({
       manifestFingerprint: manifestFingerprint(entry.manifest),
       approvedGrants: [...(entry.permissions || [])].sort()
     };
+    if (isSkillDataManifest(entry.manifest)) return createSkillDataHost({ manifest: entry.manifest, source,
+      packageRoot: entry.sourceRoot, sourceRevision: skillRevision(entry), validateCurrent() {
+        const current = entryOrThrow(entry.id);
+        if (current.status !== 'enabled' || runtimeRecord(entry.id).stopping || runtimeRecord(entry.id).switching)
+          throw extensionError('EXTENSION_DISABLED', 'Skill content is not currently enabled');
+        if (skillRevision(current) !== skillRevision(entry) || validateInstalledEntry(current) !== entry.reviewToken)
+          throw extensionError('SKILL_SOURCE_STALE', 'Reviewed Skill package or its enabled generation changed');
+      } });
     if(isEventDataManifest(entry.manifest))return createEventExtensionHost({manifest:entry.manifest,source,storage:store.storage(entry.id),capabilityExecutor:capabilityExecutorFor(bound)});
     if(isHttpDataManifest(entry.manifest))return createHttpExtensionHost({manifest:entry.manifest,source,capabilityExecutor:capabilityExecutorFor(bound)});
     const trustedVm = entry.type !== 'memory-pack' && isTrustedVmExtension(entry) === true;
@@ -300,6 +325,7 @@ export function createExtensionRuntime({
     const key = String(id);
     const record = runtimeRecord(key);
     record.stopping = true;
+    record.generation += 1;
     record.lifecycle.abort(Object.assign(extensionError('INVOKE_CANCEL_UNCONFIRMED','Plugin stopped; verify prior effects'),{effectStatus:'unknown'}));
     hideEntry(key);
     clearMonitor(key);
@@ -353,7 +379,8 @@ export function createExtensionRuntime({
 
   function assertOwnerReview(reviewed, current, approval) {
     const delta = permissionDelta(current.permissions || [], reviewed.manifest.permissions || []);
-    const needsReview = delta.added.length > 0 || reviewed.review.requiresExplicitApproval;
+    const needsReview = delta.added.length > 0 || reviewed.review.requiresExplicitApproval
+      || isSkillDataManifest(current.manifest) && !isSkillDataManifest(reviewed.manifest);
     const added = delta.added.length ? ' Added permissions: ' + delta.added.join(', ') + '.' : '';
     const candidate = pendingReviews.get(current.id);
     if (candidate && candidate.version === reviewed.manifest.version
@@ -436,11 +463,14 @@ export function createExtensionRuntime({
     hosts.set(entry.id, host);
     registerEntry(entry);
     const record = runtimeRecord(entry.id);
+    record.generation += 1;
+    record.lastCall = null;
     record.startedAt = now();
     record.healthySince = typeof host.ping === 'function' ? null : now();
     record.heartbeatMisses = 0;
     record.state = typeof host.ping === 'function' ? 'starting' : 'healthy';
     record.lastError = null;
+    record.errorCode = null; record.errorStage = null;
     scheduleMonitor(entry.id);
     return host;
   }
@@ -550,6 +580,23 @@ export function createExtensionRuntime({
     return { entry, host };
   }
 
+  function skillRevision(entry) {
+    return skillHash(JSON.stringify([entry.id, entry.version, entry.packageFingerprint, entry.reviewToken, entry.contentGeneration ?? 0]));
+  }
+
+  function availability(entry) {
+    const host = hosts.get(entry.id), record = runtimeRecord(entry.id);
+    const content = isSkillDataManifest(entry.manifest);
+    return { installed: true, enabled: entry.status === 'enabled', loaded: Boolean(host),
+      runtime: { state: runtimeState(entry), generation: record.generation },
+      connection: content || entry.type === 'memory-pack' ? 'not-applicable' : 'unknown',
+      authentication: content || entry.type === 'memory-pack' ? 'not-applicable' : 'unknown',
+      discoveredCapabilities: entry.status === 'enabled' && !record.stopping && !record.lastError
+        ? (entry.manifest.capabilities || []).map(cap => cap.id) : [],
+      lastCall: record.lastCall ? structuredClone(record.lastCall) : null,
+      error: record.lastError ? { code: record.errorCode || 'EXTENSION_RUNTIME_ERROR', stage: record.errorStage || 'runtime' } : null };
+  }
+
   // Restore discovery synchronously at Core construction. Workers remain lazy.
   // A damaged installed package is isolated from the rest of the catalog.
   for (const entry of store.list()) {
@@ -571,7 +618,7 @@ export function createExtensionRuntime({
       const entry = entryOrThrow(id);
       const host = hosts.get(entry.id);
       const health = host?.health?.() || null;
-      return { extension: entry, loaded: Boolean(host), runtimeState: runtimeState(entry), health, provider: health?.provider || null };
+      return { extension: entry, loaded: Boolean(host), runtimeState: runtimeState(entry), health, provider: health?.provider || null, availability: availability(entry) };
     },
 
     /** UI 用聚合：已安装列表 + 各自权限摘要 + 运行状态。 */
@@ -595,6 +642,7 @@ export function createExtensionRuntime({
           runtimeState: runtimeState(entry),
           health,
           provider: health?.provider || null,
+          availability: availability(entry),
           pendingReview,
           updatedAt: entry.updatedAt
           });
@@ -675,7 +723,14 @@ export function createExtensionRuntime({
         return { extension: entry, changed: false };
       }
       if (existing) throw extensionError('EXTENSION_STOP_UNCONFIRMED', 'Use Restart to confirm the previous Worker stopped before enabling');
-      const host = startHost(entry);
+      const candidate = isSkillDataManifest(entry.manifest) ? { ...entry, contentGeneration: (entry.contentGeneration ?? 0) + 1 } : entry;
+      let host;
+      try { host = startHost(candidate); }
+      catch (error) {
+        const record = runtimeRecord(entry.id); record.errorCode = error?.code || 'EXTENSION_LOAD_FAILED';
+        record.errorStage = 'load'; record.lastError = 'Extension load failed';
+        throw error;
+      }
       if (!host.available()) {
         hosts.delete(entry.id);
         const failure = host.loadError();
@@ -683,7 +738,7 @@ export function createExtensionRuntime({
       }
       hosts.set(entry.id, host);
       try {
-        const updated = store.put({ ...entry, status: 'enabled', enabledAt: now(), updatedAt: now() });
+        const updated = store.put({ ...candidate, status: 'enabled', enabledAt: now(), updatedAt: now() });
         registerEntry(updated);
         return { extension: updated, changed: true };
       } catch (error) {
@@ -709,12 +764,75 @@ export function createExtensionRuntime({
       } else if (entry.status !== 'enabled') {
         throw extensionError('EXTENSION_DISABLED', 'Only an enabled or crash-disabled Extension can be restarted');
       }
-      await stopHost(entry.id);
+      const record = runtimeRecord(entry.id);
+      const stopping = stopHost(entry.id), generation = record.generation;
+      await stopping;
+      const current = store.get(entry.id);
+      if (generation !== record.generation || !current || current.status !== 'enabled'
+        || current.version !== entry.version || current.packageFingerprint !== entry.packageFingerprint
+        || current.reviewToken !== entry.reviewToken) {
+        throw extensionError('EXTENSION_RESTART_SUPERSEDED', 'A newer Extension lifecycle operation replaced this restart');
+      }
+      validateInstalledEntry(current);
+      entry = isSkillDataManifest(current.manifest)
+        ? store.put({ ...current, contentGeneration: (current.contentGeneration ?? 0) + 1, updatedAt: now() }) : current;
       const host = startHost(entry);
       return { extension: store.get(entry.id), runtimeState: runtimeState(store.get(entry.id)), health: host.health?.() || null };
     },
 
     checkHealth,
+
+    /** Internal content adapter. No package paths cross this API. */
+    listSkillSources() {
+      if (closed) return [];
+      return store.list().filter(entry => isSkillDataManifest(entry.manifest) && entry.status === 'enabled').flatMap(entry => {
+        try {
+          validateInstalledEntry(entry);
+          const { host } = hostOrThrow(entry.id);
+          return [{ sourceId: 'extension:' + entry.id, sourceKind: 'installed', extensionId: entry.id,
+            packageVersion: entry.version, packageRevision: entry.packageFingerprint, ...host.describe() }];
+        } catch (error) {
+          hideEntry(entry.id);
+          const record = runtimeRecord(entry.id); record.lastError = 'Skill source review no longer matches';
+          record.errorCode = error?.code || 'REVIEW_MISMATCH'; record.errorStage = 'content';
+          return [];
+        }
+      });
+    },
+
+    readSkillContent({ extensionId, sourceRevision, resource, offset, maxBytes, signal } = {}) {
+      signal?.throwIfAborted();
+      const entry = entryOrThrow(extensionId);
+      if (!isSkillDataManifest(entry.manifest)) throw extensionError('SKILL_CONTENT_INVALID', 'Not a Skill content package');
+      validateInstalledEntry(entry);
+      const { host } = hostOrThrow(entry.id);
+      const record = runtimeRecord(entry.id), startedAt = now();
+      try {
+        const result = host.read({ sourceRevision, resource, offset, maxBytes });
+        record.lastCall = { capability: 'content.read', generation: record.generation, startedAt, completedAt: now(), status: 'completed' };
+        return result;
+      } catch (error) {
+        record.lastCall = { capability: 'content.read', generation: record.generation, startedAt, completedAt: now(), status: 'failed',
+          code: /^[A-Z0-9_]{1,80}$/.test(error?.code ?? '') ? error.code : 'SKILL_READ_FAILED' };
+        throw error;
+      }
+    },
+
+    /** Trusted catalog adapter: a persisted denial on the existing installed record, never a grant. */
+    async setSkillSourceRevoked({ id, version } = {}) {
+      const entry = entryOrThrow(id), revokedVersion = normalizeVersion(version);
+      if (!isSkillDataManifest(entry.manifest)) return { changed: false };
+      const versions = [...new Set([...(entry.revokedSkillVersions ?? []), revokedVersion])];
+      if (versions.length > 128) throw extensionError('SKILL_REVOCATION_LIMIT', 'Retained Skill revocation list needs Owner review');
+      if (!entry.revokedSkillVersions?.includes(revokedVersion)) store.put({ ...entry, revokedSkillVersions: versions, updatedAt: now() });
+      if (entry.version === revokedVersion) {
+        hideEntry(entry.id);
+        await stopHost(entry.id);
+        const record = runtimeRecord(entry.id); record.lastError = 'Skill package version is revoked';
+        record.errorCode = 'SKILL_SOURCE_REVOKED'; record.errorStage = 'source';
+      }
+      return { changed: !entry.revokedSkillVersions?.includes(revokedVersion), id: entry.id, version: revokedVersion };
+    },
 
     async invoke({ id, capability, input } = {}) {
       const { entry } = hostOrThrow(id);

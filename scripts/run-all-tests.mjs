@@ -342,6 +342,7 @@ const REGISTRY = {
   'test-memory-link.mjs': { category: 'runtime' },
   'test-state-retention.mjs': { category: 'runtime' },
   'test-task-runtime.mjs': { category: 'runtime' },
+  'test-skill-content-core.mjs': { category: 'security', timeoutMs: 120000, note: 'Reviewed content-only Skill host, deterministic discovery and unchanged execution authority' },
   'test-product-context.mjs': { category: 'runtime' },
   'test-continuity-rollover.mjs': { category: 'runtime' },
   'test-continuity-auto-rollover.mjs': { category: 'runtime' },

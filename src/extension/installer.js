@@ -19,6 +19,7 @@ import { validateMemoryPack, validateMemoryPackManifest } from './memory-pack.js
 import { fingerprintExtensionPackage } from './package-fingerprint.js';
 import {isHttpDataManifest,validateHttpDefinition} from './http-host.js';
 import {isEventDataManifest,validateEventDefinition} from './event-host.js';
+import { isSkillDataManifest, validateSkillDataManifest, validateSkillPackageFiles, parseSkillDocument } from './skill-data.js';
 
 function collectFiles(rootDir, relative = '', acc = { files: [], bytes: 0 }) {
   const dir = relative ? path.join(rootDir, relative) : rootDir;
@@ -73,7 +74,7 @@ function copyTree(fromDir, toDir) {
   }
 }
 
-export function createExtensionInstaller({ store, now = () => Date.now() } = {}) {
+export function createExtensionInstaller({ store, now = () => Date.now(), supportedSkillContent = true } = {}) {
   if (!store) throw new Error('createExtensionInstaller 需要 store');
 
   /** 只读审查：读 manifest + 入口源码，产出 review，不落盘。 */
@@ -82,23 +83,31 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
     if (!dir) throw extensionError('INVALID_PARAMS', 'sourceDir 不能为空');
     let stat;
     try {
-      stat = fs.statSync(dir);
+      stat = fs.lstatSync(dir);
     } catch {
       throw extensionError('SOURCE_NOT_FOUND', '扩展目录不存在：' + dir);
     }
+    const physical = fs.realpathSync(dir), lexical = path.resolve(dir);
+    if (stat.isSymbolicLink() || (process.platform === 'win32' ? physical.toLowerCase() !== lexical.toLowerCase() : physical !== lexical))
+      throw extensionError('SYMLINK_NOT_ALLOWED', 'Extension source root must not contain a link');
     if (!stat.isDirectory()) throw extensionError('SOURCE_NOT_DIRECTORY', '扩展来源必须是目录：' + dir);
 
     const collected = collectFiles(dir);
     const packageFingerprintBeforeReview = fingerprintExtensionPackage(dir);
     const { name, raw } = readManifestFile(dir);
     const manifest = assertManifest(raw);
+    if (isSkillDataManifest(manifest) && !supportedSkillContent) throw extensionError('SKILL_PROFILE_UNSUPPORTED', 'This Desktop does not support Skill content');
     const entryPath = path.join(dir, manifest.entry);
     if (!fs.existsSync(entryPath) || !fs.statSync(entryPath).isFile()) {
       throw extensionError('ENTRY_MISSING', 'manifest.entry 指向的文件不存在：' + manifest.entry);
     }
     const source = fs.readFileSync(entryPath, 'utf8');
     let scan;
-    if (manifest.type === 'memory-pack') {
+    if (isSkillDataManifest(manifest)) {
+      validateSkillDataManifest(manifest); validateSkillPackageFiles(collected.files, { rootDir: dir });
+      parseSkillDocument(source, { fallbackName: manifest.id });
+      scan = { ok: true, findings: [] };
+    } else if (manifest.type === 'memory-pack') {
       validateMemoryPackManifest(manifest);
       validateMemoryPack(source);
       if (collected.files.some(p => !/\.(json|md|txt)$/i.test(p))) {
@@ -129,7 +138,8 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
       ? permissionDelta(previousEntry.permissions || [], reviewed.manifest.permissions)
       : { added: [], removed: [] };
 
-    const needsApproval = reviewed.review.requiresExplicitApproval || delta.added.length > 0;
+    const needsApproval = reviewed.review.requiresExplicitApproval || delta.added.length > 0
+      || previousEntry && isSkillDataManifest(previousEntry.manifest) && !isSkillDataManifest(reviewed.manifest);
     if (needsApproval) {
       if (!approval || approval.approved !== true) {
         throw extensionError('APPROVAL_REQUIRED',
@@ -213,7 +223,9 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
       enabledAt: previous?.enabledAt || null,
       disabledAt: previous?.disabledAt || null,
       previousVersion: previous ? previous.version : null,
-      permissionDelta: delta
+      permissionDelta: delta,
+      ...(previous?.revokedSkillVersions ? { revokedSkillVersions: [...previous.revokedSkillVersions] } : {}),
+      ...(isSkillDataManifest(manifest) ? { contentGeneration: previous ? (previous.contentGeneration ?? 0) + 1 : 0 } : {})
     };
 
     // 新版本先在同一文件系统暂存并原子落位；旧版本保留供回滚。
@@ -269,7 +281,9 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
           sourceRoot: finalized.target, importedFrom: reviewed.sourceDir, fileCount: reviewed.files.length,
           bytes: reviewed.bytes, installedAt: previous.installedAt, updatedAt: timestamp,
           enabledAt: previous.enabledAt || null, disabledAt: previous.disabledAt || null,
-          previousVersion: previous.version, permissionDelta: delta
+          previousVersion: previous.version, permissionDelta: delta,
+          ...(previous.revokedSkillVersions ? { revokedSkillVersions: [...previous.revokedSkillVersions] } : {}),
+          ...(isSkillDataManifest(reviewed.manifest) ? { contentGeneration: (previous.contentGeneration ?? 0) + 1 } : {})
         };
         try { store.put(entry); }
         catch (error) {
@@ -310,7 +324,9 @@ export function createExtensionInstaller({ store, now = () => Date.now() } = {})
           sourceRoot: finalized.target, importedFrom: reviewed.sourceDir, fileCount: reviewed.files.length,
           bytes: reviewed.bytes, installedAt: previous.installedAt, updatedAt: timestamp,
           enabledAt: previous.enabledAt || null, disabledAt: previous.disabledAt || null,
-          previousVersion: previous.version, permissionDelta: delta
+          previousVersion: previous.version, permissionDelta: delta,
+          ...(previous.revokedSkillVersions ? { revokedSkillVersions: [...previous.revokedSkillVersions] } : {}),
+          ...(isSkillDataManifest(reviewed.manifest) ? { contentGeneration: (previous.contentGeneration ?? 0) + 1 } : {})
         };
         try { store.put(entry); }
         catch (error) {

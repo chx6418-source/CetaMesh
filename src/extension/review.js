@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { manifestFingerprint } from './manifest.js';
 import {isHttpDataManifest} from './http-host.js';
 import {isEventDataManifest} from './event-host.js';
+import { isSkillDataManifest } from './skill-data.js';
 import { PERMISSIONS, maxRisk, permissionRisk, requiresExplicitApproval, riskRank } from './types.js';
 
 export function reviewToken(fingerprint, permissionNames, riskLevel, packageFingerprint = '') {
@@ -27,7 +28,7 @@ export function reviewToken(fingerprint, permissionNames, riskLevel, packageFing
  * 其余权限目前只是「声明 + 审查」面：用户可以批准，但宿主还不会给出对应能力 —— 
  * review 里如实标 enforced=false，避免让用户以为批准了就真的放开了磁盘或记忆。
  */
-export const ENFORCED_PERMISSIONS = Object.freeze(['log', 'storage', 'extension.invoke', 'network', 'memory.read', 'memory.write', 'filesystem.read', 'filesystem.write']);
+export const ENFORCED_PERMISSIONS = Object.freeze(['skill.read', 'log', 'storage', 'extension.invoke', 'network', 'memory.read', 'memory.write', 'filesystem.read', 'filesystem.write']);
 
 export function isEnforced(name) {
   return ENFORCED_PERMISSIONS.includes(name);
@@ -78,7 +79,7 @@ export function buildReview(manifest, { packageFingerprint = '' } = {}) {
 
   const riskLevel = maxRisk(permissions.map((p) => p.risk));
   const fingerprint = manifestFingerprint(manifest);
-  const needsApproval = permissions.some((p) => p.requiresExplicitApproval) || riskRank(riskLevel) >= riskRank('high');
+  const needsApproval = isSkillDataManifest(manifest) || permissions.some((p) => p.requiresExplicitApproval) || riskRank(riskLevel) >= riskRank('high');
 
   return {
     id: manifest.id,
@@ -96,7 +97,8 @@ export function buildReview(manifest, { packageFingerprint = '' } = {}) {
     network: { hosts },
     scope: { workspace: manifest.scope?.workspace ?? null, paths },
     source: manifest.source,
-    executionBoundary: { osSandbox: false, codeExecution: manifest.type !== 'memory-pack'&&!isHttpDataManifest(manifest)&&!isEventDataManifest(manifest), permissionEnforcement: 'capability-broker' },
+    ...(isSkillDataManifest(manifest) ? { contentProfile: manifest.contentProfile } : {}),
+    executionBoundary: { osSandbox: false, codeExecution: manifest.type !== 'memory-pack'&&!isHttpDataManifest(manifest)&&!isEventDataManifest(manifest)&&!isSkillDataManifest(manifest), permissionEnforcement: 'capability-broker' },
     fingerprint,
     packageFingerprint,
     token: reviewToken(fingerprint, declared, riskLevel, packageFingerprint),
@@ -110,7 +112,8 @@ export function reviewSummaryLines(review) {
   const lines = [];
   lines.push(review.name + ' ' + review.version + '（' + review.type + '）');
   if (review.publisher) lines.push('发布者：' + review.publisher);
-  if (review.type !== 'memory-pack') lines.push('执行边界：Worker 进程隔离与 VM/API 限制不提供 OS 沙箱或 Windows AppContainer；仅安装经过人工审查且来源可信的代码扩展。');
+  if (review.contentProfile) lines.push('内容边界：仅可读取受审 Skill 引用数据；不创建 Worker，不执行代码，不授予网络或通用文件权限。');
+  else if (review.type !== 'memory-pack') lines.push('执行边界：Worker 进程隔离与 VM/API 限制不提供 OS 沙箱或 Windows AppContainer；仅安装经过人工审查且来源可信的代码扩展。');
   lines.push('风险等级：' + review.riskLevel);
   lines.push('声明能力：' + (review.capabilities.length ? review.capabilities.map((c) => c.id).join('、') : '无'));
   if (review.permissions.length) {

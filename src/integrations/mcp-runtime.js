@@ -1,6 +1,7 @@
 // MCP Runtime: supervise built-in stdio servers through the official SDK transport.
 import path from 'node:path';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { APP_PATHS, isPackagedRuntime } from '../app-paths.js';
@@ -20,6 +21,17 @@ const PACKAGED_MCP_MODES = Object.freeze({
 });
 const MCP_RUNTIME_ENV_KEYS = Object.freeze(['WHALEBRIDGE_DATA_DIR', 'WHALEBRIDGE_RESOURCE_DIR']);
 const STDERR_TAIL_LIMIT = 6000;
+
+/** Only effective connection settings participate. Notes/order do not recreate a transport. */
+export function mcpConfigurationRevision(config = {}, server = {}) {
+  const stable = value => Array.isArray(value) ? value.map(stable) : value && typeof value === 'object'
+    ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stable(value[key])])) : value;
+  const effective = server.transport === 'streamable-http'
+    ? { url: config.url ?? server.url ?? '', credentialRef: config.credentialRef ?? '',
+      credentialRevision: config.credentialRevision ?? null, allowedTools: [...new Set(config.allowedTools ?? [])].sort(), timeoutMs: config.timeoutMs ?? 30000 }
+    : { args: config.args ?? [], env: config.env ?? {}, cwd: path.resolve(config.cwd || APP_PATHS.sourceRoot), timeoutMs: config.timeoutMs ?? 30000 };
+  return crypto.createHash('sha256').update(JSON.stringify(stable(effective))).digest('hex');
+}
 
 function safePath(value, env = process.env) {
   let result = path.resolve(String(value ?? ''));
@@ -167,10 +179,12 @@ export async function createStdioMcpConnection(server, config = {}, {
       const result = await client.listTools();
       return Array.isArray(result?.tools) ? result.tools : [];
     },
-    async callTool(name, args) {
+    async callTool(name, args, { signal } = {}) {
       phase = 'tool/call';
       logPhase(phase, { toolName: String(name) });
-      return client.callTool({ name, arguments: args ?? {} });
+      signal?.throwIfAborted();
+      return client.callTool({ name, arguments: args ?? {} }, undefined,
+        { timeout: Math.min(600000, Math.max(1, Number(config.timeoutMs) || 30000)), ...(signal ? { signal } : {}) });
     },
     close() {
       if (!closePromise) {
@@ -250,7 +264,8 @@ export function createMcpRuntime({
     if (!records.has(id)) records.set(id, {
       status: 'stopped', lastError: null, pid: null, startedAt: null,
       restarts: 0, crashes: 0, tools: [], connection: null, stopping: false,
-      generation: 0, startPromise: null, stopPromise: null
+      generation: 0, startPromise: null, stopPromise: null,
+      configurationRevision: null, liveConfigurationRevision: null, lastCall: null, discoveryStatus: 'not-run'
     });
     return records.get(id);
   }
@@ -265,15 +280,26 @@ export function createMcpRuntime({
     const record = recordFor(id);
     return { id, status: record.status, lastError: record.lastError, pid: record.pid,
       startedAt: record.startedAt, restarts: record.restarts, crashes: record.crashes,
+      generation: record.generation, configurationRevision: record.configurationRevision,
+      liveConfigurationRevision: record.liveConfigurationRevision,
+      configurationCurrent: Boolean(record.connection && record.configurationRevision === record.liveConfigurationRevision),
+      connection: record.status === 'running' ? 'connected' : record.status === 'starting' ? 'connecting' : record.status === 'stopping' ? 'stopping' : 'disconnected',
+      authentication: 'unknown',
+      discovery: { status: record.discoveryStatus, toolCount: record.tools.length },
+      readiness: { state: record.status === 'running' ? 'ready' : record.status === 'starting' ? 'starting' : 'not-ready',
+        evidence: record.status === 'running' ? 'initialize-and-tool-discovery' : 'not-observed' },
+      lastCall: record.lastCall ? structuredClone(record.lastCall) : null,
       tools: record.tools.map(tool => ({ ...tool })) };
   }
   function handleClose(id, error) {
     const record = records.get(id);
     if (!record || record.status === 'crashed') return;
     record.connection = null;
+    record.liveConfigurationRevision = null;
     record.pid = null;
     record.tools = [];
     if (record.stopping) { record.status = 'stopped'; return; }
+    record.generation += 1;
     record.status = 'crashed';
     record.crashes += 1;
     record.lastError = 'MCP Server 连接意外关闭，请查看本机脱敏诊断日志。';
@@ -283,12 +309,15 @@ export function createMcpRuntime({
   function start(id, config = {}) {
     const server = requireServer(id);
     const record = recordFor(id);
+    const revision = mcpConfigurationRevision(config, server);
     if (closed) return Promise.reject(integrationError('MCP_RUNTIME_CLOSED', 'MCP Runtime 已关闭。'));
     if (record.stopping) return Promise.reject(integrationError('MCP_STOP_UNCONFIRMED', '请先确认原 MCP 连接已停止。'));
-    if (record.status === 'running') return Promise.resolve(snapshot(id));
-    if (record.status === 'starting') return record.startPromise;
+    if (record.status === 'running') return record.liveConfigurationRevision === revision
+      ? Promise.resolve(snapshot(id)) : reconfigure(id, config);
+    if (record.status === 'starting') return record.configurationRevision === revision ? record.startPromise : reconfigure(id, config);
     const generation = ++record.generation;
     record.status = 'starting'; record.lastError = null; record.stopping = false;
+    record.configurationRevision = revision; record.lastCall = null; record.discoveryStatus = 'pending';
     record.tools = [];
     const operation = startConnection();
     record.startPromise = operation;
@@ -312,6 +341,7 @@ export function createMcpRuntime({
         if (record.status === 'crashed') throw integrationError('MCP_CHILD_CLOSED', 'MCP child exited during initialization.');
         record.tools = discovered.map(normalizeTool).filter(tool => tool.name);
         record.status = 'running';
+        record.liveConfigurationRevision = revision; record.discoveryStatus = 'observed';
         record.startedAt = now();
         return snapshot(id);
       } catch (error) {
@@ -326,6 +356,7 @@ export function createMcpRuntime({
         if (error.cleanupConnection) record.connection = error.cleanupConnection;
         record.pid = record.connection?.pid ?? null;
         record.status = 'crashed';
+        record.discoveryStatus = 'failed';
         if (!alreadyCrashed) record.crashes += 1;
         record.lastError = 'MCP Server 启动失败，请查看本机脱敏诊断日志。';
         try { log('[mcp-diagnostic] ' + JSON.stringify(redactObject({ serverId: id, phase: 'startup-failed', error: error?.message ?? String(error) }))); }
@@ -347,9 +378,11 @@ export function createMcpRuntime({
     // Automatic cleanup must not erase the failure that required cleanup.
     // A later explicit stop clears it, while unconfirmed cleanup records its own error.
     if (!retainFailure) record.lastError = null;
+    // Even a stop joining existing cleanup is a newer lifecycle intent.
+    ++record.generation;
     if (!record.stopPromise) {
-      ++record.generation;
       record.tools = [];
+      record.discoveryStatus = 'not-run';
       record.stopping = true; record.status = 'stopping';
       const startup = record.startPromise;
       const stopping = Promise.resolve().then(async () => {
@@ -358,6 +391,7 @@ export function createMcpRuntime({
         const connection = record.connection;
         if (connection) await connection.close();
         if (record.connection === connection) record.connection = null;
+        record.liveConfigurationRevision = null;
         record.status = record.lastError ? 'crashed' : 'stopped'; record.pid = null;
         record.stopping = false;
         return snapshot(id);
@@ -371,10 +405,33 @@ export function createMcpRuntime({
     }
     return boundedStop(record.stopPromise);
   }
-  async function restart(id, config = {}) {
-    requireServer(id); await stop(id);
-    const record = recordFor(id); record.restarts += 1; record.lastError = null;
+  async function restart(id, config = {}, { canRestart = () => true } = {}) {
+    requireServer(id);
+    const record = recordFor(id), stopping = stop(id), generation = record.generation;
+    await stopping;
+    if (generation !== record.generation) throw integrationError('MCP_LIFECYCLE_SUPERSEDED', 'A newer MCP lifecycle operation replaced this restart');
+    if (!canRestart()) throw integrationError('MCP_DISABLED', 'MCP Server 已被禁用，先启用再启动');
+    record.restarts += 1; record.lastError = null;
     return start(id, config);
+  }
+  async function reconfigure(id, config = {}, { canRestart = () => true } = {}) {
+    const server = requireServer(id), record = recordFor(id);
+    const revision = mcpConfigurationRevision(config, server);
+    const changed = record.configurationRevision !== revision;
+    if (!changed && (!record.connection && !record.startPromise && !record.stopping
+      || record.status === 'running' && record.liveConfigurationRevision === revision
+      || record.status === 'starting' && !record.stopping)) return { ...snapshot(id), changed: false };
+    const wasActive = Boolean(record.connection || record.startPromise || record.stopping);
+    record.configurationRevision = revision;
+    if (wasActive) {
+      const stopping = stop(id), generation = record.generation;
+      await stopping;
+      if (generation !== record.generation) throw integrationError('MCP_LIFECYCLE_SUPERSEDED', 'A newer MCP lifecycle operation replaced this configuration restart');
+      if (record.configurationRevision !== revision) throw integrationError('MCP_CONFIG_STALE', 'MCP configuration changed again during cleanup; use the current saved revision');
+      if (!canRestart()) throw integrationError('MCP_DISABLED', 'MCP Server 已被禁用，先启用再启动');
+      await start(id, config);
+    }
+    return { ...snapshot(id), changed };
   }
   function discover(id) {
     const server = requireServer(id); const record = recordFor(id);
@@ -382,19 +439,36 @@ export function createMcpRuntime({
     return server.tools.map(tool => ({ name: tool.name, description: tool.description, inputSchema: { type: 'object' }, discovered: false }));
   }
   async function call(id, toolName, args = {}, options = {}) {
+    options.signal?.throwIfAborted();
     const server = requireServer(id); const record = recordFor(id);
     if (server.transport !== 'streamable-http' && !server.tools.some(tool => tool.name === toolName)) throw integrationError('UNKNOWN_MCP_TOOL', '未知 MCP 工具：' + server.namespace + toolName);
     if (record.status !== 'running' || !record.connection) throw integrationError('PROVIDER_UNAVAILABLE', 'MCP Server ' + id + ' 未运行（' + record.status + '）');
     if (!record.tools.some(tool => tool.name === toolName)) throw integrationError('UNKNOWN_MCP_TOOL', 'MCP Server ' + id + ' 未暴露工具：' + toolName);
     const tool=record.tools.find(tool => tool.name === toolName);
     if(server.transport==='streamable-http')validateSchema(tool.inputSchema,args);
-    try { return await record.connection.callTool(toolName, args, options); }
+    const connection = record.connection, generation = record.generation, startedAt = now();
+    const current = () => record.generation === generation && record.connection === connection && record.status === 'running' && !record.stopping;
+    try {
+      const result = await connection.callTool(toolName, args, options);
+      if (!current()) throw Object.assign(integrationError('MCP_CALL_STALE', 'MCP call belongs to a retired connection; verify prior effects'), { effectStatus: 'unknown' });
+      if (options.signal?.aborted) throw Object.assign(integrationError('MCP_CALL_CANCELLED', 'MCP call cancellation needs outcome verification'), { effectStatus: 'unknown' });
+      record.lastCall = { toolName, generation, startedAt, completedAt: now(), status: result?.isError === true ? 'failed' : 'completed',
+        ...(result?.isError === true ? { code: 'MCP_TOOL_ERROR' } : {}) };
+      return result;
+    }
     catch (error) {
-      record.lastError = 'MCP 工具调用失败，请查看本机脱敏诊断日志。';
+      const message = 'MCP 工具调用失败，请查看本机脱敏诊断日志。';
+      const code = /^[A-Z0-9_]{1,80}$/.test(error?.code ?? '') ? error.code : 'MCP_CALL_FAILED';
+      if (current()) {
+        record.lastError = message;
+        record.lastCall = { toolName, generation, startedAt, completedAt: now(), status: options.signal?.aborted ? 'cancelled' : 'unknown', code, effectStatus: 'unknown' };
+      }
       try { log('[mcp-diagnostic] ' + JSON.stringify(redactObject({ serverId: id, phase: 'tool/call-failed', toolName, error: error?.message ?? String(error) }))); }
       catch (logError) { void logError; /* Keep the safe error visible when diagnostic output fails. */ }
-      const safeError=error?.code ? integrationError(error.code, record.lastError) : integrationError('MCP_CALL_FAILED', record.lastError);
-      if(error?.effectStatus==='unknown')safeError.effectStatus='unknown';
+      const safeError = integrationError(code, message);
+      // Once a transport call has begun, an exception is not proof that its
+      // external operation had no effect (including SDK deadline/cancel errors).
+      safeError.effectStatus = 'unknown';
       throw safeError;
     }
   }
@@ -410,5 +484,5 @@ export function createMcpRuntime({
       throw integrationError('MCP_STOP_UNCONFIRMED', '部分 MCP 连接退出尚未确认；原资源保留，请重试停止。');
     }
   }
-  return { list, status, start, stop, restart, discover, call, snapshot, closeAll, recordFor };
+  return { list, status, start, stop, restart, reconfigure, discover, call, snapshot, closeAll, recordFor };
 }

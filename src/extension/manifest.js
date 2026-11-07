@@ -6,6 +6,7 @@
 
 import crypto from 'node:crypto';
 import { normalizeSettingsSchema } from './settings.js';
+import { hasSkillContentIntent, validateSkillDataManifest } from './skill-data.js';
 import {
   EXTENSION_LIMITS,
   PERMISSIONS,
@@ -172,7 +173,7 @@ function buildManifest(raw) {
   const capabilities = normalizeCapabilities(raw.capabilities);
   const settingsSchema = normalizeSettingsSchema(raw.settingsSchema);
 
-  return {
+  const manifest = {
     manifestVersion,
     id: normalizeExtensionId(raw.id),
     name: text(raw.name, 'name', EXTENSION_LIMITS.nameChars, { required: true }),
@@ -192,6 +193,10 @@ function buildManifest(raw) {
     source: normalizeSource(raw.source),
     ...(settingsSchema === undefined ? {} : { settingsSchema })
   };
+  if (raw.contentProfile !== undefined) manifest.contentProfile = text(raw.contentProfile, 'contentProfile', 60, { required: true });
+  if (hasSkillContentIntent(manifest)) validateSkillDataManifest(manifest);
+  else if (permissions.includes('skill.read')) throw extensionError('SKILL_CONTENT_INVALID', 'skill.read is reserved for the strict content profile');
+  return manifest;
 }
 
 /** 规范化 JSON 的 sha256：作为 manifest 指纹，供 Permission Review 与安装一致性校验。 */

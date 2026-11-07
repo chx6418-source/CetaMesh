@@ -13,7 +13,7 @@ import {
 } from './types.js';
 import { createIntegrationStore } from './store.js';
 import { createIntegrationRegistry } from './registry.js';
-import { createMcpRuntime } from './mcp-runtime.js';
+import { createMcpRuntime, mcpConfigurationRevision } from './mcp-runtime.js';
 import {assertNotRetiredSnowLuma} from './retired.js';
 import { createCapabilityBroker } from '../capability/broker.js';
 import { OWNER_ACTOR } from '../capability/types.js';
@@ -169,7 +169,10 @@ export function createIntegrationService({
     if (tool.capability !== request.capability) throw integrationError('TOOL_CAPABILITY_MISMATCH', '目标工具与调用能力不匹配');
     const schema = resolvedRegistry.toolView(tool).schema;
     validateSchema(schema, input);
-    const binding = {toolId:tool.id,inputHash:hashValue(input),schemaHash:hashValue(schema),...(resolvedRegistry.serverById.get(tool.serverId)?.transport==='streamable-http'?{configHash:hashValue(resolvedRegistry.mcpRuntimeConfig(tool.serverId))}:{})};
+    const server = resolvedRegistry.serverById.get(tool.serverId);
+    const binding = {toolId:tool.id,inputHash:hashValue(input),schemaHash:hashValue(schema),...(server ? {
+      configHash: mcpConfigurationRevision(resolvedRegistry.mcpRuntimeConfig(tool.serverId), server),
+      generation: runtime.status(tool.serverId).generation ?? null } : {})};
     if (request.integrationBinding) {
       if (request.integrationBinding.schemaHash !== binding.schemaHash) throw integrationError('TOOL_SCHEMA_CHANGED', '工具输入约束已变化，请重新请求审批');
       if (hashValue(request.integrationBinding) !== hashValue(binding)) throw integrationError('APPROVAL_MISMATCH', '工具输入与审批不匹配');
@@ -246,12 +249,24 @@ export function createIntegrationService({
         if (!resolvedRegistry.serverEnabled(command.serverId)) {
           throw integrationError('MCP_DISABLED', 'MCP Server ' + command.serverId + ' 已被禁用，先启用再重启');
         }
-        return runtime.restart(command.serverId, resolvedRegistry.mcpRuntimeConfig?.(command.serverId) ?? {});
+        return runtime.restart(command.serverId, resolvedRegistry.mcpRuntimeConfig?.(command.serverId) ?? {}, {
+          canRestart: () => resolvedRegistry.serverEnabled(command.serverId)
+        });
       }
       case 'mcp.config.update': {
+        const server = resolvedRegistry.requireServer(command.serverId);
+        const previous = resolvedRegistry.mcpRuntimeConfig(command.serverId);
         const updated=resolvedRegistry.updateMcpConfig(command.serverId,command.config??{});
-        if(resolvedRegistry.requireServer(command.serverId).transport==='streamable-http')await runtime.stop(command.serverId);
-        return updated;
+        const effective = resolvedRegistry.mcpRuntimeConfig(command.serverId);
+        const changed = mcpConfigurationRevision(previous, server) !== mcpConfigurationRevision(effective, server);
+        if (typeof runtime.reconfigure === 'function') {
+          const observation = await runtime.reconfigure(command.serverId, effective, {
+            canRestart: () => resolvedRegistry.serverEnabled(command.serverId)
+          });
+          return { ...updated, changed, runtime: observation };
+        }
+        if (changed) await runtime.stop(command.serverId);
+        return { ...updated, changed };
       }
       case 'integration.action': {
         const current = localServices?.() ?? {};

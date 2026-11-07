@@ -105,6 +105,16 @@ function pluginState(plugin, installedEntry, runtimeDetail, currentVersion) {
   return { status: 'Installed', warning: null };
 }
 
+function runtimeFacts(entry, detail) {
+  const health = detail?.health;
+  return { loaded: detail?.loaded === true, runtimeState: detail?.runtimeState ?? 'unknown',
+    health: health ? { provider: typeof health.provider === 'string' ? health.provider.slice(0, 80) : null,
+      inflight: Number.isSafeInteger(health.inflight) ? health.inflight : null, closed: health.closed === true, crashed: health.crashed === true } : null,
+    availability: detail?.availability ?? { installed: Boolean(entry), enabled: entry?.status === 'enabled', loaded: detail?.loaded === true,
+      runtime: { state: detail?.runtimeState ?? 'unknown', generation: null }, connection: 'unknown', authentication: 'unknown',
+      discoveredCapabilities: [], lastCall: null, error: detail ? null : { code: 'RUNTIME_NOT_OBSERVED', stage: 'observation' } } };
+}
+
 export function createPluginCenterService({
   stateDir,
   catalogUrl = null,
@@ -207,6 +217,7 @@ export function createPluginCenterService({
       try { raw = JSON.parse(body.toString('utf8')); }
       catch { throw pluginCenterError('CATALOG_INVALID', 'Plugin Catalog response is not valid JSON'); }
       const catalog = normalizeCatalog(raw, { catalogUrl: parsedUrl.toString(), allowedHosts });
+      await applySkillRevocations(catalog);
       const cachedAt = new Date(now()).toISOString();
       try {
         fs.mkdirSync(stateRoot, { recursive: true });
@@ -220,6 +231,7 @@ export function createPluginCenterService({
       const message = String(error?.code ?? error?.message ?? error);
       lastCatalogState = { configured: true, reachable: false, checkedAt: new Date(now()).toISOString(), lastError: message };
       const cached = cacheRead();
+      if (cached?.catalog) await applySkillRevocations(cached.catalog);
       return cached
         ? { catalog: cached.catalog, offline: true, configured: true, cachedAt: cached.cachedAt, error: message }
         : { catalog: null, offline: true, configured: true, error: message };
@@ -241,6 +253,16 @@ export function createPluginCenterService({
     return await extensionRuntime.list();
   }
 
+  async function applySkillRevocations(catalog) {
+    if (typeof extensionRuntime?.setSkillSourceRevoked !== 'function') return;
+    for (const entry of await installedEntries()) {
+      const plugin = catalog.plugins.find(row => row.id === entry.id);
+      if (!plugin || entry.manifest?.contentProfile !== 'skill-reference-v1') continue;
+      for (const version of new Set([...(plugin.blockedVersions ?? []), ...(plugin.revoked ? [entry.version] : [])]))
+        await extensionRuntime.setSkillSourceRevoked({ id: entry.id, version });
+    }
+  }
+
   async function buildCatalogRows(loaded) {
     const installed = new Map((await installedEntries()).map(entry => [entry.id, entry]));
     const rows = [];
@@ -257,7 +279,7 @@ export function createPluginCenterService({
       const state = pluginState(plugin, entry, detail, currentVersion);
       const trust = localUnverified.get(plugin.id);
       rows.push({
-        ...plugin, ...state, installedVersion: entry?.version ?? null, installedEntry: entry,
+        ...plugin, ...state, ...runtimeFacts(entry, detail), installedVersion: entry?.version ?? null, installedEntry: entry,
         trust: trust ? 'local-unverified' : 'catalog-sha256',
         firstEnableReviewed: trust?.firstEnableReviewed === true
       });
@@ -269,7 +291,9 @@ export function createPluginCenterService({
     const rows = [];
     for (const entry of await installedEntries()) {
       const trust = localUnverified.get(entry.id);
-      if (!trust || excludedIds.has(entry.id)) continue;
+      if (excludedIds.has(entry.id)) continue;
+      let detail = null;
+      try { detail = await extensionRuntime?.get?.({ id: entry.id }); } catch { /* Removed during observation: preserve the observed installed row. */ }
       const status = entry.status === 'enabled' ? 'Installed'
         : entry.status === 'disabled_due_to_crash' ? 'Crashed' : 'Disabled';
       rows.push({
@@ -278,7 +302,7 @@ export function createPluginCenterService({
         version: entry.version, category: 'Other', permissions: entry.permissions ?? [],
         capabilities: (entry.manifest?.capabilities ?? []).map(item => item.id), screenshots: [],
         featured: false, verified: false, status, warning: null, installedVersion: entry.version,
-        installedEntry: entry, trust: 'local-unverified', firstEnableReviewed: trust.firstEnableReviewed === true
+        ...runtimeFacts(entry, detail), installedEntry: entry, trust: trust ? 'local-unverified' : 'runtime-reviewed', firstEnableReviewed: trust?.firstEnableReviewed === true
       });
     }
     return rows;
@@ -629,14 +653,16 @@ export function createPluginCenterService({
     'plugin-center.icon.get': icon,
     'plugin-center.screenshot.get': screenshot,
     'plugin-center.status': async () => {
-      const installed = (await installedEntries()).map(entry => ({
+      const installed = await Promise.all((await installedEntries()).map(async entry => ({
         id: entry.id, name: entry.name, version: entry.version, extensionStatus: entry.status,
         status: entry.status === 'disabled_due_to_crash' ? 'Crashed' : entry.status === 'disabled' ? 'Disabled' : entry.status === 'enabled' ? 'Installed' : 'Needs Review',
         trust: localUnverified.has(entry.id) ? 'local-unverified' : 'catalog-sha256',
-        firstEnableReviewed: localUnverified.get(entry.id)?.firstEnableReviewed === true
-      }));
+        firstEnableReviewed: localUnverified.get(entry.id)?.firstEnableReviewed === true,
+        ...runtimeFacts(entry, await extensionRuntime?.get?.({ id: entry.id }))
+      })));
       const loaded = await fetchCatalog();
       const rows = loaded.catalog ? await buildCatalogRows(loaded) : [];
+      rows.push(...await localInstalledRows(new Set(rows.map(row => row.id))));
       return { installed, catalogAvailable: Boolean(loaded.catalog), configured: loaded.configured, offline: loaded.offline, developerMode: developerModeFromStore(settingsStore), plugins: rows };
     },
     'plugin-center.health': async () => ({ ...lastCatalogState, extensionRuntimeAvailable: Boolean(extensionRuntime) }),

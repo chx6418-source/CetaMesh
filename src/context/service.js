@@ -1,6 +1,7 @@
 import { DESKTOP_USER_PRINCIPAL } from '../memory/service.js';
 import { buildCapabilityContext } from './capability-context.js';
 import { projectProductContext } from './product-context.js';
+import { OWNER_ACTOR } from '../capability/types.js';
 
 function taskFromRuntime(taskRuntime, taskId) {
   if (typeof taskId !== 'string' || !taskId.trim()) return null;
@@ -182,6 +183,7 @@ function serializeContext({
   task,
   workspace,
   memoryReferences,
+  skills,
   modelProvider,
   model,
   requestedModel,
@@ -219,6 +221,7 @@ function serializeContext({
     task,
     workspace,
     memoryReferences,
+    skills,
     capabilities,
     extensions,
     agentProviders: agentProviderSummaries(agentBroker),
@@ -244,10 +247,11 @@ export function createProductContextService({
   extensionService,
   agentBroker,
   modelRuntime = null,
+  skillContentService = null,
   memorySettings = () => ({ enabled: true, retrievalLimit: 50 }),
   onMemoryError = null
 } = {}) {
-  async function buildForChatTurn({ record, routing, modelProvider, model, requestedModel, resolvedModel, toolCalling, memoryQuery } = {}) {
+  async function buildForChatTurn({ record, routing, modelProvider, model, requestedModel, resolvedModel, toolCalling, memoryQuery, skillRefs, signal } = {}) {
     const source = record && typeof record === 'object' ? record : {};
     const task = taskFromRuntime(taskRuntime, source.taskId);
     const workspaceId = source.config?.workspaceId;
@@ -268,6 +272,10 @@ export function createProductContextService({
         ['user:desktop', 'global'], memoryQuery, onMemoryError)
     ], settings);
 
+    const skills = skillContentService ? await skillContentService.buildContext({ principal: OWNER_ACTOR,
+      taskId: task?.id ?? null, workspaceId: workspaceReconciliation?.required ? null : workspace?.id ?? null,
+      selectedRefs: skillRefs ?? source.skillRefs ?? [], signal }) : null;
+
     return serializeContext({
       mode: source.config?.mode ?? 'chat',
       executionPath: 'chat',
@@ -276,6 +284,7 @@ export function createProductContextService({
       task,
       workspace,
       memoryReferences,
+      skills,
       modelProvider,
       model,
       requestedModel,
@@ -293,7 +302,7 @@ export function createProductContextService({
     return (await buildForChatTurn(request)).context;
   }
 
-  async function buildForAgentTurn({ sessionId, provider = 'cetamesh', principal, modelProvider, model, requestedModel, resolvedModel, toolCalling } = {}) {
+  async function buildForAgentTurn({ sessionId, provider = 'cetamesh', principal, modelProvider, model, requestedModel, resolvedModel, toolCalling, skillRefs, signal } = {}) {
     const task = taskRuntime?.findByAgent?.({ provider, sessionId }) ?? null;
     const liveActor = task ? capabilityService?.principalForTask?.(task.id) : null;
     if (!task || !liveActor || !principal
@@ -323,6 +332,9 @@ export function createProductContextService({
          agentMemoryScopes, task.goal, onMemoryError))
     ], settings);
     const grantedIds = Array.isArray(liveActor.grants?.capabilities) ? liveActor.grants.capabilities : [];
+    const skills = skillContentService ? await skillContentService.buildContext({ principal: { ...principal, actor: liveActor },
+      taskId: task.id, workspaceId: workspaceReconciliation.required ? null : workspace?.id ?? null,
+      selectedRefs: skillRefs ?? [], signal }) : null;
     return serializeContext({
       mode: 'managed-agent',
       executionPath: 'managed-agent',
@@ -330,6 +342,7 @@ export function createProductContextService({
       task,
       workspace,
       memoryReferences,
+      skills,
       modelProvider,
       model,
       requestedModel,
