@@ -122,6 +122,12 @@ function projectUsage(value) {
     const metric = key === 'requestCount' ? value[key] : normalized[key];
     result[key] = Number.isFinite(metric) && metric >= 0 ? metric : null;
   }
+  // Preserve the raw ledger's row-count compatibility without labelling a
+  // legacy aggregate as a measured number of provider requests in the UI.
+  if (value.requestCountKind === 'snapshot-records') {
+    result.requestCount = null;
+    result.requestCountKind = 'snapshot-records';
+  }
   const estimated=value.estimated===true||value.counting==='estimated'||value.source==='estimated';
   const receipt=Array.isArray(value.requests)&&value.requests.some(row=>row?.rawUsage)
     || value.knownUsage&&typeof value.knownUsage==='object'

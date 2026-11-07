@@ -82,6 +82,7 @@ export function createUsageLedger({ file, pricingResolver = null, now = () => Da
     const accountingComplete = rows.length > 0 && rows.every(row => row.accountingComplete && finite(row.usage.inputTokens) && finite(row.usage.outputTokens));
     const snapshots = rows.some(isModelUsageSnapshot);
     return { ...aggregateModelUsage(usages, { granularity: snapshots ? 'snapshot' : 'request' }), accountingComplete, requestCount: rows.length,
+      requestCountKind: snapshots ? 'snapshot-records' : 'provider-requests',
       requestDiagnostics: snapshots ? null : summarizeRequestDiagnostics(rows),
       cost: aggregateUsageCosts(rows.map(row => row.cost), accountingComplete) };
   }

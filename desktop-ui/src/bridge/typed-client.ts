@@ -53,6 +53,7 @@ export interface ModelUsage {
   inputTokens: number | null; outputTokens: number | null; totalTokens: number | null;
   reasoningTokens: number | null; cacheReadTokens: number | null; cacheWriteTokens: number | null;
   requestCount: number | null; cacheHitRate: number | null; cost: { status: 'actual' | 'estimated' | 'unknown'; amount: number | null; knownAmount: number | null; currency: string | null; complete: boolean; sources: string[]; versions: string[] } | null; accountingComplete: boolean | null;
+  requestCountKind?: 'snapshot-records';
   knownUsage?: Partial<Record<'inputTokens' | 'outputTokens' | 'totalTokens' | 'reasoningTokens' | 'cacheReadTokens' | 'cacheWriteTokens', number | null>>;
   cacheCoverage?: {totalRequests: number; inputReportedRequests: number; knownInputTokens: number | null;
     read: {reportedRequests: number; inputReportedRequests: number; knownInputTokens: number | null; knownTokens: number | null; matchedReadTokens: number | null; reportedHitRate: number | null};

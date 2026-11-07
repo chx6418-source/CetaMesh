@@ -759,7 +759,10 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     setApprovalSubmissions(current => ({...current, [id]: {pending: true, decision: approve, error: null}}));
     try {
       const result = await approvalClient.decide(id, approve);
-      if (result.operationId) setApprovalOperations(current => [...current.filter(operation => operation.operationId !== result.operationId), result]);
+      // A decision acknowledgement may arrive after the inbox observed progress.
+      // Seed unseen operations without replacing their already observed state.
+      if (result.operationId) setApprovalOperations(current => current.some(operation => operation.operationId === result.operationId)
+        ? current : [...current, result]);
       if (activeSessionIdRef.current !== originSession) return;
       await Promise.all([load(), refreshApprovals()]);
     }

@@ -88,8 +88,10 @@ export function accumulateModelUsage(previous, raw, { requestId, providerId = nu
   requests.push({ requestId: requestId ?? `request-${requests.length + 1}`, providerId, model, rawUsage: safeRawUsage(raw), billingReceipt: safeBillingReceipt(raw?.billingReceipt), ...normalizeModelUsage(raw),
     ...(diagnostics ? { requestDiagnostics: diagnostics } : {}) });
   boundRequestDiagnostics(requests);
+  const snapshots = requests.some(isModelUsageSnapshot);
   const result = { ...aggregateModelUsage(requests), requestCount: requests.length, requests,
-    requestDiagnostics: requests.some(isModelUsageSnapshot) ? null : summarizeRequestDiagnostics(requests) };
+    requestCountKind: snapshots ? 'snapshot-records' : 'provider-requests',
+    requestDiagnostics: snapshots ? null : summarizeRequestDiagnostics(requests) };
   for (const [rawKey, field] of [['prompt_tokens', 'inputTokens'], ['completion_tokens', 'outputTokens'], ['total_tokens', 'totalTokens']]) {
     if (result[field] !== null) result[rawKey] = result[field];
   }

@@ -13,8 +13,10 @@ export function UsageObservationDetails({usage}:{usage:ModelUsage|null|undefined
     .filter(([field]) => usage[field] == null && usage.knownUsage?.[field] != null)
     .map(([field,label]) => `${label} ${observationCount(usage.knownUsage?.[field])}`);
   const coverage=usage.cacheCoverage, diagnostic=usage.requestDiagnostics;
-  if (!partial.length && !coverage && !diagnostic) return null;
+  const snapshotCount=usage.requestCountKind==='snapshot-records';
+  if (!partial.length && !coverage && !diagnostic && !snapshotCount) return null;
   return <div className="usage-observations">
+    {snapshotCount&&<p>含历史用量快照；该范围无法还原真实请求数。</p>}
     {partial.length>0&&<p>{`已报告小计：${partial.join(' · ')}；尚有未报告用量，总量仍未知。`}</p>}
     {coverage&&<><p>{`缓存读取报告 ${coverage.read.reportedRequests} / ${coverage.totalRequests} 次请求 · 缓存写入报告 ${coverage.write.reportedRequests} / ${coverage.totalRequests} 次请求`}</p>
       <small>{`读取报告对应输入 ${observationCount(coverage.read.knownInputTokens)} Tokens · 已报告部分命中 ${coverage.read.reportedHitRate===null?'未知':`${Math.round(coverage.read.reportedHitRate*10000)/100}%`}；覆盖率表示报告情况。`}</small></>}

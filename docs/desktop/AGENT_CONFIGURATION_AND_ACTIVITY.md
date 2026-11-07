@@ -53,6 +53,72 @@ timeline fields. A status message such as thinking is not an official reasoning 
 The UI keeps its final activity snapshot until the matching persisted message arrives and
 accepts terminal snapshots even when their text is shorter than a streaming snapshot.
 
+### Public streaming and approval operations
+
+Core coalesces public text deltas from provider events within a 50 ms window. Direct
+coordinator text callbacks remain immediately published. A lifecycle-owned timer flushes a
+quiet provider tail without waiting for the next chunk, and accepted text is flushed before
+tool activity, approval waits and terminal notifications. Timer callbacks bind the exact
+runtime state, turn object and request; disposal or replacement cannot publish into a later
+turn. This is a Core transport bound, not a measured native frame-rate guarantee.
+
+Managed tool cycles retain earlier public segments under the same stable message identity.
+A nonempty final answer replaces its own cycle's streamed segment; an empty partial result
+preserves already observed prose and its failure/unknown status. Core-generated approval
+notices use status fields. The `statusOnly` marker is honored only for the trusted Managed
+provider; external provider reset/replacement semantics and private reasoning filters remain.
+Active checkpoints preserve bounded public text at the existing activity/lifecycle points;
+this does not provide per-token crash durability.
+
+The Owner approval inbox is global and decisions are keyed by exact `approvalId`. Chat
+disables only the submitted decision, preserves transport failure and same-decision retry,
+and reconciles existing `approval.operation` records. An accepted decision is not completed
+execution. Async failure/unknown results remain visible after refresh; changing Chat selection
+does not lose the global approval result or refresh another Chat's history. Retrying a failed
+submission uses the same approval identity and never replays a completed or unknown effect.
+
+## Usage and request observations
+
+The existing Model Usage Ledger owns request receipts, attribution, deduplication and costs.
+Missing metrics remain `null`; an explicit zero remains zero. `knownUsage` exposes reported
+subtotals without replacing an unknown full total. `cacheCoverage` counts read/write reporting
+separately and pairs cache counts only with reported input denominators. Its partial rate is
+unknown when any contributing receipt is invalid. The Desktop projection preserves that
+unknown result instead of recomputing a seemingly valid ratio from sums.
+
+For supported adapters, `requestDiagnostics` hashes the actual serialized outgoing body and
+provider/endpoint/protocol/model/components. It retains at most 64 optional observations in
+the existing ledger, with omitted and unreported counts; token accounting still includes
+all receipts. A missing latest observation remains missing. Historical turn aggregates and
+synthetic snapshot scopes cannot establish request-level coverage and leave these observations
+unknown. Existing raw ledger row-count fields keep their compatibility semantics;
+the Desktop DTO sets the displayed request count to unknown for scopes containing
+synthetic snapshot records, including persisted continuations. Token totals remain intact.
+
+Local change codes distinguish provider, endpoint, model, tools, system, history and request
+parameters. They do not establish provider cache support, eviction, a cold request, savings
+or performance. Authorization headers and credential-store fields are excluded from these
+observations; request bodies and routes appear only as opaque digests. Header-only credential
+rotation cannot be inferred from otherwise identical routing and body observations. Public
+DTOs retain only allowlisted hashes/counts/change codes; prompts, raw requests, URLs, private
+reasoning, credentials and internal receipt identifiers are excluded. UI details label
+reported coverage and known partial totals explicitly.
+
+## Current code evidence queries
+
+The existing Core `task.outcome.verify` command accepts optional boolean
+`requireCurrentCodeEvidence`. For code queries, strict mode requires a settled current
+provider/Session/Run/user phase and an actual `core-test` result digest; a generic display or
+native self-report cannot replace it. Conflicting later results or writes refuse verification.
+Task revision is rechecked after asynchronous Workspace resolution. Default historical/manual
+queries retain their prior meaning.
+
+This strict query is necessary evidence, not semantic completion or a new permission grant.
+File content, immutable verifier, change scope and Owner acceptance remain independent checks.
+A failed test's result returns through the existing model coordinator. Repair and retest use
+fresh, separately authorized operations; completed or unknown tests are not replayed. No
+automatic arbitrary post-write shell command or LSP process is introduced by this contract.
+
 ## Execution and cancellation
 
 Workspace ownership remains a Task-domain decision. New-launch readiness cannot erase an

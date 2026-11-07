@@ -552,7 +552,9 @@ export function createChatService({
       accountingComplete: usageRecords.some(usage => usage?.accountingComplete === false) ? false
         : usageRecords.length && usageRecords.every(usage => usage?.accountingComplete === true) ? true : null,
       requestCount: usageRecords.length && usageRecords.every(usage => Number.isSafeInteger(usage?.requestCount) && usage.requestCount >= 0)
-        ? usageRecords.reduce((sum, usage) => sum + usage.requestCount, 0) : null };
+        ? usageRecords.reduce((sum, usage) => sum + usage.requestCount, 0) : null,
+      ...(usageRecords.some(usage => usage?.requestCountKind === 'snapshot-records')
+        ? { requestCountKind: 'snapshot-records' } : {}) };
     const requestedLimit = Number(limit);
     const count = Math.max(1, Math.min(
       MAX_MESSAGES_RETURNED,

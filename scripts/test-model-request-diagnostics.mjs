@@ -72,6 +72,7 @@ await check('synthetic legacy continuations retain tokens but leave request cove
   const previous = { inputTokens: 100, outputTokens: 10, cacheReadTokens: 50, requestCount: 3 };
   let resumed = accumulateModelUsage(previous, { inputTokens: 20, outputTokens: 2, cacheReadTokens: 0 }, { requestId: 'resumed' });
   assert.equal(resumed.inputTokens, 120);
+  assert.equal(resumed.requestCountKind, 'snapshot-records');
   assert.equal(resumed.knownUsage.cacheReadTokens, 50);
   assert.equal(resumed.cacheCoverage, null, 'synthetic legacy entry is an aggregate snapshot, not one observed provider request');
   assert.equal(resumed.requestDiagnostics, null, 'snapshot rows cannot establish a diagnostic request-count denominator');
@@ -80,7 +81,26 @@ await check('synthetic legacy continuations retain tokens but leave request cove
   assert.equal(resumed.cacheCoverage, null, 'snapshot semantics survive subsequent actual receipts');
   assert.equal(resumed.requestDiagnostics, null);
 });
-await check('new and old v1 ledger snapshots retain totals without inventing report or diagnostic request coverage', () => {
+await check('snapshot-count uncertainty survives persisted Chat history aggregation and pagination', async () => {
+  const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-snapshot-count-'));
+  const chat = createChatService({ stateDir });
+  try {
+    const session = await chat.execute({ method: 'chat.sessions.create', params: {} });
+    const file = path.join(stateDir, 'desktop-chat', 'history', `${session.id}.json`);
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    const usage = accumulateModelUsage({ inputTokens: 100, outputTokens: 10, requestCount: 3 },
+      { inputTokens: 20, outputTokens: 2 }, { requestId: 'resumed' });
+    fs.writeFileSync(file, JSON.stringify({ messages: [{ id: 'legacy', role: 'assistant', usage },
+      { id: 'new', role: 'assistant', usage: { inputTokens: 30, outputTokens: 3, requestCount: 1 } }] }));
+    const ui = createDesktopUiService({ services: { chatService: chat } });
+    const result = await ui.execute({ method: 'ui.chat.history', params: { id: session.id, limit: 1 } });
+    assert.equal(result.messages.length, 1);
+    assert.equal(result.sessionUsage.inputTokens, 150);
+    assert.equal(result.sessionUsage.requestCount, null, 'an off-page legacy continuation cannot turn row counts into measured provider requests');
+    assert.equal(result.sessionUsage.requestCountKind, 'snapshot-records');
+  } finally { await chat.close(); fs.rmSync(stateDir, { recursive: true, force: true }); }
+});
+await check('new and old v1 ledger snapshots retain totals without inventing report or diagnostic request coverage', async () => {
   const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-synthetic-coverage-'));
   try {
     const file = path.join(stateDir, 'new.json');
@@ -88,11 +108,17 @@ await check('new and old v1 ledger snapshots retain totals without inventing rep
     const receipt = { sessionId: 'snapshot', turnId: 'snapshot', usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 50, requestCount: 3 } };
     const recorded = ledger.record(receipt);
     assert.equal(recorded.inputTokens, 100);
+    assert.equal(recorded.requestCount, 1, 'the existing raw row-count API remains compatible');
+    assert.equal(recorded.requestCountKind, 'snapshot-records');
     assert.equal(recorded.cacheCoverage, null);
     assert.equal(recorded.requestDiagnostics, null);
     ledger.record(receipt);
     ledger = createUsageLedger({ file });
     assert.equal(ledger.summary({ sessionId: 'snapshot' }).cacheCoverage, null);
+    const ui = createDesktopUiService({ services: { usageLedger: ledger, chatService: {
+      execute: async () => ({ messages: [], sessionUsage: null }) } } });
+    assert.equal((await ui.execute({ method: 'ui.chat.history', params: { id: 'snapshot' } })).sessionUsage.requestCount, null,
+      'an actual recorded snapshot cannot become a measured request count at the Core DTO boundary');
     assert.equal(ledger.summary({ sessionId: 'snapshot' }).requestDiagnostics, null);
     ledger.record({ sessionId: 'snapshot', turnId: 'actual', usage: accumulateModelUsage(null,
       { inputTokens: 20, outputTokens: 2, cacheReadTokens: 0 }, { requestId: 'actual' }) });
@@ -107,6 +133,7 @@ await check('new and old v1 ledger snapshots retain totals without inventing rep
     assert.equal(old.inputTokens, 80);
     assert.equal(old.cacheCoverage, null);
     assert.equal(old.requestDiagnostics, null);
+    assert.equal(old.requestCountKind, 'snapshot-records');
     assert.deepEqual(fs.readFileSync(legacyFile), original, 'old v1 observation does not migrate or rewrite production-compatible storage');
   } finally { fs.rmSync(stateDir, { recursive: true, force: true }); }
 });

@@ -75,6 +75,10 @@ try {
   assert.equal((await history()).messages[0].usage.cacheCoverage,null,'invalid denominator relationships do not cross the DTO');
   raw.usage.requestDiagnostics.latest.requestHash='SECRET_CHANGE_CODE';
   assert.equal((await history()).messages[0].usage.requestDiagnostics.latest,null,'malformed hashes are not rendered as diagnostics');
+  raw.usage={inputTokens:20,outputTokens:3,requestCount:1,requestCountKind:'snapshot-records',accountingComplete:true};
+  const snapshotCount=(await history()).messages[0].usage;
+  assert.equal(snapshotCount.requestCount,null,'snapshot record count is not a measured provider request count');
+  assert.match(renderToStaticMarkup(React.createElement(UsageSummary,{usage:snapshotCount})),/历史用量快照.*真实请求数/);
   raw.usage = pricedUsageSnapshot;
   raw.usage.cost = { ...raw.usage.cost, status: 'unknown', amount: null, complete: false };
   assert.match(render((await history()).messages[0]), /费用 未知.*已核算 USD 0.00022/);
