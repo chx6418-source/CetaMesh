@@ -35,6 +35,7 @@ import { recoverWorkspaceImports, workspaceImportEvidence } from './transaction.
 import { isManagedWorktree } from './managed-worktree.js';
 import { workspaceContentProof } from './handoff-facts.js';
 import { assertObservationActive } from './observation-abort.js';
+import { postWriteVerificationSnapshot } from '../model/post-write-verification.js';
 
 const GIT_INFO_TTL_MS = 5000;
 
@@ -490,6 +491,19 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     return contentProof(entry, relevantFiles, signal);
   }
 
+  // Internal Owner configuration observation, never a capability or test grant.
+  async function resolvePostWriteVerification({ workspaceId, signal } = {}) {
+    assertObservationActive(signal);
+    const entry = registry.get(String(workspaceId ?? '').trim());
+    const config = postWriteVerificationSnapshot(entry.settings?.postWriteVerification);
+    if (!config || config.enabled !== true || config.maxRunsPerTurn === 0) return config;
+    const proof = await collectContentProof(entry.id, { expectedRoot: entry.root, signal });
+    assertObservationActive(signal);
+    const current = postWriteVerificationSnapshot(registry.get(entry.id).settings?.postWriteVerification);
+    if (current?.configDigest !== config.configDigest) fail('POST_WRITE_CONFIG_CHANGED', 'Owner verifier configuration changed during observation');
+    return { ...config, sourceDigest: proof.sha256 };
+  }
+
   // Owner recovery intentionally retains its existing write/recovery fence.
   async function collectRecoveryProof(id, { beforeRecovery, signal } = {}) {
     assertObservationActive(signal);
@@ -507,7 +521,7 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     return contentProof(assertWritable(entry), [], signal);
   }
 
-  return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof };
+  return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof, resolvePostWriteVerification };
 }
 
 export { WorkspaceBoundaryError, WorkspaceRegistryError, WorkspaceToolError };

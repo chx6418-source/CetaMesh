@@ -20,6 +20,8 @@ import { canDispatchConfiguredNativeAgent, hasNegativeAgentReadiness } from '../
 import { rankTaskAgents, subscriptionBillingFingerprint } from '../router/agent-assignment.js';
 import { isControlledL2Write } from './l2-grants.js';
 import { READ_BATCH_INPUT_SCHEMA, validateReadBatchPlan } from '../model/read-batch-program.js';
+import { normalizePostWriteVerificationBinding, currentPostWriteVerificationImages } from '../task/outcome-verification.js';
+import { validateTestInvocation } from '../workspace/isolated-runner.js';
 
 // Only this module can mark a failure as occurring before Agent side effects.
 // Provider supplied error fields must never authorize an automatic replay.
@@ -594,6 +596,64 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         .filter(ref => readOnlyRefs[ref.scope]?.includes(ref.memoryId)).map(ref => ref.type)])], readOnlyRefs } };
   }
   if (workspaceService) {
+    async function validatePostWriteTest(request) {
+      if (request.origin?.postWriteVerification === undefined) return null;
+      const binding = normalizePostWriteVerificationBinding(request.origin.postWriteVerification);
+      const task = taskFor(request.taskId), observed = task?.executionObservation;
+      if (request.actor.kind !== 'agent' || task?.currentAgent?.provider !== 'cetamesh'
+        || !['running', 'waiting-approval'].includes(observed?.state) || request.origin.targetKind !== 'agent' || request.origin.phase !== 'user'
+        || request.origin.runId !== observed.runId || request.origin.sessionId !== observed.sessionId
+        || task.currentAgent.sessionId !== observed.sessionId || request.actor.assignment?.sessionId !== observed.sessionId) {
+        throw capabilityError('POST_WRITE_RUN_CHANGED', 'Configured verification requires its current Managed Task Run');
+      }
+      const config = await workspaceService.resolvePostWriteVerification?.({ workspaceId: request.workspaceId, signal: request.signal });
+      if (config?.enabled !== true || config.maxRunsPerTurn === 0 || config.configDigest !== binding.configDigest) {
+        throw capabilityError('POST_WRITE_CONFIG_CHANGED', 'Owner verifier configuration changed; request fresh approval');
+      }
+      if (config.sourceDigest !== binding.sourceDigest) {
+        throw capabilityError('POST_WRITE_SOURCE_CHANGED', 'Verifier or tested project content changed; request a fresh current check');
+      }
+      const invocation = validateTestInvocation(request.input);
+      if (invocation.tool !== config.tool || invocation.timeoutMs !== config.timeoutMs
+        || JSON.stringify(invocation.args) !== JSON.stringify(config.args)) {
+        throw capabilityError('POST_WRITE_INVOCATION_CHANGED', 'The test invocation differs from the current Owner configuration');
+      }
+      const currentTask = taskFor(request.taskId), current = currentTask?.executionObservation;
+      if (currentTask?.currentAgent?.sessionId !== observed.sessionId || current?.runId !== observed.runId
+        || !['running', 'waiting-approval'].includes(current?.state) || currentTask.workspaceId !== request.workspaceId) {
+        throw capabilityError('POST_WRITE_RUN_CHANGED', 'Task Run changed during verifier observation');
+      }
+      const pathKey = value => process.platform === 'win32' ? value.replaceAll('\\', '/').toLowerCase() : value.replaceAll('\\', '/');
+      const previouslyChecked = new Set(currentPostWriteVerificationImages(currentTask, { requireLatestWrite: false }).map(row => pathKey(row.path)));
+      const requiredWrites = new Map();
+      for (const row of currentTask.executionEvidence ?? []) {
+        if (row.provider !== 'cetamesh' || row.sessionId !== observed.sessionId || row.runId !== observed.runId || row.phase !== 'user'
+          || row.capability !== 'filesystem.write' || row.status !== 'completed' || typeof row.filePath !== 'string') continue;
+        const key = pathKey(row.filePath);
+        if (previouslyChecked.has(key) || config.includeExtensions.some(ext => row.filePath.toLowerCase().endsWith(ext))) requiredWrites.set(key, row.eventId);
+      }
+      if (binding.writes.length !== requiredWrites.size || binding.writes.some(write => requiredWrites.get(pathKey(write.path)) !== write.eventId)) {
+        throw capabilityError('POST_WRITE_RECEIPT_UNVERIFIED', 'The approval must include every latest matching or previously checked current-Run Core write');
+      }
+      for (const write of binding.writes) {
+        const outcome = currentTask.executionEvidence?.find(row => row.eventId === write.eventId
+          && row.provider === 'cetamesh' && row.sessionId === observed.sessionId && row.runId === observed.runId
+          && row.phase === 'user' && row.capability === 'filesystem.write' && row.status === 'completed'
+          && row.filePath === write.path.replaceAll('\\', '/'));
+        const operation = broker.operationRecordForTask({ taskId: request.taskId, workspaceId: request.workspaceId,
+          operationId: 'tool:' + sha256(write.requestId) });
+        if (!outcome || operation?.status !== 'completed' || operation.capability !== 'filesystem.write'
+          || operation.executorId !== request.actor.id || operation.requestId !== write.requestId
+          || operation.accessInput?.path !== write.path || operation.operationProof?.sha256 !== write.sha256
+          || sha256(fs.readFileSync(resolveInside(resolveWorkspace(request.workspaceId).root, write.path).absolute)) !== write.sha256
+          || !config.includeExtensions.some(ext => write.path.toLowerCase().endsWith(ext)) && !previouslyChecked.has(pathKey(write.path))) {
+          throw capabilityError('POST_WRITE_RECEIPT_UNVERIFIED', 'Only actual approved current-Run writes and their unchanged postimages may trigger verification');
+        }
+      }
+      // Descriptor-derived target is part of the existing approval fingerprint.
+      request.target = { ...(request.target ?? {}), postWriteVerification: binding };
+      return binding;
+    }
     broker.register({ id: 'context.batch', permission: 'filesystem.read', provider: 'context', workspace: true,
       risk: 'low', effect: 'read-only', readOnly: true, parallelSafe: false, delegatesOperation: true,
       description: 'Run a bounded read-only Workspace program: search/read/readEach, lines(text/jsonl), filter/select/sort/unique/aggregate(count). Only selected output and source evidence references return; every source needs its own current grant.',
@@ -626,7 +686,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         // 不是普通 medium。Owner 直接点击"运行测试"走 executeWorkspace 的
         // approved:true（Owner 的点击本身就是显式决定，语义与既往一致）。
         risk: ['workspace.create', 'git.commit','git.branch.create','git.worktree.create', 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
-        validate(request, { replay = false } = {}) {
+        async validate(request, { replay = false } = {}) {
           if(['git.branch.create','git.worktree.create'].includes(id)&&!request.taskId)throw capabilityError('TASK_SCOPE_MISMATCH','Git action requires the current server-bound Task');
           if (id === 'workspace.apply') {
             validateWorkspaceImport(request);
@@ -650,6 +710,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             if (typeof request.input?.tool !== 'string' || !Array.isArray(request.input?.args)) {
               throw capabilityError('INVALID_PARAMS', 'test.run 需要 { tool, args }（allowlist 形态）');
             }
+            validateTestInvocation(request.input);
+            await validatePostWriteTest(request);
           }
           if (id === 'filesystem.read' || id === 'filesystem.write' || id === 'filesystem.search') {
             const ws = resolveWorkspace(request.workspaceId);
@@ -694,13 +756,18 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               // 到达这里意味着 Owner 已经 Approve Once（risk=high 审批已消费）。
               return (async()=>{
                 const result=await isolatedRunner.run({ workspaceId: request.workspaceId,
-                  tool: request.input.tool, args: request.input.args, timeoutMs: request.input.timeoutMs, signal: request.signal });
+                  tool: request.input.tool, args: request.input.args, timeoutMs: request.input.timeoutMs, signal: request.signal,
+                  ...(request.origin?.postWriteVerification ? { beforeSpawn: async () => {
+                    await validatePostWriteTest(request);
+                    policy.authorize(request, broker.registry.require('test.run'));
+                  } } : {}) });
                 const origin=request.origin,binding=request.actor.assignment,observed=taskFor(request.taskId)?.executionObservation;
                 if(origin?.targetKind==='agent'&&origin.phase==='user'&&origin.runId===observed?.runId
                   &&origin.sessionId===binding?.sessionId&&observed?.sessionId===binding.sessionId) {
                   taskRuntime.recordToolOutcome({id:request.taskId,provider:binding.provider,sessionId:binding.sessionId,
                     runId:origin.runId,phase:'user',eventId:'core-test:'+request.requestId,capability:'test.run',status:'completed',
                     tool:request.input.tool,exitCode:result.exitCode,source:'core-test',operationId:request.operationId,
+                    ...(request.target?.postWriteVerification ? { postWriteVerification: request.target.postWriteVerification } : {}),
                     resultSha256:sha256(JSON.stringify({exitCode:result.exitCode,stdout:result.stdout,stderr:result.stderr}))});
                   onTaskObservation?.({taskId:request.taskId});
                 }
@@ -1395,6 +1462,19 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               request: original, signal }); }
             catch (resumeError) { audit({ requestId: original.requestId, capability: original.capability,
               status: 'recovery-record-failed', code: resumeError?.code ?? 'TOOL_RESUME_FAILED' }); }
+          }
+        } else if (original.capability === 'test.run' && original.origin?.postWriteVerification
+          && ['POST_WRITE_CONFIG_CHANGED', 'POST_WRITE_SOURCE_CHANGED', 'POST_WRITE_INVOCATION_CHANGED',
+            'POST_WRITE_RUN_CHANGED', 'POST_WRITE_RECEIPT_UNVERIFIED', 'POST_WRITE_BINDING_INVALID'].includes(error?.code)) {
+          const settled = broker.approvals.get(params.id), dispatch = broker.dispatchStatus(original.requestId);
+          // This exact revoked approval failed before entering an executor. Its
+          // existing continuation needs denial feedback, never another dispatch.
+          if (settled.status === 'revoked' && settled.fingerprint === requestFingerprint(original)
+            && (!dispatch || dispatch.status === 'failed-no-effect') && typeof approvalDecisionListener === 'function') {
+            try { await approvalDecisionListener({ approvalId: params.id, requestFingerprint: settled.fingerprint,
+              decisionResult: { status: 'denied', error: { code: error.code } }, request: original, signal }); }
+            catch (resumeError) { audit({ requestId: original.requestId, capability: original.capability,
+              status: 'verification-refusal-delivery-failed', code: resumeError?.code ?? 'TOOL_RESUME_FAILED' }); }
           }
         }
         throw error;

@@ -182,6 +182,16 @@ try {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
   assert.equal(lateBroker.dispatchStatus(lateRow.request.requestId)?.status, 'completed');
+  assert.equal(lateCoordinator.recoveryForSession(lateTurn.sessionId)?.state, 'needs-reconciliation',
+    'stop cannot retire a consumed approval while its real effect has no delivered result');
+  // Older Core cancellation wrote this local marker even though the durable
+  // Broker retained the accepted effect. Startup must not erase that evidence.
+  const lateProjectionFile = path.join(lateStateDir, 'model', 'tool-executions.json');
+  const lateProjection = JSON.parse(fs.readFileSync(lateProjectionFile, 'utf8'));
+  const oldCancelledProjection = Object.values(lateProjection).find(row => row.approvalId === lateRow.id);
+  assert.ok(oldCancelledProjection);
+  oldCancelledProjection.status = 'failed'; oldCancelledProjection.code = 'INVOKE_CANCELLED';
+  fs.writeFileSync(lateProjectionFile, JSON.stringify(lateProjection));
   const lateRestartBroker = createCapabilityBroker({ stateDir: lateStateDir, approval: createCapabilityApproval({ stateDir: lateStateDir }) });
   const lateRestart = createToolExecutionCoordinator({ ...lateOptions, capabilityBroker: lateRestartBroker });
   assert.equal(lateRestart.recoveryForSession(lateTurn.sessionId)?.state, 'needs-reconciliation',
@@ -205,6 +215,15 @@ try {
   const successRestart = createToolExecutionCoordinator(successOptions);
   assert.equal(successRestart.recoveryForSession(successTurn.sessionId), null,
     'a durably consumed successful approval result does not create false recovery work');
+  const stoppedBeforeApproval = { ...successTurn, sessionId: 'never-consumed-session', turnId: 'never-consumed-turn' };
+  const unconsumedCoordinator = createToolExecutionCoordinator({ ...successOptions,
+    modelRuntime: { chat: async () => ({ toolCalls: [{ id: 'unconsumed-success', capabilityId: 'fixture.success', arguments: {} }] }) } });
+  const neverConsumed = await unconsumedCoordinator.run(stoppedBeforeApproval);
+  assert.equal(unconsumedCoordinator.cancelSession(stoppedBeforeApproval.sessionId, 'owner-stop').cancelled, 1);
+  assert.equal(successBroker.approvals.get(neverConsumed.approvalId).status, 'cancelled');
+  assert.equal(successBroker.dispatchStatus(successBroker.approvals.get(neverConsumed.approvalId).request.requestId), null);
+  assert.equal(unconsumedCoordinator.recoveryForSession(stoppedBeforeApproval.sessionId), null,
+    'affirmatively cancelled unconsumed approval remains known unexecuted');
   console.log('tool outcome unknown: one dispatch, no automatic replay, review required');
 } finally {
   fs.rmSync(stateDir, { recursive: true, force: true });

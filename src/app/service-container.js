@@ -101,6 +101,8 @@ export function createCetaMeshServices(options = {}) {
     ownedArtifactRoot: path.join(dataRoot, 'artifacts'),
     resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId),
     workspacesOverlap: workspaceService.workspacesOverlap,
+    resolvePostWriteVerification: ({ workspaceId, signal }) =>
+      workspaceService.resolvePostWriteVerification({ workspaceId, signal }),
     resolveMemory: memoryId => memoryService?.runtime.get({ principal: DESKTOP_USER_PRINCIPAL, id: memoryId }).memory
   });
   let capabilityService = null;
@@ -367,6 +369,8 @@ export function createCetaMeshServices(options = {}) {
     onUsage: payload => usageLedger.record(payload),
     modelRuntime,
     capabilityBroker: capabilityService.broker,
+    resolvePostWriteVerification: ({ scope, signal }) => scope?.workspaceId
+      ? workspaceService.resolvePostWriteVerification({ workspaceId: scope.workspaceId, signal }) : null,
     stateDir,
     actorResolver: ({ actorKind, actorId, sessionId, scope }) => {
       if (actorKind === 'owner') return OWNER_ACTOR;

@@ -10,6 +10,7 @@ import { capabilityError } from '../capability/types.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { mayRetrySafeTool, runBoundedRetryAttempt, SAFE_TOOL_RETRY } from './safe-tool-retry.js';
 import { validateReadBatchPlan, applyBatchTransform, selectBatchFields, batchField, batchGlobMatches, READ_BATCH_LIMITS } from './read-batch-program.js';
+import { planPostWriteVerification, postWriteVerificationFeedback } from './post-write-verification.js';
 
 const MAX_BATCH_CALLS = 8;
 const MAX_TOOL_CYCLES = 6;
@@ -199,6 +200,7 @@ export function createToolExecutionCoordinator({
   maxBatchCalls = MAX_BATCH_CALLS,
   timeoutMs = 300000,
   actorResolver = null,
+  resolvePostWriteVerification = null,
   evidenceStore = null,
   onUsage = null
 } = {}) {
@@ -292,7 +294,8 @@ export function createToolExecutionCoordinator({
   // Recover uncertainty from the already durable Broker intent/outcome instead
   // of interpreting an old approval-pending projection as proof of no effect.
   for (const [id, row] of Object.entries(executions)) {
-    if (row?.status !== 'approval-pending' || !row.approvalId) continue;
+    if (!row?.approvalId || !(row.status === 'approval-pending'
+      || row.status === 'failed' && row.code === 'INVOKE_CANCELLED')) continue;
     let dispatch = capabilityBroker.dispatchStatus?.(id);
     if (!dispatch) {
       let approval;
@@ -301,7 +304,7 @@ export function createToolExecutionCoordinator({
       dispatch = capabilityBroker.dispatchStatus?.(approval?.request?.requestId);
     }
     if (dispatch && ['started', 'outcome-unknown', 'completed'].includes(dispatch.status)) {
-      recordExecution(id, { status: 'outcome-unknown', code: 'APPROVAL_DISPATCH_RECOVERY_REQUIRED' });
+      recordExecution(id, { status: 'outcome-unknown', code: 'APPROVAL_DISPATCH_RECOVERY_REQUIRED', observedDispatchStatus: dispatch.status });
     }
   }
 
@@ -363,7 +366,24 @@ export function createToolExecutionCoordinator({
   }
 
   function completedResultContent(result, state, capability, input) {
-    const value = { status: 'completed', result: result.result };
+    const finish = content => {
+      if (!result.postWriteVerification) return content;
+      const value = JSON.parse(content);
+      value.postWriteVerification = JSON.parse(safeJson(result.postWriteVerification));
+      let output = JSON.stringify(value);
+      while (output.length > MAX_RESULT_CHARS && typeof value.preview === 'string' && value.preview.length) {
+        const previous = value.preview.length;
+        value.preview = value.preview.slice(0, Math.max(0, previous - (output.length - MAX_RESULT_CHARS) - 8));
+        if (/[\uD800-\uDBFF]$/.test(value.preview)) value.preview = value.preview.slice(0, -1);
+        const omission = value.omissions?.find(row => row.reason === 'serialized-preview-characters');
+        if (omission) omission.omitted += previous - value.preview.length;
+        output = JSON.stringify(value);
+      }
+      return output.length <= MAX_RESULT_CHARS ? output : safeJson({ status: 'incomplete', truncated: true,
+        error: { code: 'TOOL_RESULT_TRUNCATED' }, postWriteVerification: value.postWriteVerification });
+    };
+    const value = { status: 'completed', result: result.result,
+      ...(result.postWriteVerification ? { postWriteVerification: result.postWriteVerification } : {}) };
     if (capability === 'context.batch') {
       const content = sanitizeToolEvidence(value);
       if (content.length <= MAX_RESULT_CHARS) return content;
@@ -375,11 +395,11 @@ export function createToolExecutionCoordinator({
         if (content.length > MAX_RESULT_CHARS) {
           const reference = evidenceStore.put({ binding: evidenceBinding(state), content,
             sourceCapability: capability, sourceInput: input });
-          return evidenceSummary(content, reference);
+          return finish(evidenceSummary(content, reference));
         }
-      } catch { return safeJson({ ...value, evidenceUnavailable: { code: 'TOOL_EVIDENCE_UNAVAILABLE', note: 'No stored source is available; request a smaller result.' } }); }
+      } catch { return finish(safeJson({ ...value, evidenceUnavailable: { code: 'TOOL_EVIDENCE_UNAVAILABLE', note: 'No stored source is available; request a smaller result.' } })); }
     }
-    return safeJson(value);
+    return finish(safeJson(value));
   }
 
   function callFrame(state, call, cycle, index, source = null) {
@@ -416,6 +436,9 @@ export function createToolExecutionCoordinator({
   }
 
   function persistSettlement(state, frame, result) {
+    if (frame.postWriteVerification) result = { ...result,
+      postWriteVerification: postWriteVerificationFeedback(frame.postWriteVerification, result,
+        'tool:' + crypto.createHash('sha256').update(frame.requestId).digest('hex')) };
     const settledAt = Date.now();
     let evidence = null;
     if (frame.internal && evidenceStore) {
@@ -427,14 +450,15 @@ export function createToolExecutionCoordinator({
     }
     const content = result?.status === 'completed'
       ? frame.internal ? safeJson({ status: 'completed', evidence }) : completedResultContent(result, state, frame.capability, frame.input)
-      : safeJson(result?.status === 'outcome-unknown' ? result : result?.error ?? result ?? { status: 'denied', code: 'CAPABILITY_DENIED' });
+      : safeJson(frame.postWriteVerification || result?.status === 'outcome-unknown' ? result : result?.error ?? result ?? { status: 'denied', code: 'CAPABILITY_DENIED' });
     const status = result?.status === 'pending' ? 'approval-pending' : result?.status === 'outcome-unknown'
       ? 'outcome-unknown' : result?.status === 'completed' ? 'completed' : 'failed';
     recordExecution(frame.requestId, { ...executionIdentity(state, frame), status, settledAt, content,
       resultSha256: evidence?.sha256 ?? crypto.createHash('sha256').update(content).digest('hex'),
       resultRepresentation: evidence ? 'stored-sanitized-evidence' : 'bounded-sanitized-content',
       ...(evidence ? { evidence } : {}), ...(result?.status === 'pending' ? { approvalId: result.approvalId } : {}),
-      ...(result?.error?.code ? { code: result.error.code } : {}) });
+      ...(result?.error?.code ? { code: result.error.code } : {}),
+      ...(frame.postWriteVerification ? { postWriteVerification: structuredClone(frame.postWriteVerification) } : {}) });
     return { ...frame, result, content, settledAt, ...(evidence ? { evidence } : {}) };
   }
 
@@ -476,7 +500,10 @@ export function createToolExecutionCoordinator({
     let releaseRead = null;
     try {
       frame.input ??= parseArguments(frame.call?.arguments);
-      const descriptor = state.manifest.find(item => item.id === capability);
+      // This one server-owned call still passes the same live Broker policy.
+      // It cannot acquire test.run from saved configuration or a model argument.
+      const descriptor = frame.postWriteVerification ? capabilityBroker.registry?.require('test.run')
+        : state.manifest.find(item => item.id === capability);
       if (!descriptor) fail('UNKNOWN_TOOL_IN_TURN', 'Tool was not authorized in this turn');
       registered = capabilityBroker.registry?.require(capability) ?? descriptor;
       validateSchema(descriptor.inputSchema, frame.input);
@@ -502,8 +529,9 @@ export function createToolExecutionCoordinator({
               ...(hasEffect && !registered.delegatesOperation && scope.taskId && scope.workspaceId
                 ? { operationId: 'tool:' + crypto.createHash('sha256').update(frame.requestId).digest('hex') } : {}),
               taskId: scope.taskId ?? null, workspaceId: scope.workspaceId ?? null,
-              capability, input: frame.input, reason: 'Model structured tool call',
+              capability, input: frame.input, reason: frame.postWriteVerification ? 'Owner-configured fresh post-write verification' : 'Model structured tool call',
               origin: { sessionId: state.sessionId, turnId: state.turnId, runId: state.runId, phase: state.phase, targetKind: state.targetKind,
+                ...(frame.postWriteVerification ? { postWriteVerification: structuredClone(frame.postWriteVerification) } : {}),
                 ...(frame.internal ? { readBatch: { parentRequestId: frame.parentRequestId, stepId: frame.batchStepId, itemIndex: frame.itemIndex } } : {}) },
               ...(attemptSignal ? { signal: attemptSignal } : {}) }, { signal: attemptSignal,
                 ...(typeof frame.consumeReadBytes === 'function' ? { consumeReadBytes: frame.consumeReadBytes } : {}) }));
@@ -572,7 +600,7 @@ export function createToolExecutionCoordinator({
   }
 
   async function finalizeSettledCall(state, row, { appendMessage = true } = {}) {
-    if (appendMessage) state.messages.push({ role: 'tool', tool_call_id: row.callId, content: row.content });
+    if (appendMessage && !row.serverVerification) state.messages.push({ role: 'tool', tool_call_id: row.callId, content: row.content });
     try {
       if (typeof state.onActivity === 'function') await state.onActivity(terminalActivity(row.result,
         { id: row.activityId, capability: row.capability, startedAt: row.startedAt }));
@@ -594,7 +622,103 @@ export function createToolExecutionCoordinator({
           }
         }
       }
+      rememberPostWriteSettlement(state, row);
     } catch (error) { if (error && typeof error === 'object') error.coordinatorObserverFailure = true; throw error; }
+  }
+
+  function postWriteState(state) {
+    return state.postWriteState ??= { writes: [], postimages: [], checks: [], pairs: [], facts: [] };
+  }
+
+  function rememberPostWriteSettlement(state, row) {
+    if (typeof resolvePostWriteVerification !== 'function') return;
+    const current = postWriteState(state);
+    if (row.postWriteVerification) {
+      const check = current.checks.find(item => item.requestId === row.requestId);
+      if (check) check.state = row.result.postWriteVerification?.state ?? 'unknown';
+      if (row.serverVerification) current.pairs.push({ callId: row.callId, input: row.input, content: row.content });
+    } else if (row.capability === 'filesystem.write' && row.result?.status === 'completed') {
+      const operationId = 'tool:' + crypto.createHash('sha256').update(row.requestId).digest('hex');
+      const proof = capabilityBroker.operationRecordForTask?.({ taskId: row.scope.taskId,
+        workspaceId: row.scope.workspaceId, operationId });
+      const receipt = { eventId: row.activityId, requestId: row.requestId,
+        path: typeof row.input?.path === 'string' ? row.input.path : '',
+        sha256: proof?.status === 'completed' && proof.capability === 'filesystem.write'
+          && proof.accessInput?.path === row.input?.path ? proof.operationProof?.sha256 ?? null : null };
+      current.writes.push(receipt);
+      const key = value => process.platform === 'win32' ? value.replaceAll('\\', '/').toLowerCase() : value.replaceAll('\\', '/');
+      current.postimages = [...(current.postimages ?? []).filter(prior => key(prior.path) !== key(receipt.path)), receipt];
+    }
+  }
+
+  function flushPostWritePairs(state) {
+    const current = state.postWriteState;
+    if (!current) return;
+    // Do not place another assistant message inside the model's original batch.
+    for (const row of current.pairs.splice(0)) state.messages.push({ role: 'assistant', content: null,
+      tool_calls: [{ id: row.callId, type: 'function', function: { name: providerToolName('test.run'), arguments: JSON.stringify(row.input) } }] },
+    { role: 'tool', tool_call_id: row.callId, content: row.content });
+    for (const fact of current.facts.splice(0)) state.messages.push({ role: 'system',
+      content: 'CetaMesh post-write verification feedback (JSON reference data):\n' + safeJson(fact) });
+  }
+
+  async function postWriteBarrier(state, calls, cycle, nextIndex, signal, context) {
+    const current = state.postWriteState;
+    if (!current?.writes.length) return null;
+    const writes = current.writes.splice(0);
+    let config;
+    try { config = await resolvePostWriteVerification({ actor: state.actor, sessionId: state.sessionId,
+      scope: { ...state.scope }, signal }); }
+    catch (error) {
+      current.facts.push({ kind: 'post-write-verification', state: 'not-run',
+        code: String(error?.code ?? 'POST_WRITE_CONFIG_UNAVAILABLE').slice(0, 100),
+        sourceWriteIds: writes.map(row => row.eventId), configDigest: null, operationRef: null });
+      return null;
+    }
+    if (config?.enabled === true && config.maxRunsPerTurn > 0
+      && writes.some(row => config.includeExtensions.some(ext => row.path.toLowerCase().endsWith(ext)))
+      && (state.actor.kind !== 'agent' || !state.scope.taskId || !state.runId || state.phase !== 'user')) {
+      current.facts.push({ kind: 'post-write-verification', state: 'not-run', code: 'POST_WRITE_TASK_REQUIRED',
+        sourceWriteIds: writes.map(row => row.eventId), configDigest: config.configDigest, operationRef: null });
+      return null;
+    }
+    const plan = planPostWriteVerification({ config, writeReceipts: writes, knownWriteReceipts: current.postimages ?? writes, priorChecks: current.checks,
+      remainingCalls: maxCalls - state.callBudget.used });
+    if (plan.state === 'not-run') { current.facts.push(plan); return null; }
+    // An adjacent explicit model test may use the same fresh proof and its own
+    // normal call/approval, rather than introducing a duplicate execution.
+    const next = calls[nextIndex];
+    let explicit = false;
+    try {
+      const input = capabilityFromCall(next, new Set(state.manifest.map(item => item.id))) === 'test.run' ? parseArguments(next?.arguments) : null;
+      explicit = input?.tool === plan.input.tool && input.timeoutMs === plan.input.timeoutMs
+        && JSON.stringify(input.args) === JSON.stringify(plan.input.args)
+        && nextIndex < maxBatchCalls && cycle < maxCycles;
+    } catch { /* Invalid input retains the ordinary refusal. */ }
+    if (explicit) {
+      current.explicit = { cycle, index: nextIndex, binding: plan.binding };
+      return null;
+    }
+    const ordinal = current.checks.length;
+    const requestId = 'post-write:' + crypto.createHash('sha256').update(JSON.stringify([state.sessionId, state.turnId, ordinal])).digest('hex');
+    const callId = 'cetamesh-verification-' + requestId.slice(11, 51);
+    const frame = { capability: 'test.run', callId, requestId, cycle, originalIndex: null,
+      activityId: `${state.turnId}:${callId}`.slice(0, 200), startedAt: Date.now(), scope: { ...state.scope },
+      input: plan.input, postWriteVerification: plan.binding, serverVerification: true };
+    current.checks.push({ requestId, state: 'requested', writes: structuredClone(plan.binding.writes) });
+    state.callBudget.used += 1;
+    const row = await dispatchPreparedCall(state, frame, signal);
+    if (signal?.aborted) {
+      const rows = [row]; cancelPendingRows(state, rows, 'turn-cancelled');
+      await finalizeSettledCall(state, rows[0]);
+      fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
+    }
+    if (row.result?.status === 'pending') return suspendGroup(state, calls, cycle, [row], 0, nextIndex, context);
+    await finalizeSettledCall(state, row);
+    if (row.result?.status === 'outcome-unknown') return { status: 'partial', code: 'OUTCOME_UNKNOWN', toolCalling: 'supported',
+      text: '', usage: context.usage, resolvedModel: context.resolvedModel, totalCalls: state.callBudget.used,
+      postWriteVerification: row.result.postWriteVerification };
+    return null;
   }
 
   function reserveSourceCalls(state, count) {
@@ -878,6 +1002,7 @@ export function createToolExecutionCoordinator({
         messages: safePersistedMessages(state.messages), cycle, totalCalls: state.callBudget.used,
         usage, resolvedModel, limitReached,
         ...(state.configurationObservation ? { configurationObservation: structuredClone(state.configurationObservation) } : {}),
+        ...(state.postWriteState ? { postWriteState: structuredClone(state.postWriteState) } : {}),
         ...(typeof state.onContext === 'function' ? { onContext: state.onContext } : {}),
         seenCallIds: state.seenCallIds, pendingToolCallId: pending.callId,
         pendingActivityId: pending.activityId, pendingActivityStartedAt: pending.startedAt,
@@ -901,7 +1026,8 @@ export function createToolExecutionCoordinator({
       throw error;
     }
     return { status: 'pending', toolCalling: 'supported', approvalId, expiresAt: result.expiresAt,
-      text: '', usage, resolvedModel, continuationId: id };
+        text: '', usage, resolvedModel, continuationId: id,
+        ...(pending.postWriteVerification ? { postWriteVerification: pending.result.postWriteVerification } : {}) };
   }
 
   async function recordUsage(state, usage) {
@@ -1070,6 +1196,8 @@ export function createToolExecutionCoordinator({
 
       for (let index = firstCallIndex; index < calls.length;) {
         if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
+        const verification = await postWriteBarrier(state, calls, cycle, index, signal, { usage, resolvedModel, limitReached });
+        if (verification) return verification;
         const call = calls[index];
         const callId = String(call?.id || `call-${cycle}-${index}`).slice(0, 200);
         if (seenCallIds.has(callId)) {
@@ -1085,6 +1213,12 @@ export function createToolExecutionCoordinator({
           continue;
         }
         const frames = [callFrame(state, call, cycle, index)];
+        const explicit = state.postWriteState?.explicit;
+        if (explicit?.cycle === cycle && explicit.index === index) {
+          frames[0].postWriteVerification = explicit.binding;
+          state.postWriteState.checks.push({ requestId: frames[0].requestId, state: 'requested', writes: structuredClone(explicit.binding.writes) });
+          delete state.postWriteState.explicit;
+        }
         // Group formation never crosses malformed, duplicate or serial calls.
         // Live Broker authorization remains separate for every admitted call.
         const next = calls[index + 1];
@@ -1121,6 +1255,9 @@ export function createToolExecutionCoordinator({
           throw error;
         }
       }
+      const verification = await postWriteBarrier(state, calls, cycle, calls.length, signal, { usage, resolvedModel, limitReached });
+      if (verification) return verification;
+      flushPostWritePairs(state);
     }
     return { status: 'partial', code: 'TOOL_CALL_LIMIT', toolCalling: 'supported', text, usage, resolvedModel, totalCalls: budget.used, messages: state.messages };
     } catch (error) {
@@ -1242,6 +1379,8 @@ export function createToolExecutionCoordinator({
     }
     if (decisionResult?.status === 'outcome-unknown') {
       recordApprovalOutcomeUnknown({ approvalId, requestFingerprint, decisionResult });
+      const verification = continuation.state.pendingFrame?.postWriteVerification
+        ? persistSettlement(continuation.state, continuation.state.pendingFrame, decisionResult).result.postWriteVerification : null;
       if (typeof onActivity === 'function') await onActivity(terminalActivity(decisionResult, activity));
       if (typeof onCapabilityResult === 'function') await onCapabilityResult({
         capability: continuation.state.pendingCapability, result: decisionResult,
@@ -1253,7 +1392,8 @@ export function createToolExecutionCoordinator({
       try { save(); } catch (error) { continuations[String(approvalId)] = continuation; throw error; }
       return withConfiguration(continuation.state, { status: 'partial', code: 'OUTCOME_UNKNOWN', toolCalling: 'supported', text: '',
         usage: continuation.state.usage ?? null, resolvedModel: continuation.state.resolvedModel ?? null,
-        totalCalls: continuation.state.totalCalls, target: continuation.target, targetKind: continuation.targetKind });
+        totalCalls: continuation.state.totalCalls, target: continuation.target, targetKind: continuation.targetKind,
+        ...(verification ? { postWriteVerification: verification } : {}) });
     }
     // Distinguish a durably consumed result from a stale pending projection;
     // startup must review the latter even if the external effect completed late.
@@ -1267,6 +1407,7 @@ export function createToolExecutionCoordinator({
       targetKind: continuation.targetKind,
       manifest: structuredClone(continuation.state.manifest),
       scope: { ...continuation.state.scope },
+      ...(continuation.state.postWriteState ? { postWriteState: structuredClone(continuation.state.postWriteState) } : {}),
       messages: continuation.state.messages.map((message) => ({ ...message }))
     };
     if (typeof refreshContext === 'function') state.refreshContext = refreshContext;
@@ -1308,7 +1449,7 @@ export function createToolExecutionCoordinator({
     }
     if (!modelOnlyResume) {
       const acceptedRow = state.pendingFrame ? persistSettlement(state, state.pendingFrame, result) : null;
-      state.messages.push({
+      if (!acceptedRow?.serverVerification) state.messages.push({
         role: 'tool', tool_call_id: state.pendingToolCallId,
         content: acceptedRow?.content ?? (result.status === 'completed' ? completedResultContent(result, state, state.pendingCapability, state.pendingEvidenceInput) : safeJson(result))
       });
@@ -1319,6 +1460,7 @@ export function createToolExecutionCoordinator({
           eventId: activity.id,
           sessionId: continuation.target.sessionId, turnId: continuation.target.turnId, scope: state.scope });
       }
+      if (acceptedRow) rememberPostWriteSettlement(state, acceptedRow);
       for (const row of state.settledCalls ?? []) await finalizeSettledCall(state, row);
       if (result?.status === 'outcome-unknown') {
         delete continuations[String(approvalId)]; save();
@@ -1335,6 +1477,8 @@ export function createToolExecutionCoordinator({
       delete state.settledCalls;
       delete state.pendingBatch;
     }
+    if (state.pendingFrame?.serverVerification && !state.pendingBatch
+      && state.pendingCallIndex >= (state.pendingCalls?.length ?? 0)) flushPostWritePairs(state);
     if (typeof state.refreshContext === 'function') {
       const refreshed = await state.refreshContext({ capability: null, result: decisionResult,
         sessionId: continuation.target.sessionId, turnId: continuation.target.turnId, scope: state.scope, approvalResumed: true });
@@ -1416,15 +1560,26 @@ export function createToolExecutionCoordinator({
     let changed = false;
     for (const [approvalId, continuation] of Object.entries(continuations)) {
       if (continuation.target?.sessionId !== wanted) continue;
+      let approval;
       try {
-        const row = capabilityBroker.approvals?.get(approvalId);
-        if (row?.status === 'pending') capabilityBroker.approvals.cancel(approvalId, reason);
+        approval = capabilityBroker.approvals?.get(approvalId);
+        if (approval?.status === 'pending') capabilityBroker.approvals.cancel(approvalId, reason);
+        else if (approval?.status === 'approved') capabilityBroker.approvals.revoke(approvalId, reason);
+        approval = capabilityBroker.approvals?.get(approvalId);
       } catch (error) {
         if (!['APPROVAL_NOT_FOUND', 'APPROVAL_EXPIRED'].includes(error?.code)) throw error;
       }
       delete continuations[approvalId];
       for (const [id, row] of Object.entries(executions)) if (row?.approvalId === approvalId && row.status === 'approval-pending') {
-        recordExecution(id, { status: 'failed', settledAt: Date.now(), code: 'INVOKE_CANCELLED' });
+        const dispatch = capabilityBroker.dispatchStatus?.(id)
+          ?? capabilityBroker.dispatchStatus?.(approval?.request?.requestId);
+        const knownUnexecuted = dispatch?.status === 'failed-no-effect'
+          || !dispatch && ['cancelled', 'rejected', 'revoked'].includes(approval?.status);
+        // A local pending marker does not undo a consumed approval or an
+        // accepted Broker effect. Retain it until normal Owner reconciliation.
+        recordExecution(id, { status: knownUnexecuted ? 'failed' : 'outcome-unknown', settledAt: Date.now(),
+          code: knownUnexecuted ? 'INVOKE_CANCELLED' : 'APPROVAL_DISPATCH_RECOVERY_REQUIRED',
+          ...(dispatch ? { observedDispatchStatus: dispatch.status } : {}) });
       }
       cancelled += 1;
       changed = true;

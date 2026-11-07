@@ -9,6 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { atomicWriteConfig, readRawConfig } from '../config/loader.js';
 import { assertSafeRootForm, canonicalizeRoot } from './boundary.js';
+import { normalizePostWriteVerification } from '../model/post-write-verification.js';
 
 const SCHEMA_VERSION = 1;
 const ACTIVITY_LIMIT = 100;
@@ -221,6 +222,9 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
     updateSettings(id, patch) {
       const entry = requireEntry(id);
       const patchObject = patch && typeof patch === 'object' && !Array.isArray(patch) ? patch : {};
+      // Validate before mutating any settings; saving is never execution consent.
+      const postWriteVerification = patchObject.postWriteVerification === undefined ? undefined
+        : normalizePostWriteVerification(patchObject.postWriteVerification);
       if (patchObject.testCommand !== undefined) {
         const cmd = String(patchObject.testCommand ?? '').trim();
         if (cmd.length > 500) fail('SETTING_INVALID', 'testCommand 过长（>500 字符）');
@@ -239,6 +243,10 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
         if (patchObject.search.includeHidden !== undefined) {
           entry.settings.search.includeHidden = patchObject.search.includeHidden === true;
         }
+      }
+      if (postWriteVerification !== undefined) {
+        if (postWriteVerification === null) delete entry.settings.postWriteVerification;
+        else entry.settings.postWriteVerification = postWriteVerification;
       }
       save();
       return { ...entry };

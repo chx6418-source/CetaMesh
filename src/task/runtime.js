@@ -34,7 +34,7 @@ import {
 } from './types.js';
 import { createTaskStore } from './store.js';
 import { resolveTaskArtifactOpen } from './artifact-open.js';
-import { verifyTaskOutcome } from './outcome-verification.js';
+import { verifyTaskOutcome, normalizePostWriteVerificationBinding } from './outcome-verification.js';
 import {normalizeDelegationVerification,verifyDelegationContract} from './delegation-verification.js';
 
 function subId(prefix) {
@@ -42,7 +42,8 @@ function subId(prefix) {
 }
 
 export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
-  resolveWorkspace = () => null, workspacesOverlap = (left, right) => left === right, ownedArtifactRoot = null } = {}) {
+  resolveWorkspace = () => null, workspacesOverlap = (left, right) => left === right, ownedArtifactRoot = null,
+  resolvePostWriteVerification = null } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createTaskRuntime 需要 stateDir');
   const store = createTaskStore({ stateDir, now, idFactory });
 
@@ -1164,7 +1165,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   /** Persist one observed Broker tool result against the current Task owner. */
-  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode, hasChanges, retryCount, source, resultSha256, changes, operationId } = {}) {
+  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode, hasChanges, retryCount, source, resultSha256, changes, operationId, postWriteVerification } = {}) {
     const current = requireTask(id);
     const sourceId = normalizeText(eventId, 'eventId', 240, { required: true });
     if (current.executionEvidence?.some(item => item.eventId === sourceId && item.provider === provider && item.sessionId === sessionId)) return { task: current, changed: false };
@@ -1196,6 +1197,8 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         ...(['native-result', 'core-import', 'core-test'].includes(source) && /^[a-f0-9]{64}$/.test(resultSha256 ?? '')
           ? { source, resultSha256 } : {}),
         ...(source==='core-test'&&typeof operationId==='string'?{operationId:operationId.slice(0,160)}:{}),
+        ...(source === 'core-test' && name === 'test.run' && postWriteVerification
+          ? { postWriteVerification: normalizePostWriteVerificationBinding(postWriteVerification) } : {}),
         ...(source === 'core-import' && Array.isArray(changes) ? { changes: changes.slice(0,500).map(row => ({
           action: row.action === 'delete' ? 'delete' : 'write', path: String(row.path ?? '').slice(0,500),
           sha256: /^[a-f0-9]{64}$/.test(row.sha256 ?? '') ? row.sha256 : null,
@@ -1221,6 +1224,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     evidenceCandidate = false, requireCurrentCodeEvidence = false } = {}) {
     const task = requireTask(id);
     let workspaceRoot = null;
+    let postWriteVerification = null;
     if (task.workspaceId) {
       try {
         const workspace = await resolveWorkspace(task.workspaceId);
@@ -1229,12 +1233,22 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         return { status: 'NEEDS_REVIEW', kind, evidenceEventIds: [], reasons: ['WORKSPACE_UNAVAILABLE'] };
       }
     }
+    if (requireCurrentCodeEvidence === true) {
+      const observed = task.executionObservation;
+      const hasBoundTest = task.executionEvidence?.some(row => row.capability === 'test.run' && row.source === 'core-test'
+        && row.status === 'completed' && row.postWriteVerification && row.provider === observed?.provider
+        && row.sessionId === observed?.sessionId && row.runId === observed?.runId && row.phase === 'user');
+      if (hasBoundTest) {
+        try { postWriteVerification = await resolvePostWriteVerification?.({ workspaceId: task.workspaceId }); }
+        catch { return { status: 'NEEDS_REVIEW', kind, evidenceEventIds: [], reasons: ['POST_WRITE_SOURCE_UNAVAILABLE'] }; }
+      }
+    }
     if (requireCurrentCodeEvidence === true && requireTask(id).rev !== task.rev) {
       return { status: 'NEEDS_REVIEW', kind, evidenceEventIds: [], reasons: ['TASK_CHANGED_DURING_VERIFICATION'] };
     }
     const candidate = evidenceCandidate && task.parentTaskId && task.childContract?.outputKind === 'tool'
       ? { ...task, acceptance: task.acceptance.map(item => ({ ...item, met: true })) } : task;
-    return verifyTaskOutcome(candidate, { kind, expectedFile, expectedSha256, expectedCapability, requireCurrentCodeEvidence }, { workspaceRoot });
+    return verifyTaskOutcome(candidate, { kind, expectedFile, expectedSha256, expectedCapability, requireCurrentCodeEvidence }, { workspaceRoot, postWriteVerification });
   }
 
   async function verifyDelegationOutcome({id}={}) {

@@ -80,6 +80,16 @@ function resolveCommand(tool, args = []) {
   throw capabilityError('TEST_COMMAND_NOT_ALLOWED', `测试工具不在 allowlist：${String(tool ?? '')}（仅 npm / cargo）`);
 }
 
+/** Canonical allowlisted invocation; validation never starts a process. */
+export function validateTestInvocation({ tool, args, timeoutMs } = {}) {
+  if (!Array.isArray(args) || args.some(value => typeof value !== 'string')) {
+    throw capabilityError('INVALID_PARAMS', 'Test arguments must be an array of bounded string tokens');
+  }
+  const command = resolveCommand(tool, args);
+  return { tool: command.file, args: [...command.args],
+    timeoutMs: Math.max(1000, Math.min(Number(timeoutMs) || RUNNER_LIMITS.defaultTimeoutMs, RUNNER_LIMITS.maxTimeoutMs)) };
+}
+
 /** 最小环境变量：不透传宿主其余环境（凭据/token 不会进入测试进程）。 */
 function minimalEnv() {
   const allow = ['PATH', 'PATHEXT', 'SYSTEMROOT', 'SYSTEMDRIVE', 'COMSPEC', 'TEMP', 'TMP',
@@ -132,19 +142,22 @@ export function createIsolatedTestRunner({ resolveWorkspace, now = () => Date.no
     throw capabilityError('INVALID_PARAMS', 'createIsolatedTestRunner 需要 resolveWorkspace');
   }
   let running = 0;
-  async function run({ workspaceId, tool, args, timeoutMs, signal } = {}) {
+  async function run({ workspaceId, tool, args, timeoutMs, signal, beforeSpawn } = {}) {
     if (signal?.aborted) throw cancelled();
     const entry = await resolveWorkspace(workspaceId);
     if (signal?.aborted) throw cancelled();
     if (!entry?.root) throw capabilityError('WORKSPACE_NOT_FOUND', String(workspaceId ?? ''));
-    const { file, args: argv } = resolveCommand(tool, args);
+    const invocation = validateTestInvocation({ tool, args, timeoutMs });
+    const file = invocation.tool, argv = invocation.args;
     let spawnFile = file;
     let spawnArgs = argv;
     if (process.platform === 'win32' && file === 'npm') {
       spawnFile = process.env.COMSPEC || 'cmd.exe';
       spawnArgs = ['/d', '/s', '/c', 'npm.cmd', ...argv];
     }
-    const timeout = Math.max(1000, Math.min(Number(timeoutMs) || RUNNER_LIMITS.defaultTimeoutMs, RUNNER_LIMITS.maxTimeoutMs));
+    const timeout = invocation.timeoutMs;
+    if (typeof beforeSpawn === 'function') await beforeSpawn();
+    if (signal?.aborted) throw cancelled();
     if (running >= 4) throw capabilityError('RUNNER_BUSY', '已有 4 个测试进程在运行，稍后再试');
     running += 1;
     const startedAt = now();
