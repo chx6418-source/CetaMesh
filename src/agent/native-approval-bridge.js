@@ -176,16 +176,20 @@ export function createNativeApprovalAdapter({ broker, resolveTask, resolveWorksp
         && (!identifier(input.runId) || input.phase !== 'user')) return Promise.resolve(cancelled());
       if (Object.hasOwn(input, 'trackEffect') && typeof input.trackEffect !== 'boolean') return Promise.resolve(cancelled());
       if (input.trackEffect === true && (input.provider !== 'dsh' || !identifier(input.runId) || input.phase !== 'user')) return Promise.resolve(cancelled());
+      if (Object.hasOwn(input, 'effectPolicy') && (input.trackEffect !== true || input.provider !== 'dsh'
+        || input.effectPolicy !== 'dsh-staging-read-v1')) return Promise.resolve(cancelled());
       snapshot = immutable(structuredClone(input));
       const hash = permissionFingerprint({ provider: snapshot.provider, sessionId: snapshot.sessionId,
         workspaceId: snapshot.workspaceId, taskId: snapshot.taskId, toolCall: snapshot.target, options: snapshot.options,
         ...(Object.hasOwn(snapshot, 'runId') ? {runId: snapshot.runId, phase: snapshot.phase} : {}),
-        ...(Object.hasOwn(snapshot, 'trackEffect') ? {trackEffect: snapshot.trackEffect} : {}) });
+        ...(Object.hasOwn(snapshot, 'trackEffect') ? {trackEffect: snapshot.trackEffect} : {}),
+        ...(Object.hasOwn(snapshot, 'effectPolicy') ? {effectPolicy: snapshot.effectPolicy} : {}) });
       if (hash !== snapshot.fingerprint) return Promise.resolve(cancelled());
       const effectBinding = snapshot.trackEffect === true ? { provider:snapshot.provider, sessionId:snapshot.sessionId,
         taskId:snapshot.taskId, workspaceId:snapshot.workspaceId, runId:snapshot.runId, phase:snapshot.phase,
         toolCallId:snapshot.target.toolCallId, inputFingerprint:permissionFingerprint(snapshot.target.rawInput),
-        callFingerprint:permissionFingerprint(snapshot.target) } : null;
+        callFingerprint:permissionFingerprint(snapshot.target),
+        ...(Object.hasOwn(snapshot, 'effectPolicy') ? {effectPolicy: snapshot.effectPolicy} : {}) } : null;
       if (effectBinding) broker.assertAgentNativeEffectAvailable(effectBinding);
       for (const [id, expiry] of seen) if (expiry <= now()) seen.delete(id);
       const requestKey=JSON.stringify(['request',snapshot.requestId]);

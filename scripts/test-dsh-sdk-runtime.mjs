@@ -89,12 +89,18 @@ try {
     const sourceModules = path.dirname(installedRoot);
     const copyModules = path.join(root, 'runtime-copy', 'node_modules', '@deepseek-ai');
     fs.mkdirSync(copyModules, {recursive: true});
-    for (const name of ['dsh', 'dsh-sdk-minimal', 'dsh-sdk-jsonrpc-server', 'dsh-user-approval', 'dsh-tools', 'dsh-tool-executor-native', 'dsh-tool-fs']) {
+    for (const name of ['dsh', 'dsh-sdk-minimal', 'dsh-sdk-jsonrpc-server', 'dsh-user-approval', 'dsh-tools', 'dsh-tool-executor-native', 'dsh-tool-fs', 'dsh-fs-local']) {
       fs.cpSync(path.join(sourceModules, name), path.join(copyModules, name), {recursive: true});
     }
     const runtimePath = path.join(copyModules, 'dsh', 'package.json');
     const verified = await inspectDshSdkRuntime({runtimePath, nodePath: process.execPath});
     assert.equal(verified.compatible, true, verified.reason);
+    const readBackend = path.join(copyModules, 'dsh-fs-local', 'lib', 'index.js');
+    const originalReadBackend = fs.readFileSync(readBackend);
+    fs.appendFileSync(readBackend, '\n// controlled mutation of the classified read backend\n');
+    assert.throws(() => verified.validate(), {code: 'DSH_SDK_RUNTIME_CHANGED'}, 'pure read classification requires its exact native backend');
+    assert.equal((await inspectDshSdkRuntime({runtimePath, nodePath: process.execPath})).compatible, false);
+    fs.writeFileSync(readBackend, originalReadBackend);
     const pipeline = path.join(copyModules, 'dsh-tools', 'lib', 'pipeline.js');
     const original = fs.readFileSync(pipeline);
     fs.appendFileSync(pipeline, '\n// controlled mutation of the mandatory pipeline\n');

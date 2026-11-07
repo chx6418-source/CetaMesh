@@ -19,7 +19,8 @@ const PINNED = Object.freeze([
   ['dsh-tools', 'lib/pipeline.js', 'f6c850cefce30831c4c5f160e831856b105935331bacd1ae0823129001614bc6'],
   ['dsh-tools', 'lib/shared-DTdn5dXO.js', 'd02f0d8f36878313b0dae3a1bba5b77f7db4cffc77a0b72772048a36bacf2cf0'],
   ['dsh-tool-executor-native', 'lib/index.js', 'db667cb6545bb642bc2609d49f797b1d7e852e4197d5d38bf541abc7ec078599'],
-  ['dsh-tool-fs', 'lib/index.js', '0e866969b6bf1aa93407ccd9c944b50bc27a1d961b7e4209ed60bd2b73d28805']
+  ['dsh-tool-fs', 'lib/index.js', '0e866969b6bf1aa93407ccd9c944b50bc27a1d961b7e4209ed60bd2b73d28805'],
+  ['dsh-fs-local', 'lib/index.js', 'd6d3115d4584a236746929d654ede98a0bc365fa4247567ba110971657fd7f90']
 ]);
 const MANIFESTS = Object.freeze({
   dsh: '3e14837ceb3bbc0ba419ed08e9b5ba164338369b1268b93c3c25d89f7b1c9953',
@@ -28,7 +29,8 @@ const MANIFESTS = Object.freeze({
   'dsh-user-approval': '75a7feea47883d56068028ce21446f5c7e311f74719d3c1a686ce681af757385',
   'dsh-tools': 'fe2268802ba2d9259e413464e9ab0411440a81904785a2fee78f68a39ad30655',
   'dsh-tool-executor-native': '1efe6e6d45e027d96e5b70c45fef8768605f47556514a7e3b74d528142125b46',
-  'dsh-tool-fs': '47fee03cc69f85136bdc61451bcc8b57099821ebf375411757f9a796ba4e86c8'
+  'dsh-tool-fs': '47fee03cc69f85136bdc61451bcc8b57099821ebf375411757f9a796ba4e86c8',
+  'dsh-fs-local': 'f77d11a293d7aeb8ed94e14edd887e036526abaaf08d681d76610da241999526'
 });
 const digest = value => crypto.createHash('sha256').update(value).digest('hex');
 const fail = (code, message) => {throw Object.assign(new Error(message), {code});};

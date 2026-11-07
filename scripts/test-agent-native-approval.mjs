@@ -53,7 +53,8 @@ async function fixture(name, { providerId = 'private-native-fixture', durable = 
       input.fingerprint = permissionFingerprint({ provider: input.provider, sessionId: input.sessionId,
         workspaceId: input.workspaceId, taskId: input.taskId, toolCall: input.target, options: input.options,
         ...(Object.hasOwn(input, 'runId') ? { runId: input.runId, phase: input.phase } : {}),
-        ...(Object.hasOwn(input, 'trackEffect') ? { trackEffect: input.trackEffect } : {}) });
+        ...(Object.hasOwn(input, 'trackEffect') ? { trackEffect: input.trackEffect } : {}),
+        ...(Object.hasOwn(input, 'effectPolicy') ? { effectPolicy: input.effectPolicy } : {}) });
       return input;
     },
     request(input = this.input(), options) {
@@ -240,6 +241,8 @@ try {
   const runParams = { sessionId: 'native', toolCall: { toolCallId: 'bridge-call', kind: 'read', title: 'Read', rawInput: { path: 'package.json' } },
     options: [{ optionId: 'allow', kind: 'allow_once' }] };
   assert.deepEqual(await runBridge.request({ ...runParams, runId: 'peer-injected-run' }), { outcome: { outcome: 'cancelled' } });
+  assert.deepEqual(await runBridge.request({...runParams, effectPolicy: 'dsh-staging-read-v1'}), {outcome: {outcome: 'cancelled'}},
+    'protocol peers cannot attach the trusted effect classification');
   const bridgePromise = runBridge.request(runParams);
   await tick();
   assert.equal(trustedRun.pending().length, 1, 'trusted bridge configuration owns the Core run binding');
@@ -254,10 +257,10 @@ try {
       { outcome: 'cancelled' }, 'a settled, unknown or cancelled Core run cannot request more native execution');
   }
 
-  async function trackedFixture(name, { target } = {}) {
+  async function trackedFixture(name, { target, effectPolicy } = {}) {
     const tracked = await fixture(name, { providerId: 'dsh' });
     tracked.state.task.executionObservation = { provider: 'dsh', sessionId: 'session', runId: 'dsh-run', state: 'running' };
-    const input = tracked.input({ runId: 'dsh-run', phase: 'user', trackEffect: true, action: target?.kind ?? 'execute',
+    const input = tracked.input({ runId: 'dsh-run', phase: 'user', trackEffect: true, ...(effectPolicy ? {effectPolicy} : {}), action: target?.kind ?? 'execute',
       target: target ?? { toolCallId: 'native-call', title: 'Native command', kind: 'execute',
         rawInput: { command: 'echo reviewable-command', secret: 'never-persist-effect-secret' } } });
     return { tracked, input };
@@ -277,6 +280,12 @@ try {
       workspaceId: 'workspace', runId: 'dsh-run', toolCallId: 'native-call', inputFingerprint: grant.inputFingerprint };
     return { tracked, input, grant, binding };
   }
+  const invalidPolicy = await trackedFixture('tracked-unsupported-policy', {effectPolicy: 'peer-says-read-only'});
+  assert.deepEqual(await invalidPolicy.tracked.request(invalidPolicy.input), {outcome: 'cancelled'});
+  assert.equal(invalidPolicy.tracked.pending().length, 0, 'an unknown effect policy cannot reach Owner approval');
+  const untrackedPolicy = await trackedFixture('tracked-policy-without-tracking', {effectPolicy: 'dsh-staging-read-v1'});
+  assert.deepEqual(await untrackedPolicy.tracked.request(untrackedPolicy.tracked.input({...untrackedPolicy.input, trackEffect: false})), {outcome: 'cancelled'});
+  assert.equal(untrackedPolicy.tracked.pending().length, 0);
   const tracked = await approveTracked('tracked-effect');
   assert.equal(tracked.tracked.service.completionBlocker('task'), 'TASK_EFFECT_UNCONFIRMED', 'permit release cannot certify native tool completion');
   const effectFile = path.join(tracked.tracked.stateDir, 'capability', 'dispatches.json');
@@ -317,6 +326,25 @@ try {
   assert.equal(Object.values(failedJournal).find(row => row.nativeEffectId === failedEffect.grant.nativeEffectId).nativeEvidence.outcome, 'failed');
   assert.throws(() => failedEffect.tracked.service.settleAgentNativeEffect({ ...failedEffect.binding, outcome: 'completed',
     evidence: { source: 'native-result', resultSha256: 'e'.repeat(64), eventId: 'contradictory-success' } }), { code: 'AGENT_NATIVE_EFFECT_ALREADY_SETTLED' });
+
+  const readTarget = {toolCallId: 'native-call', title: 'read', kind: 'read', rawInput: {file_path: 'missing.txt'}};
+  const failedRead = await approveTracked('tracked-read-failed', {target: readTarget, effectPolicy: 'dsh-staging-read-v1'});
+  const failedReadResult = {...failedRead.binding, outcome: 'failed',
+    evidence: {source: 'native-result', resultSha256: '1'.repeat(64), eventId: 'read-failed-result'}};
+  assert.equal(failedRead.tracked.service.settleAgentNativeEffect(failedReadResult).status, 'failed', 'a verified read terminal error has no unconfirmed file write');
+  assert.equal(failedRead.tracked.service.completionBlocker('task'), null);
+  assert.equal(failedRead.tracked.service.settleAgentNativeEffect(failedReadResult).status, 'failed');
+  assert.deepEqual(await failedRead.tracked.request(failedRead.tracked.input({...failedRead.input, requestId: 'repeat-failed-read'})),
+    {outcome: 'cancelled'}, 'known failure does not grant replay of the original call');
+  assert.throws(() => failedRead.tracked.service.settleAgentNativeEffect({...failedReadResult, outcome: 'completed'}),
+    {code: 'AGENT_NATIVE_EFFECT_ALREADY_SETTLED'});
+  const lostRead = await approveTracked('tracked-read-lost', {target: readTarget, effectPolicy: 'dsh-staging-read-v1'});
+  assert.equal(lostRead.tracked.service.settleAgentNativeEffect({...lostRead.binding, outcome: 'disconnected'}).status, 'outcome-unknown',
+    'a missing read result remains unknown even for the verified policy');
+  const unclassifiedRead = await approveTracked('tracked-read-unclassified', {target: readTarget});
+  assert.equal(unclassifiedRead.tracked.service.settleAgentNativeEffect({...unclassifiedRead.binding, effectPolicy: 'dsh-staging-read-v1', outcome: 'failed',
+    evidence: {source: 'native-result', resultSha256: '2'.repeat(64), eventId: 'legacy-read-failed'}}).status, 'outcome-unknown',
+    'a settlement label or read-looking title cannot replace the original approved effect policy');
 
   const effectCrash = await approveTracked('tracked-restart');
   const crashEffectFile = path.join(effectCrash.tracked.stateDir, 'capability', 'dispatches.json');

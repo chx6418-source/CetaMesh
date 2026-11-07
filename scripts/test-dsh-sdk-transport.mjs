@@ -43,7 +43,7 @@ async function until(check) {
   throw new Error('DSH fixture did not reach the expected state');
 }
 
-function setup({ version = '0.2.2-rc.1', approval, terminal = true, mismatch = null, stopKnown = true, failedResult = false,
+function setup({ version = '0.2.2-rc.1', approval, terminal = true, mismatch = null, stopKnown = true, failedResult = false, failedStatus = 'outcome-unknown',
   delayedTurn = false, toolName = 'read', toolInput = { file_path: 'note.txt' } } = {}) {
   const processes = [], reviews = [], settlements = [];
   const runtime = { version, nodePath: process.execPath, dshBin: path.join(root, 'dsh-bin.js'),
@@ -122,7 +122,7 @@ function setup({ version = '0.2.2-rc.1', approval, terminal = true, mismatch = n
       return approval ? approval(request, context) : { outcome: 'approved', optionId: 'allow',
         nativeEffectId: 'effect-1', inputFingerprint: permissionFingerprint(request.target.rawInput) };
     },
-    settleNativeEffect: async input => { settlements.push(input); return { status: input.outcome === 'failed' ? 'outcome-unknown' : input.outcome }; }
+    settleNativeEffect: async input => { settlements.push(input); return { status: input.outcome === 'failed' ? failedStatus : input.outcome }; }
   });
   return { provider, processes, reviews, settlements, runtime };
 }
@@ -181,11 +181,12 @@ try {
   const outside = path.join(root, 'outside-files'); fs.mkdirSync(outside);
   for (const toolName of ['read', 'write', 'edit']) {
     for (const file of [path.join(outside, 'note.txt'), '../outside-files/note.txt', '\\\\server\\share\\note.txt',
-      'note.txt:policy', options => options.profile.gatePath]) {
+      'note.txt:policy', '~', '~/scope-probe.txt', '~\\scope-probe.txt',
+      '~/../profile/cetamesh-task.patch.yml', options => options.profile.gatePath]) {
       const h = setup({ toolName, toolInput: options => fileInput(toolName, typeof file === 'function' ? file(options) : file) });
       await startFileCall(h);
       await until(() => h.processes.at(-1).lastAnswer);
-      assert.equal(h.reviews.length, 0, `${toolName} outside/UNC/ADS/control-plane paths never reach Core approval`);
+      assert.equal(h.reviews.length, 0, `${toolName} outside/UNC/ADS/home-expansion/control-plane paths never reach Core approval: ${file}`);
       assert.notEqual(h.processes.at(-1).lastAnswer.outcome, 'allowed-once');
       assert.equal(h.settlements.length, 0, 'pre-approval path refusal creates no native effect');
       await h.provider.shutdown();
@@ -246,8 +247,8 @@ try {
     const h = setup(); const health = await h.provider.health();
     assert.equal(health.ready, true); assert.equal(health.taskEligible, true);
     const securityBefore = h.provider.capabilities().security.policyFingerprint;
-    assert.equal(h.provider.capabilities().security.fileScopePolicy, 'task-staging-file-tools-v1');
-    assert.ok(h.provider.capabilities().security.securityLimitations.includes('task-staging-file-tools-v1'));
+    assert.equal(h.provider.capabilities().security.fileScopePolicy, 'task-staging-file-tools-v2');
+    assert.ok(h.provider.capabilities().security.securityLimitations.includes('task-staging-file-tools-v2'));
     assert.equal(h.provider.capabilities().taskTransport, 'sdk');
     assert.equal(h.processes.some(p => p.frames.some(f => f.method === 'session/prompt')), false, 'health sends no model input');
     const session = await h.provider.createSession({ cwd: stage, taskId: 'task-1', workspaceId: 'workspace-1',
@@ -316,6 +317,22 @@ try {
     await h.provider.send({ sessionId: session.sessionId, content: 'Read note', runId: 'stale-run', phase: 'user' });
     await until(() => h.processes.at(-1).lastAnswer);
     assert.notEqual(h.processes.at(-1).lastAnswer.outcome, 'allowed-once', 'a Core receipt for different input never releases the runtime');
+    await h.provider.shutdown();
+  }
+  {
+    const h = setup({ failedResult: true, failedStatus: 'failed' });
+    const session = await h.provider.createSession({ cwd: stage, taskId: 'task-read-failed', workspaceId: 'workspace-read-failed' });
+    await h.provider.send({ sessionId: session.sessionId, content: 'Read missing note', runId: 'read-failed-run', phase: 'user' });
+    await until(() => h.settlements.length);
+    assert.equal(h.reviews[0].request.effectPolicy, 'dsh-staging-read-v1', 'only the trusted transport classifies its exact recorded read tool');
+    assert.equal(h.settlements[0].outcome, 'failed');
+    await until(() => h.provider.status({ sessionId: session.sessionId }).then(row => row.state === 'ready'));
+    const timeline = [];
+    for await (const row of h.provider.follow({sessionId: session.sessionId})) {
+      timeline.push(row); if (row.event.type === 'turn/end') break;
+    }
+    assert.equal(timeline.some(row => row.event.type === 'tool/result' && row.event.data.status === 'failed'), true,
+      'a known read error remains failed tool evidence, never fabricated success');
     await h.provider.shutdown();
   }
   {

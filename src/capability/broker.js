@@ -128,9 +128,11 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
  const nativeIdentifier=value=>typeof value==='string'&&value.length>0&&value.length<=256&&!/[\x00-\x1f\x7f]/.test(value);
  function nativeScope(value){
   if(!value||nativeIdentityFields.some(key=>!nativeIdentifier(value[key]))||value.provider!=='dsh'||value.phase!=='user'
-   ||['inputFingerprint','callFingerprint'].some(key=>!/^[a-f0-9]{64}$/.test(value[key]??'')))
+   ||['inputFingerprint','callFingerprint'].some(key=>!/^[a-f0-9]{64}$/.test(value[key]??''))
+   ||(Object.hasOwn(value,'effectPolicy')&&value.effectPolicy!=='dsh-staging-read-v1'))
    throw capabilityError('AGENT_NATIVE_EFFECT_MISMATCH','A complete trusted native effect binding is required');
-  return Object.fromEntries(nativeScopeFields.map(key=>[key,value[key]]));
+  return {...Object.fromEntries(nativeScopeFields.map(key=>[key,value[key]])),
+   ...(Object.hasOwn(value,'effectPolicy')?{effectPolicy:value.effectPolicy}:{})};
  }
  function nativeEffectKey(scope){return 'native-effect:'+requestFingerprint(Object.fromEntries(nativeIdentityFields.map(key=>[key,scope[key]])));}
  function assertAgentNativeEffectAvailable(binding){
@@ -175,9 +177,11 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
     throw capabilityError('AGENT_NATIVE_EFFECT_EVIDENCE_REQUIRED','Actual terminal native output is required; activity and permit completion are not results');
    evidence={source:'native-result',resultSha256:input.evidence.resultSha256,eventId:input.evidence.eventId,outcome:input.outcome};
   }
-  // A native error can leave partial writes or external effects. A result is
-  // observed, but its effects require the existing Owner reconciliation path.
-  const status=input.outcome==='completed'?'completed':'outcome-unknown';
+  // Only the original, approved policy for the pinned read implementation can
+  // settle an actual error without uncertain writes. Result labels cannot add
+  // that policy. Writes, unclassified legacy calls and absent results stay unknown.
+  const status=input.outcome==='completed'?'completed'
+   :input.outcome==='failed'&&scope.effectPolicy==='dsh-staging-read-v1'?'failed':'outcome-unknown';
   if(terminal&&row.nativeEvidence&&requestFingerprint(row.nativeEvidence)!==requestFingerprint(evidence))
    throw capabilityError('AGENT_NATIVE_EFFECT_ALREADY_SETTLED','A contradictory native terminal result cannot replace retained execution evidence');
   if(!['started','outcome-unknown'].includes(row.status)){

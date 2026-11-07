@@ -61,6 +61,7 @@ const evidence = {kind: 'real-DSH-0.2.2-Core-native-tools-synthetic-local-model'
 let core, serverFailure, currentCase, workspace, taskId, sourceSession, expectedResumeInstruction = false, passed = false;
 let fault, allowUnknownEffectsClose = false;
 const ownedLaunches = new Map();
+const coreApprovalCallsByPath = new Map();
 const cases = new Map();
 const ui = (method, params) => core.desktopUiService.execute({method, params});
 const cap = (method, params) => core.capabilityService.execute({method, params});
@@ -94,6 +95,8 @@ const server = http.createServer(async (request, response) => {
       toolMessages: results.length, markerObserved: JSON.stringify(results).includes(sourceContent.trim())};
     evidence.requests.push(observed);
     if (observed.markerObserved) scenario.markerObserved = true;
+    if (scenario.name === 'missing-read' && results.some(result => result.is_error === true
+      && /not found|FS_NOT_FOUND|ENOENT/i.test(JSON.stringify(result.content)))) scenario.actualMissingError = true;
     if (results.length) scenario.results.push(...results.map(result => ({toolCallId: result.tool_use_id,
       isError: result.is_error === true, contentSha256: sha256(JSON.stringify(result.content))})));
     const issueTool = !scenario.issued;
@@ -103,7 +106,12 @@ const server = http.createServer(async (request, response) => {
       scenario.issued = true;
       block = {type: 'tool_use', id: 'native_' + scenario.name, name: scenario.tool, input: scenario.input};
       finishReason = 'tool_use';
-    } else { block = {type: 'text', text: 'Synthetic local DSH turn completed for ' + scenario.name + '.'}; finishReason = 'end_turn'; }
+    } else {
+      block = {type: 'text', text: results.some(result => result.is_error === true)
+        ? 'Synthetic model observed the actual native tool error for ' + scenario.name + '; no successful operation is claimed.'
+        : 'Synthetic local DSH turn completed for ' + scenario.name + '.'};
+      finishReason = 'end_turn';
+    }
     const message = {id: 'msg-synthetic-' + evidence.requests.length, type: 'message', role: 'assistant', model: body.model,
       content: [block], stop_reason: finishReason, stop_sequence: null, usage: {input_tokens: 20, output_tokens: 10}};
     if (body.stream) {
@@ -133,13 +141,17 @@ async function launchOwned({runtime, profile, sessionId, controlDir, environment
     inputMode: 'open', timeoutMs: 30 * 60 * 1000, env: environment,
     authorizedEnvKeys: ['DSH_HOME', 'CETAMESH_DSH_TASK_API_KEY']});
   const outward = new PassThrough(), decoder = new StringDecoder('utf8');
-  const launched = {sessionId, handle, owner, outward, cut: false}; ownedLaunches.set(sessionId, launched);
+  const launched = {sessionId, handle, owner, outward, profile, controlDir, cut: false}; ownedLaunches.set(sessionId, launched);
   let buffered = '';
   function line(bytes) {
     if (launched.cut) return;
     let frame;
     try { frame = JSON.parse(bytes.replace(/^\uFEFF/, '')); } catch { /* Forward unchanged for the real protocol decoder. */ }
     const actual = frame?.method === 'session.event' ? frame.params?.event : null;
+    if (actual?.type === 'tool/call' && typeof actual.data?.callId === 'string') {
+      const scenario = cases.get(actual.data.callId.replace(/^native_/, ''));
+      if (scenario?.input.file_path.startsWith('~')) scenario.actualNativeArguments = JSON.parse(actual.data.arguments);
+    }
     if (fault?.kind === 'drop-result' && fault.sessionId === sessionId && actual?.type === 'tool/result'
       && actual.data?.message?.toolCallId === fault.callId) {
       fault.dropped = {eventSeq: actual.seq, isError: actual.data.message.isError,
@@ -170,6 +182,8 @@ function makeCore() {
     agentStagingRoot: staging, providerSecrets, agentRuntimeConfiguration, deferOptionalStart: true,
     agentDshSdkOptions: {allowLoopbackHttpForTests: true, ownedTreeSupervisor: supervisor, launch: launchOwned,
       requestNativeApproval: (input, options = {}) => {
+        const requestedPath = input.target.rawInput.file_path;
+        coreApprovalCallsByPath.set(requestedPath, (coreApprovalCallsByPath.get(requestedPath) ?? 0) + 1);
         if (input.target.rawInput.file_path !== 'deadline.txt') return core.capabilityService.requestAgentNativeApproval(input, options);
         const deadline = new AbortController(), startedAt = Date.now();
         const timer = setTimeout(() => deadline.abort(), 1000);
@@ -213,6 +227,41 @@ async function finishCase(label) {
     || ['blocked', 'failed'].includes(row.status), label);
   assert.equal(current.executionObservation?.state, 'awaiting-review', JSON.stringify(current));
   return current;
+}
+async function rejectHomeExpansion(name, tool, input) {
+  const owned = ownedLaunches.get(sourceSession);
+  const actualStage = (await core.agentBroker.status({provider: 'dsh', sessionId: sourceSession})).cwd;
+  const protectedFiles = [owned.profile.patchPath, owned.profile.gatePath,
+    path.join(owned.profile.homeDir, 'profiles', 'sdk-minimal', 'package.json'),
+    path.join(owned.profile.homeDir, 'profiles', 'sdk-minimal', 'cordis.patch.yml')];
+  const before = protectedFiles.map(file => sha256(fs.readFileSync(file)));
+  assert.equal(fs.realpathSync(path.join(owned.controlDir, 'os-home', '..', 'profile', 'cetamesh-task.patch.yml')),
+    fs.realpathSync(owned.profile.patchPath), 'the actual native home-expanded control target exists outside staging');
+  const callsBefore = coreApprovalCallsByPath.get(input.file_path) ?? 0;
+  const scenario = await dispatchCase(name, tool, input);
+  const outcome = await until(() => ({task: task(), pending: core.capabilityService.broker.approvals.list()
+    .filter(row => row.request.capability === 'agent.native.approve' && row.request.taskId === taskId)}),
+  value => value.pending.length > 0 || value.task.executionObservation?.state === 'awaiting-review'
+    || ['blocked', 'failed'].includes(value.task.status), 'actual home-expansion scope refusal');
+  assert.equal(outcome.pending.length, 0, 'home expansion must be refused before any Core approval; the driver never approves it');
+  await finishCase('native home-expansion refusal');
+  assert.deepEqual(scenario.actualNativeArguments, input, 'the actual CLI call keeps its raw home-expansion arguments unchanged');
+  assert.ok(scenario.results.length > 0 && scenario.results.every(row => row.isError), 'actual native refusal results reach the synthetic model');
+  assert.equal(coreApprovalCallsByPath.get(input.file_path) ?? 0, callsBefore, 'home expansion never reaches the Core approval callback');
+  const approvalRows = JSON.parse(fs.readFileSync(path.join(stateDir, 'capability', 'approvals.json'), 'utf8'));
+  assert.equal(approvalRows.filter(row => row.request?.capability === 'agent.native.approve'
+    && row.request.input?.nativeBinding?.runId === scenario.runId).length, 0);
+  const dispatchRows = JSON.parse(fs.readFileSync(path.join(stateDir, 'capability', 'dispatches.json'), 'utf8'));
+  assert.equal(Object.values(dispatchRows).filter(row => row.kind === 'agent-native-effect'
+    && row.nativeBinding?.runId === scenario.runId).length, 0, 'refused home expansion has no native effect receipt');
+  assert.deepEqual(protectedFiles.map(file => sha256(fs.readFileSync(file))), before, 'private control files remain byte-identical');
+  for (const file of [path.join(owned.controlDir, 'os-home', 'scope-probe.txt'),
+    path.join(owned.profile.homeDir, 'scope-probe.txt'), path.join(project, 'scope-probe.txt'),
+    path.join(actualStage, '~', 'scope-probe.txt')]) assert.equal(fs.existsSync(file), false, 'home expansion cannot create an outside write');
+  evidence.cases.push({name, status: 'PASS', rawInput: input, actualNativeArguments: scenario.actualNativeArguments,
+    coreApprovalCalls: 0, nativeEffectReceipts: 0, controlHashesBefore: before,
+    controlHashesAfter: protectedFiles.map(file => sha256(fs.readFileSync(file)))});
+  console.log('PASS actual DSH ' + name + ' -> unchanged raw arguments -> zero Core approval/effect -> unchanged control files/no outside write');
 }
 async function startCaseTask(name, tool, input) {
   const scenario = {name, tool, input, markerObserved: false, issued: false, results: []}; cases.set(name, scenario);
@@ -285,6 +334,33 @@ try {
   assert.equal(core.capabilityService.completionBlocker(taskId), null);
   evidence.cases.push({name: 'read', status: 'PASS', modelRequests: evidence.requests.length, nativeResults: currentCase.results.length});
   console.log('PASS actual DSH read -> exact Core Owner approval -> actual file marker -> native result evidence');
+
+  await rejectHomeExpansion('tilde-profile-read', 'read', {file_path: '~/../profile/cetamesh-task.patch.yml'});
+  await rejectHomeExpansion('tilde-outside-write', 'write', {file_path: '~/scope-probe.txt', content: 'This outside write must never execute.'});
+
+  const missing = await dispatchCase('missing-read', 'read', {file_path: 'missing-source.txt'});
+  const missingApproval = await exactToolApproval(missing);
+  assert.equal(missingApproval.request.input.nativeBinding.effectPolicy, 'dsh-staging-read-v1');
+  await decide(missingApproval, true); await finishCase('actual missing-file read terminal error');
+  assert.equal(missing.actualMissingError, true, 'the synthetic model sees and reports the actual missing-file tool error');
+  assert.ok(missing.results.length > 0 && missing.results.every(row => row.isError));
+  const missingReceipt = task().executionEvidence.find(row => row.runId === missing.runId
+    && row.source === 'native-result' && row.status === 'failed');
+  assert.ok(missingReceipt && /^[a-f0-9]{64}$/.test(missingReceipt.resultSha256));
+  const missingRows = Object.values(JSON.parse(fs.readFileSync(path.join(stateDir, 'capability', 'dispatches.json'), 'utf8')))
+    .filter(row => row.kind === 'agent-native-effect' && row.nativeBinding?.runId === missing.runId);
+  assert.equal(missingRows.length, 1); assert.equal(missingRows[0].status, 'failed');
+  assert.equal(missingRows[0].nativeEvidence.outcome, 'failed');
+  assert.equal(core.capabilityService.completionBlocker(taskId), null, 'an actual failed trusted pure read has no unknown write effect');
+  assert.equal(core.capabilityService.broker.uncertainDispatchesForTask({taskId, workspaceId: workspace.id}).length, 0);
+  evidence.cases.push({name: 'actual missing-file read retains failed evidence without unknown effect', status: 'PASS',
+    effectPolicy: missingRows[0].nativeBinding.effectPolicy, nativeResultSha256: missingReceipt.resultSha256});
+  const afterReadError = await dispatchCase('after-read-error', 'read', {file_path: 'source.txt'});
+  await decide(await exactToolApproval(afterReadError), true); await finishCase('new same-Task read after actual missing-file error');
+  assert.equal(afterReadError.markerObserved, true);
+  assert.ok(task().executionEvidence.some(row => row.eventId === missingReceipt.eventId && row.status === 'failed'));
+  evidence.cases.push({name: 'new same-Task read succeeds after retained native read failure without replay', status: 'PASS'});
+  console.log('PASS actual missing-file read -> terminal failed/no unknown -> new same-Task instruction and fresh approval -> successful source read');
 
   const priorSession = sourceSession, priorEvidence = structuredClone(task().executionEvidence), originalGoal = task().goal;
   const paused = await ui('ui.task.pause', {id: taskId, expectedRev: task().rev});

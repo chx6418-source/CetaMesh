@@ -14,7 +14,7 @@ import { canonicalizeRoot, resolveInside } from '../workspace/boundary.js';
 
 const VERSION = '0.2.2-rc.1';
 const TOOLS = new Set(['read', 'write', 'edit']);
-const FILE_SCOPE_POLICY = 'task-staging-file-tools-v1';
+const FILE_SCOPE_POLICY = 'task-staging-file-tools-v2';
 const text = value => typeof value === 'string' && value.length > 0 && value.length <= 256 && !/[\x00-\x1f\x7f]/.test(value);
 const hash = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const record = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -49,6 +49,12 @@ function assertStagingRoot(s) {
 
 function resolveStagedFile(s, toolName, input) {
   if (typeof input.file_path !== 'string' || !input.file_path) throw fault('DSH_SDK_FILE_SCOPE_INVALID', 'DSH file tools require their exact file_path string');
+  // The pinned native filesystem expands these spellings before path.resolve.
+  // Core's shared boundary treats them literally, so their targets would differ.
+  // Reject them without changing the actual arguments presented for approval.
+  if (input.file_path === '~' || input.file_path.startsWith('~/') || input.file_path.startsWith('~\\')) {
+    throw fault('DSH_SDK_FILE_SCOPE_INVALID', 'DSH Task file tools require a staging path without home expansion');
+  }
   assertStagingRoot(s);
   const resolved = resolveInside(s.cwd, input.file_path, { forWrite: toolName !== 'read' });
   // The shared boundary resolves lexical/real paths; this file-tool scope also
@@ -151,11 +157,12 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
       outcome, ...(evidence ? { evidence } : {}) });
     if (outcome === 'completed' || outcome === 'failed') {
       if (outcome === 'completed' && result?.status !== 'completed'
-        || outcome === 'failed' && !['failed', 'outcome-unknown'].includes(result?.status)) {
+        || outcome === 'failed' && (!['failed', 'outcome-unknown'].includes(result?.status)
+          || result.status === 'failed' && effect.effectPolicy !== 'dsh-staging-read-v1')) {
         throw fault('DSH_NATIVE_EFFECT_UNKNOWN', 'Core did not retain the terminal native effect');
       }
-      effect.terminal = outcome === 'completed';
-      effect.unknown = outcome === 'failed';
+      effect.terminal = ['completed', 'failed'].includes(result.status);
+      effect.unknown = !effect.terminal;
     } else effect.unknown = true;
   }
 
@@ -278,7 +285,8 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
         return { outcome: active() ? 'rejected' : 'cancelled' };
       }
       if (result.inputFingerprint !== permissionFingerprint(reason.input)) return { outcome: 'rejected' };
-      effect = { nativeEffectId: result.nativeEffectId, inputFingerprint: result.inputFingerprint, callId: call.id, runId: run.runId };
+      effect = { nativeEffectId: result.nativeEffectId, inputFingerprint: result.inputFingerprint, callId: call.id, runId: run.runId,
+        ...(call.name === 'read' ? {effectPolicy: 'dsh-staging-read-v1'} : {}) };
       s.effects.set(call.id, effect);
       await validateSession(s);
       if (!active() || !audit.pending) { await settle(s, effect, 'unknown'); return { outcome: 'cancelled' }; }
@@ -484,7 +492,11 @@ export function createDshSdkTaskTransport({ runtimeResolver, stateDir, requestNa
         run.generation = lifecycle.begin({ sessionId: s.id, runId, turnId: run.id }).generation;
         s.run = run; s.state = 'running';
         s.permissions = phase === 'user' ? createAgentPermissionBridge({ provider: 'dsh', sessionId: s.id, nativeSessionId: s.id,
-          taskId: s.taskId, workspaceId: s.workspaceId, runId, phase, trackEffect: true, requestNativeApproval }) : null;
+          taskId: s.taskId, workspaceId: s.workspaceId, runId, phase, trackEffect: true,
+          // Only this version-pinned transport classifies its actual recorded
+          // native read implementation; the protocol peer cannot set the policy.
+          classifyNativeEffect: toolCall => s.calls.get(toolCall.toolCallId)?.name === 'read' ? 'dsh-staging-read-v1' : undefined,
+          requestNativeApproval }) : null;
         try {
           const result = await s.rpc.request('session/prompt', { sessionId: s.id, contentBlocks: blocks }, { timeoutMs: 15000 });
           if (!text(result?.messageId)) throw fault('DSH_SDK_PROTOCOL_INVALID', 'DSH SDK prompt has no durable receipt');

@@ -9,7 +9,7 @@ export const permissionFingerprint = value => crypto.createHash('sha256').update
 
 /** Authority is injected by trusted composition, never supplied by the ACP peer. */
 export function createAgentPermissionBridge({provider, sessionId, workspaceId, taskId, nativeSessionId = sessionId,
-  runId, phase, trackEffect, requestNativeApproval, maxPending = 256} = {}) {
+  runId, phase, trackEffect, classifyNativeEffect, requestNativeApproval, maxPending = 256} = {}) {
   const pending = new Map();
   const execution = {...(runId !== undefined || phase !== undefined ? {runId,phase} : {}),
     ...(trackEffect !== undefined ? {trackEffect} : {})};
@@ -22,7 +22,7 @@ export function createAgentPermissionBridge({provider, sessionId, workspaceId, t
   return {
     async request(params) {
       if (closed || typeof requestNativeApproval !== 'function' || params?.sessionId !== nativeSessionId
-        || ['provider','workspaceId','taskId','runId','phase','trackEffect','fingerprint'].some(key => Object.hasOwn(params ?? {},key))
+        || ['provider','workspaceId','taskId','runId','phase','trackEffect','effectPolicy','fingerprint'].some(key => Object.hasOwn(params ?? {},key))
         || !params.toolCall || typeof params.toolCall.toolCallId !== 'string'
         || !Array.isArray(params.options) || pending.size >= maxPending) return cancelled();
       const options = params.options.filter(option => typeof option?.optionId === 'string'
@@ -30,7 +30,9 @@ export function createAgentPermissionBridge({provider, sessionId, workspaceId, t
       if (!options.some(option => option.kind === 'allow_once')) return cancelled();
       const requestId = crypto.randomUUID(), epoch = generation;
       const snapshot = structuredClone({toolCall:params.toolCall,options});
-      const fingerprint = permissionFingerprint({provider,sessionId,workspaceId,taskId,...execution,...snapshot});
+      const policy = classifyNativeEffect?.(snapshot.toolCall);
+      const binding = {...execution, ...(policy === undefined ? {} : {effectPolicy: policy})};
+      const fingerprint = permissionFingerprint({provider,sessionId,workspaceId,taskId,...binding,...snapshot});
       let release, timer;
       const controller = new AbortController();
       const aborted = new Promise(resolve => { release = () => { controller.abort(); resolve(null); }; });
@@ -39,11 +41,11 @@ export function createAgentPermissionBridge({provider, sessionId, workspaceId, t
         const result = await Promise.race([aborted,
           new Promise(resolve => { timer = setTimeout(()=>{ controller.abort(); resolve(null); },600000); }),
           Promise.resolve().then(() => !closed && epoch === generation && pending.has(requestId) ? requestNativeApproval({
-          provider,sessionId,workspaceId,taskId,...execution,requestId,fingerprint,
+          provider,sessionId,workspaceId,taskId,...binding,requestId,fingerprint,
           action:snapshot.toolCall.kind ?? 'other',target:snapshot.toolCall,options:snapshot.options
         }, { signal: controller.signal }) : null)]);
         if (closed || epoch !== generation || !pending.has(requestId) || result?.outcome !== 'approved'
-          || permissionFingerprint({provider,sessionId,workspaceId,taskId,...execution,...snapshot}) !== fingerprint) return cancelled();
+          || permissionFingerprint({provider,sessionId,workspaceId,taskId,...binding,...snapshot}) !== fingerprint) return cancelled();
         const selected = options.find(option => option.optionId === result.optionId && option.kind === 'allow_once');
         return selected ? {outcome:{outcome:'selected',optionId:selected.optionId},
           ...(typeof result.nativeEffectId==='string' ? {nativeEffectId:result.nativeEffectId,inputFingerprint:result.inputFingerprint} : {})} : cancelled();
