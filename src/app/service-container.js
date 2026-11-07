@@ -362,6 +362,7 @@ export function createCetaMeshServices(options = {}) {
       return null;
     }
   });
+  capabilityService.setReadBatchExecutor(toolExecutionCoordinator.executeReadBatch);
   for (const row of taskService.runtime.recoveryCandidates()) {
     const recovery = toolExecutionCoordinator.recoveryForTask(row.id)
       ?? capabilityService.recoveryForTask(row.id);

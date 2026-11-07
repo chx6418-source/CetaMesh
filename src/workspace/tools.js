@@ -101,13 +101,14 @@ function changedRead() {
   fail('WORKSPACE_READ_CHANGED', 'Workspace root, path or file changed during asynchronous read; retry with current facts');
 }
 
-function createReadContext(rootReal, { signal, assertAuthorized, restricted = false } = {}) {
+function createReadContext(rootReal, { signal, assertAuthorized, consumeReadBytes, restricted = false } = {}) {
   assertReadActive(signal);
   let real, stat;
   try { real = fs.realpathSync.native(rootReal); stat = fs.statSync(real); }
   catch { changedRead(); }
   if (!sameReadPath(rootReal, real) || !stat.isDirectory()) changedRead();
-  return { rootReal, rootStat: stat, signal, assertAuthorized, restricted };
+  return { rootReal, rootStat: stat, signal, assertAuthorized,
+    consumeReadBytes: typeof consumeReadBytes === 'function' ? consumeReadBytes : null, restricted };
 }
 
 function assertReadRoot(context) {
@@ -200,7 +201,12 @@ async function readFileInContext(context, relPath, { maxBytes = 1024 * 1024, off
       while (consumed < target.length) {
         await readCheckpoint(context);
         verifyReadPath(context, snapshot);
-        const { bytesRead } = await handle.read(target, consumed, Math.min(READ_IO_CHUNK_BYTES, target.length - consumed), position + consumed);
+        const requestedBytes = Math.min(READ_IO_CHUNK_BYTES, target.length - consumed);
+        // Trusted restrictive context only: charge the submitted IO before it
+        // starts, including a nonzero-offset encoding header and search reads.
+        // A short OS read may conservatively consume more quota than bytes returned.
+        context.consumeReadBytes?.(requestedBytes);
+        const { bytesRead } = await handle.read(target, consumed, requestedBytes, position + consumed);
         // No race against cancellation: this await drains the started OS read.
         assertReadActive(context.signal);
         await verifyReadHandle(context, snapshot, handle);
@@ -459,8 +465,8 @@ export function fileSearch(rootReal, { query = '', glob = '', searchPath = '.', 
 
 /** The traversal and file contents use real asynchronous filesystem IO. */
 export async function fileSearchAsync(rootReal, { query = '', glob = '', searchPath = '.', offset = 0,
-  restricted = false, includeHidden = false, skipNames, limit = 200, maxDepth = SEARCH_MAX_DEPTH, signal, assertAuthorized } = {}) {
-  const context = createReadContext(rootReal, { signal, assertAuthorized, restricted });
+  restricted = false, includeHidden = false, skipNames, limit = 200, maxDepth = SEARCH_MAX_DEPTH, signal, assertAuthorized, consumeReadBytes } = {}) {
+  const context = createReadContext(rootReal, { signal, assertAuthorized, consumeReadBytes, restricted });
   const cap = Math.max(1, Math.min(SEARCH_LIMIT_CAP, Number(limit) || 0));
   const depthCap = Math.max(1, Math.min(SEARCH_MAX_DEPTH, Number(maxDepth) || 0));
   const skip = new Set(['.git', 'node_modules', ...(Array.isArray(skipNames) ? skipNames.map(String) : [])]);

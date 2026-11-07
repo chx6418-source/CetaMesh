@@ -8,6 +8,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
  // A trusted in-process startup guard can only restrict existing authority.
  // It is never exposed as an IPC capability or an Agent-controlled permission.
  let executionGuard=()=>{};
+ let readContextResolver=null;
  const dispatchFile=stateDir?path.join(stateDir,'capability','dispatches.json'):null;
  const dispatches=dispatchFile?readJsonFile(dispatchFile,{missing:{}}):{};
  if(!dispatches || typeof dispatches!=='object' || Array.isArray(dispatches))throw capabilityError('DISPATCH_JOURNAL_CORRUPT','Capability dispatch journal is invalid');
@@ -208,8 +209,9 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   if(await descriptor.validateChildRequest(parent,request)!==true)throw capabilityError('APPROVAL_MISMATCH','Concrete request differs from the reviewed data endpoint');
   return {descriptor,parent};
  }
- async function execute(raw,{signal}={}){
+ async function execute(raw,{signal,consumeReadBytes,acquireReadSlot}={}){
   const request=normalizeRequest(raw);
+  let releaseRead=null;
   if(request.approvalId){
    const approvedRequest=approval.get(request.approvalId).request;
    if(!approvedRequest)throw capabilityError('APPROVAL_NOT_APPROVED','A bounded grant ID cannot be used as a one-shot approval');
@@ -248,6 +250,12 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    const claim=claimed?.dispatchClaim;
    const cooperativeRead=entry.readOnly===true&&entry.parallelSafe===true&&entry.effect==='read-only'
     &&entry.provider==='workspace'&&['filesystem.read','filesystem.search'].includes(entry.id);
+   // Approved coordinator reads join the same process-local admission gate.
+   // No slot is held while the request is merely waiting for Owner approval.
+   if(cooperativeRead&&typeof acquireReadSlot==='function'){
+    releaseRead=await acquireReadSlot(signal);
+    if(typeof releaseRead!=='function')throw capabilityError('READ_ADMISSION_INVALID','Core read admission must supply its settlement release');
+   }
    // This closure is in-process execution context, absent from durable requests,
    // transport schemas and plugin metadata. It can restrict but never grant.
    const assertAuthorized=async()=>{
@@ -260,7 +268,8 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
     if(registry.require(request.capability)!==entry)throw capabilityError('APPROVAL_EXPIRED','Capability changed during Workspace read');
     if(signal?.aborted)throw abortError(signal);
    };
-   const providerRequest=cooperativeRead?{...request,...(signal?{signal}:{}),assertAuthorized}:signal?{...request,signal}:request;
+   const providerRequest=cooperativeRead?{...request,...(signal?{signal}:{}),assertAuthorized,
+    consumeReadBytes:typeof consumeReadBytes==='function'?consumeReadBytes:undefined}:signal?{...request,signal}:request;
    let executorEntered=false;
    const providerPromise=Promise.resolve().then(async()=>{
     if(signal?.aborted)throw abortError(signal);
@@ -293,11 +302,15 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    if(blocker&&registry.has(request.capability))markOperationBlocker(request,registry.require(request.capability),blocker);
    audit({requestId:request.requestId,capability:request.capability,
    status:error.code==='INVOKE_CANCEL_UNCONFIRMED'?'cancel-requested':error.effectStatus==='unknown'?'outcome-unknown':'denied',code:error.code??'PROVIDER_ERROR'});throw error;}
+  finally{if(typeof releaseRead==='function')releaseRead();}
  }
  return {execute,register:registry.register,list:registry.list,registry,approvals:approval,
   // Trusted adapter receipts use the existing effect journal; neither method is an IPC capability.
   assertAgentNativeEffectAvailable,beginAgentNativeEffect,settleAgentNativeEffect,
   setExecutionGuard(guard){if(typeof guard!=='function')throw TypeError('Execution guard required');executionGuard=guard;},
+  // Restricts approved Core reads using existing coordinator admission/checkpoint;
+  // no callback, slot or quota is accepted from model inputs or durable grants.
+  setReadContextResolver(resolve){if(typeof resolve!=='function')throw TypeError('Trusted read context resolver required');readContextResolver=resolve;},
   async prepareOperation(raw){
    const request=normalizeRequest(raw);
    if(request.actor.kind!=='owner')throw capabilityError('PERMISSION_DENIED','Only Owner can establish an independent operation intent');
@@ -389,14 +402,19 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   },
   async decide({id,approve,actor},{signal}={}){
   if(actor?.kind!=='owner')throw capabilityError('PERMISSION_DENIED','Owner approval required');
+  let readContext=null;
   if(approve){
    const pending=approval.get(id);
    try{await policy.authorize(pending.request,registry.require(pending.request.capability));}
    catch(error){approval.revoke(id,error.code??'authorization-changed');throw error;}
+   if(['filesystem.read','filesystem.search'].includes(pending.request.capability)){
+    readContext=await readContextResolver?.({approvalId:id,request:pending.request});
+    if(pending.request.origin?.readBatch&&typeof readContext?.consumeReadBytes!=='function')throw capabilityError('BATCH_CONTEXT_UNAVAILABLE','Restore the bound batch checkpoint before approving this source read');
+   }
   }
   const row=approval.decide(id,approve,actor);
   if(!approve){if(registry.has(row.request.capability))markOperationBlocker(row.request,registry.require(row.request.capability),'permission',true);return {status:'rejected',approvalId:id};}
-  try{return await execute({...row.request,approvalId:id},{signal});}
+  try{return await execute({...row.request,approvalId:id},{signal,...(readContext??{})});}
   catch(error){approval.revoke(id,error.code??'execution-failed');throw error;}
  }};
 }

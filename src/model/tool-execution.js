@@ -9,6 +9,7 @@ import { redactText, isSensitiveKey } from '../logging/redact.js';
 import { capabilityError } from '../capability/types.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { mayRetrySafeTool, runBoundedRetryAttempt, SAFE_TOOL_RETRY } from './safe-tool-retry.js';
+import { validateReadBatchPlan, applyBatchTransform, selectBatchFields, batchField, batchGlobMatches, READ_BATCH_LIMITS } from './read-batch-program.js';
 
 const MAX_BATCH_CALLS = 8;
 const MAX_TOOL_CYCLES = 6;
@@ -164,6 +165,29 @@ function terminalActivity(result, { id, capability, startedAt } = {}) {
     durationMs: Number.isFinite(startedAt) ? Math.max(0, Date.now() - startedAt) : null };
 }
 
+/** Only the live, audited Core descriptor may opt into read concurrency. */
+export function isTrustedParallelRead(entry) {
+  return Boolean(entry && ['filesystem.read', 'filesystem.search'].includes(entry.id)
+    && entry.provider === 'workspace' && (entry.source === undefined || entry.source === 'workspace')
+    && entry.readOnly === true && entry.parallelSafe === true && entry.effect === 'read-only'
+    && entry.cancellationAware === true && entry.cancellationMode === 'cooperative' && entry.timeoutMode === 'await-settlement'
+    && entry.risk === 'low' && entry.requiresApproval !== true && !entry.catalogOwner && !entry.delegatesOperation);
+}
+
+function configurationObservation(value) {
+  const text = (item, maximum = 240) => typeof item === 'string' && item.length > 0 && item.length <= maximum
+    && stripLocalPaths(item) === item ? item : null;
+  if (value?.schemaVersion !== 1 || !text(value.requestId) || !text(value.providerId, 80)
+    || value.application !== 'current-request' || !['serialized', 'response', 'aborted'].includes(value.stage)) return null;
+  const selection = item => ({ model: text(item?.model), reasoning: ['off', 'low', 'high', 'max'].includes(item?.reasoning) ? item.reasoning : null });
+  return { schemaVersion: 1, requestId: text(value.requestId), providerId: text(value.providerId, 80),
+    connectionRevision: Number.isSafeInteger(value.connectionRevision) ? value.connectionRevision : null,
+    requested: selection(value.requested), effective: selection(value.effective), response: { model: text(value.response?.model) },
+    source: { model: text(value.source?.model, 60), reasoning: text(value.source?.reasoning, 60), effective: text(value.source?.effective, 60) },
+    application: 'current-request', stage: value.stage, overrideReason: text(value.overrideReason, 100),
+    at: Number.isFinite(value.at) ? value.at : null };
+}
+
 /** Runs a bounded Model ↔ Capability Broker loop for one logical turn. */
 export function createToolExecutionCoordinator({
   modelRuntime,
@@ -208,6 +232,30 @@ export function createToolExecutionCoordinator({
     fail('TOOL_CONTINUATION_STORE_CORRUPT', 'Tool continuation store is invalid');
   }
   const activeTurns = new Set();
+  // Trusted delegates can access only their currently accepted coordinator call.
+  // This is process-local context, never authority supplied by a tool argument.
+  const batchFrames = new Map();
+  let activeReads = 0;
+  const waitingReads = [];
+  const activeResumes = new Set();
+  function readSlot(signal) {
+    if (signal?.aborted) return Promise.reject(capabilityError('INVOKE_CANCELLED', 'Read admission was cancelled'));
+    function release() {
+      if (release.used) return;
+      release.used = true;
+      activeReads--;
+      const next = waitingReads.shift();
+      if (next) { activeReads++; next.signal?.removeEventListener('abort', next.abort); next.resolve(next.release); }
+    }
+    if (activeReads < 2) { activeReads++; return Promise.resolve(release); }
+    return new Promise((resolve, reject) => {
+      const entry = { resolve, reject, signal, release, abort: null };
+      entry.abort = () => { const index = waitingReads.indexOf(entry); if (index >= 0) waitingReads.splice(index, 1);
+        reject(capabilityError('INVOKE_CANCELLED', 'Read admission was cancelled')); };
+      waitingReads.push(entry);
+      signal?.addEventListener('abort', entry.abort, { once: true });
+    });
+  }
 
   function save() {
     if (!continuationFile) return;
@@ -229,10 +277,11 @@ export function createToolExecutionCoordinator({
     }
     // Agent turns are process-local. Chat continuations remain resumable only
     // while their original approval is still pending and unexpired.
-    if (continuation?.targetKind !== 'agent' && approval?.status === 'pending'
+    if (continuation?.targetKind !== 'agent' && !continuation?.state?.pendingBatch?.quotaInFlight && approval?.status === 'pending'
       && approval.expiresAt > Date.now()) continue;
     if (approval?.status === 'pending' || approval?.status === 'approved') {
-      capabilityBroker.approvals.revoke(approvalId, 'core-restart-orphaned-agent');
+      capabilityBroker.approvals.revoke(approvalId, continuation?.state?.pendingBatch?.quotaInFlight
+        ? 'core-restart-interrupted-batch-quota' : 'core-restart-orphaned-agent');
     }
     continuation.status = 'orphaned';
     orphanedOnRestart = true;
@@ -269,7 +318,8 @@ export function createToolExecutionCoordinator({
   function recoveryForSession(sessionId) {
     const uncertain = uncertainExecutions().find(row => row.sessionId === sessionId);
     if (uncertain) return { state: 'needs-reconciliation', capability: uncertain.capability, turnId: uncertain.turnId };
-    const orphaned = Object.values(continuations).find(row => row.status === 'orphaned' && row.target?.sessionId === sessionId);
+    const orphaned = Object.values(continuations).find(row => (row.status === 'orphaned'
+      || (row.status === 'resuming' || row.state?.pendingBatch?.quotaInFlight) && !activeResumes.has(row.approvalId)) && row.target?.sessionId === sessionId);
     if (orphaned) return { state: 'needs-reconciliation', capability: 'approval', turnId: orphaned.target.turnId };
     const pending = Object.values(continuations).find(row => row.status !== 'reconciled' && row.target?.sessionId === sessionId);
     return pending ? { state: 'approval-pending', approvalId: pending.approvalId, turnId: pending.target.turnId } : null;
@@ -278,7 +328,8 @@ export function createToolExecutionCoordinator({
   function recoveryForTask(taskId) {
     const uncertain = uncertainExecutions().find(row => row.taskId === taskId);
     if (uncertain) return { state: 'needs-reconciliation', capability: uncertain.capability, turnId: uncertain.turnId };
-    const orphaned = Object.values(continuations).find(row => row.status === 'orphaned' && row.state?.scope?.taskId === taskId);
+    const orphaned = Object.values(continuations).find(row => (row.status === 'orphaned'
+      || (row.status === 'resuming' || row.state?.pendingBatch?.quotaInFlight) && !activeResumes.has(row.approvalId)) && row.state?.scope?.taskId === taskId);
     if (orphaned) return { state: 'needs-reconciliation', capability: 'approval', turnId: orphaned.target.turnId };
     const pending = Object.values(continuations).find(row => row.status !== 'reconciled' && row.state?.scope?.taskId === taskId);
     return pending ? { state: 'approval-pending', approvalId: pending.approvalId, turnId: pending.target.turnId } : null;
@@ -287,14 +338,16 @@ export function createToolExecutionCoordinator({
   function acknowledgeTaskRecovery(taskId) {
     const rows = uncertainExecutions().filter(row => row.taskId === taskId);
     const previousStatuses = rows.map(row => row.status);
-    const orphaned = Object.values(continuations).filter(row => row.status === 'orphaned' && row.state?.scope?.taskId === taskId);
+    const orphaned = Object.values(continuations).filter(row => (row.status === 'orphaned'
+      || (row.status === 'resuming' || row.state?.pendingBatch?.quotaInFlight) && !activeResumes.has(row.approvalId)) && row.state?.scope?.taskId === taskId);
+    const previousContinuationStatuses = orphaned.map(row => row.status);
     for (const row of rows) row.status = 'reconciled';
     for (const row of orphaned) row.status = 'reconciled';
     if (rows.length && executionFile) {
       try { writeJsonAtomic(executionFile, executions); }
       catch (error) {
         rows.forEach((row, index) => { row.status = previousStatuses[index]; });
-        for (const row of orphaned) row.status = 'orphaned';
+        orphaned.forEach((row, index) => { row.status = previousContinuationStatuses[index]; });
         if (error instanceof StorageError) fail('TOOL_EXECUTION_PERSIST_FAILED', 'Unable to persist Model tool reconciliation');
         throw error;
       }
@@ -302,7 +355,7 @@ export function createToolExecutionCoordinator({
     if (orphaned.length) {
       try { save(); }
       catch (error) {
-        for (const row of orphaned) row.status = 'orphaned';
+        orphaned.forEach((row, index) => { row.status = previousContinuationStatuses[index]; });
         throw error;
       }
     }
@@ -311,6 +364,10 @@ export function createToolExecutionCoordinator({
 
   function completedResultContent(result, state, capability, input) {
     const value = { status: 'completed', result: result.result };
+    if (capability === 'context.batch') {
+      const content = sanitizeToolEvidence(value);
+      if (content.length <= MAX_RESULT_CHARS) return content;
+    }
     if (evidenceStore && EVIDENCE_SOURCE_CAPABILITIES.includes(capability) && input
       && state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false)) {
       try {
@@ -325,6 +382,528 @@ export function createToolExecutionCoordinator({
     return safeJson(value);
   }
 
+  function callFrame(state, call, cycle, index, source = null) {
+    const capability = source?.capability ?? capabilityFromCall(call, new Set(state.manifest.map(item => item.id)));
+    const callId = source ? `${source.parentCallId}/${source.batchStepId}/${source.itemIndex}`
+      : String(call?.id || `call-${cycle}-${index}`).slice(0, 200);
+    const requestId = 'model:' + crypto.createHash('sha256').update(JSON.stringify(source
+      ? [source.parentRequestId, source.batchStepId, source.itemIndex]
+      : [state.sessionId, state.turnId, cycle, index])).digest('hex');
+    return { call, callId, capability, cycle, originalIndex: index, requestId,
+      activityId: source ? `${state.turnId.slice(0, 100)}:batch:${requestId.slice(6)}`
+        : `${state.turnId}:${callId}`.slice(0, 200), startedAt: Date.now(), scope: { ...state.scope },
+      ...(source ? { input: source.input, parentRequestId: source.parentRequestId,
+        batchStepId: source.batchStepId, itemIndex: source.itemIndex, internal: true } : {}) };
+  }
+
+  function eligibleCall(state, call) {
+    try {
+      const capability = capabilityFromCall(call, new Set(state.manifest.map(item => item.id)));
+      const descriptor = state.manifest.find(item => item.id === capability);
+      if (!descriptor || !isTrustedParallelRead(capabilityBroker.registry?.require(capability))) return false;
+      validateSchema(descriptor.inputSchema, parseArguments(call?.arguments));
+      return true;
+    } catch { return false; }
+  }
+
+  function executionIdentity(state, frame) {
+    return { sessionId: state.sessionId, turnId: state.turnId, taskId: frame.scope.taskId ?? null,
+      workspaceId: frame.scope.workspaceId ?? null, runId: state.runId ?? null,
+      actorKind: state.actor.kind, actorId: state.actor.id, capability: frame.capability,
+      cycle: frame.cycle, originalIndex: frame.originalIndex, queuedAt: frame.startedAt,
+      startedAt: executions[frame.requestId]?.startedAt ?? frame.startedAt, at: frame.startedAt,
+      ...(frame.internal ? { parentRequestId: frame.parentRequestId, batchStepId: frame.batchStepId, itemIndex: frame.itemIndex } : {}) };
+  }
+
+  function persistSettlement(state, frame, result) {
+    const settledAt = Date.now();
+    let evidence = null;
+    if (frame.internal && evidenceStore) {
+      // Keep all accepted source bodies/errors in the existing evidence store,
+      // including short results that the final batch intentionally does not echo.
+      const content = sanitizeToolEvidence(result);
+      evidence = evidenceStore.put({ binding: evidenceBinding({ ...state, scope: frame.scope }), content,
+        sourceCapability: frame.capability, sourceInput: frame.input });
+    }
+    const content = result?.status === 'completed'
+      ? frame.internal ? safeJson({ status: 'completed', evidence }) : completedResultContent(result, state, frame.capability, frame.input)
+      : safeJson(result?.status === 'outcome-unknown' ? result : result?.error ?? result ?? { status: 'denied', code: 'CAPABILITY_DENIED' });
+    const status = result?.status === 'pending' ? 'approval-pending' : result?.status === 'outcome-unknown'
+      ? 'outcome-unknown' : result?.status === 'completed' ? 'completed' : 'failed';
+    recordExecution(frame.requestId, { ...executionIdentity(state, frame), status, settledAt, content,
+      resultSha256: evidence?.sha256 ?? crypto.createHash('sha256').update(content).digest('hex'),
+      resultRepresentation: evidence ? 'stored-sanitized-evidence' : 'bounded-sanitized-content',
+      ...(evidence ? { evidence } : {}), ...(result?.status === 'pending' ? { approvalId: result.approvalId } : {}),
+      ...(result?.error?.code ? { code: result.error.code } : {}) });
+    return { ...frame, result, content, settledAt, ...(evidence ? { evidence } : {}) };
+  }
+
+  function retainedSettlement(row) {
+    // A durable continuation contains only sanitized source results. Full short
+    // model messages and evidence refs remain attributable to the original call.
+    const { call, consumeReadBytes, ...copy } = row;
+    return { ...copy, result: JSON.parse(sanitizeToolEvidence(row.result)), input: row.input ? structuredClone(row.input) : null };
+  }
+
+  function retainedBatchCheckpoint(batch) {
+    return { ...batch, plan: structuredClone(batch.plan),
+      values: JSON.parse(sanitizeToolEvidence(batch.values)),
+      current: batch.current ? { ...batch.current, inputs: structuredClone(batch.current.inputs),
+        rows: JSON.parse(sanitizeToolEvidence(batch.current.rows)),
+        pending: batch.current.pending ? retainedSettlement(batch.current.pending) : null,
+        held: batch.current.held.map(retainedSettlement) } : null };
+  }
+
+  async function notifyActivity(state, activity) {
+    if (typeof state.onActivity !== 'function') return;
+    try { await state.onActivity(activity); }
+    catch (error) {
+      const failure = error && typeof error === 'object' ? error
+        : capabilityError('TOOL_OBSERVER_FAILED', 'Tool activity observer interrupted the turn');
+      failure.coordinatorObserverFailure = true;
+      throw failure;
+    }
+  }
+
+  async function dispatchPreparedCall(state, frame, signal) {
+    const { capability, activityId, startedAt, scope } = frame;
+    await notifyActivity(state, { id: activityId, capability, status: 'running', durationMs: null });
+    let result, registered;
+    let toolRequestId = frame.requestId;
+    let retryCount = 0;
+    const accepted = [];
+    const actualOutcomes = new Map();
+    let releaseRead = null;
+    try {
+      frame.input ??= parseArguments(frame.call?.arguments);
+      const descriptor = state.manifest.find(item => item.id === capability);
+      if (!descriptor) fail('UNKNOWN_TOOL_IN_TURN', 'Tool was not authorized in this turn');
+      registered = capabilityBroker.registry?.require(capability) ?? descriptor;
+      validateSchema(descriptor.inputSchema, frame.input);
+      if (isTrustedParallelRead(registered)) releaseRead = await readSlot(signal);
+      const hasEffect = (registered.effect && registered.effect !== 'read-only')
+        || ['message.send', 'filesystem.write', 'git.commit', 'test.run', 'publish', 'network'].includes(registered.permission ?? capability);
+      const retryStartedAt = Date.now();
+      let retryError = null;
+      for (let attempt = 0; attempt < SAFE_TOOL_RETRY.maxAttempts; attempt++) {
+        if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
+        if (attempt && Date.now() - retryStartedAt >= SAFE_TOOL_RETRY.deadlineMs) throw retryError;
+        toolRequestId = attempt ? `${frame.requestId}:r${attempt}` : frame.requestId;
+        const liveActor = typeof actorResolver === 'function'
+          ? await actorResolver({ actorKind: state.actor.kind, actorId: state.actor.id,
+            sessionId: state.sessionId, turnId: state.turnId, scope }) : state.actor;
+        if (!liveActor || liveActor.kind !== state.actor.kind || liveActor.id !== state.actor.id) fail('TOOL_ACTOR_UNAVAILABLE', 'The trusted CetaMesh actor is no longer available');
+        if (attempt && Date.now() - retryStartedAt >= SAFE_TOOL_RETRY.deadlineMs) throw retryError;
+        recordExecution(toolRequestId, { ...executionIdentity(state, frame), startedAt: Date.now(), status: 'started' });
+        try {
+          const executeBroker = attemptSignal => {
+            if (capability === 'context.batch') batchFrames.set(toolRequestId, { state, frame, signal: attemptSignal, actor: liveActor });
+            const promise = Promise.resolve().then(() => capabilityBroker.execute({ requestId: toolRequestId, actor: liveActor,
+              ...(hasEffect && !registered.delegatesOperation && scope.taskId && scope.workspaceId
+                ? { operationId: 'tool:' + crypto.createHash('sha256').update(frame.requestId).digest('hex') } : {}),
+              taskId: scope.taskId ?? null, workspaceId: scope.workspaceId ?? null,
+              capability, input: frame.input, reason: 'Model structured tool call',
+              origin: { sessionId: state.sessionId, turnId: state.turnId, runId: state.runId, phase: state.phase, targetKind: state.targetKind,
+                ...(frame.internal ? { readBatch: { parentRequestId: frame.parentRequestId, stepId: frame.batchStepId, itemIndex: frame.itemIndex } } : {}) },
+              ...(attemptSignal ? { signal: attemptSignal } : {}) }, { signal: attemptSignal,
+                ...(typeof frame.consumeReadBytes === 'function' ? { consumeReadBytes: frame.consumeReadBytes } : {}) }));
+            accepted.push(promise);
+            // Late completion is an observation, never permission to erase an
+            // unknown receipt or retry an accepted operation.
+            const acceptedId = toolRequestId;
+            promise.then(value => {
+              actualOutcomes.set(acceptedId, { status: value?.status ?? 'completed', at: Date.now(),
+                sha256OfSanitizedRepresentation: crypto.createHash('sha256').update(safeJson(value)).digest('hex') });
+              if (executions[acceptedId]?.status === 'outcome-unknown') {
+                try { recordExecution(acceptedId, { lateSettlement: { status: value?.status ?? 'completed', at: Date.now(),
+                  sha256: crypto.createHash('sha256').update(sanitizeToolEvidence(value)).digest('hex') } }); } catch { /* Original uncertainty remains fenced. */ }
+              }
+            }, error => {
+              actualOutcomes.set(acceptedId, { status: 'failed', code: error?.code ?? 'PROVIDER_ERROR', at: Date.now() });
+              if (executions[acceptedId]?.status === 'outcome-unknown') {
+                try { recordExecution(acceptedId, { lateSettlement: { status: 'failed', code: error?.code ?? 'PROVIDER_ERROR', at: Date.now() } }); } catch { /* Keep the original fence. */ }
+              }
+            }).finally(() => { if (capability === 'context.batch') batchFrames.delete(acceptedId); });
+            return promise;
+          };
+          result = attempt ? await runBoundedRetryAttempt(executeBroker, { signal,
+            remainingMs: SAFE_TOOL_RETRY.deadlineMs - (Date.now() - retryStartedAt) }) : await executeBroker(signal);
+          break;
+        } catch (error) {
+          if (!mayRetrySafeTool({ capability, error, attempt, startedAt: retryStartedAt, signal,
+            dispatchStatus: capabilityBroker.dispatchStatus?.(toolRequestId) })) throw error;
+          retryError = error;
+          recordExecution(toolRequestId, { status: 'failed', code: String(error.code).slice(0, 100), settledAt: Date.now() });
+          retryCount = attempt + 1;
+          await notifyActivity(state, { id: activityId, capability, status: 'retrying', retryCount, durationMs: Date.now() - startedAt });
+          await delay(SAFE_TOOL_RETRY.delayMs, undefined, { signal });
+        }
+      }
+    } catch (error) {
+      if (error?.coordinatorObserverFailure || ['TOOL_EXECUTION_PERSIST_FAILED', 'TOOL_EVIDENCE_PERSIST_FAILED',
+        'TOOL_CONTINUATION_PERSIST_FAILED'].includes(error?.code)) throw error;
+      result = { status: error?.effectStatus === 'unknown' || error?.code === 'INVOKE_CANCEL_UNCONFIRMED' ? 'outcome-unknown' : 'denied', ...errorResult(error) };
+    } finally {
+      // The retry wrapper can time out before its accepted Broker promise. Core
+      // cooperative IO must actually close its handle before this group ends.
+      if (isTrustedParallelRead(registered)) await Promise.allSettled(accepted);
+      releaseRead?.();
+    }
+    if (result && typeof result === 'object') result = { ...result, retryCount };
+    const settled = persistSettlement(state, { ...frame, requestId: toolRequestId }, result);
+    if (result?.status === 'outcome-unknown' && isTrustedParallelRead(registered) && actualOutcomes.has(toolRequestId)) {
+      recordExecution(toolRequestId, { drainedSettlement: actualOutcomes.get(toolRequestId) });
+    }
+    if (toolRequestId !== frame.requestId && executions[frame.requestId]?.status === 'failed') {
+      recordExecution(frame.requestId, { finalRequestId: toolRequestId });
+    }
+    return settled;
+  }
+
+  async function dispatchGroup(state, frames, signal) {
+    const receipts = await Promise.allSettled(frames.map(frame => dispatchPreparedCall(state, frame, signal)));
+    const rejected = receipts.find(row => row.status === 'rejected');
+    if (rejected) {
+      cancelPendingRows(state, receipts.filter(row => row.status === 'fulfilled').map(row => row.value),
+        'group-dispatch-failed', { code: 'TOOL_GROUP_INTERRUPTED' });
+      throw rejected.reason;
+    }
+    return receipts.map(row => row.value);
+  }
+
+  async function finalizeSettledCall(state, row, { appendMessage = true } = {}) {
+    if (appendMessage) state.messages.push({ role: 'tool', tool_call_id: row.callId, content: row.content });
+    try {
+      if (typeof state.onActivity === 'function') await state.onActivity(terminalActivity(row.result,
+        { id: row.activityId, capability: row.capability, startedAt: row.startedAt }));
+      if (typeof state.onCapabilityResult === 'function') await state.onCapabilityResult({ capability: row.capability,
+        result: row.result, input: row.input, eventId: row.activityId, sessionId: state.sessionId, turnId: state.turnId, scope: row.scope });
+      if (typeof state.refreshContext === 'function') {
+        const refreshed = await state.refreshContext({ capability: row.capability, result: row.result,
+          sessionId: state.sessionId, turnId: state.turnId, scope: row.scope });
+        if (refreshed && typeof refreshed === 'object') {
+          if (Array.isArray(refreshed.manifest)) state.manifest = refreshed.manifest;
+          if (refreshed.scope && typeof refreshed.scope === 'object') state.scope = {
+            taskId: refreshed.scope.taskId ?? null, workspaceId: refreshed.scope.workspaceId ?? null };
+          if (typeof refreshed.context === 'string' && refreshed.context.trim()) {
+            const marker = 'CetaMesh dynamic context (JSON reference data):\n';
+            const existing = state.messages.findIndex(message => message.role === 'system' && String(message.content ?? '').startsWith(marker));
+            const message = { role: 'system', content: marker + refreshed.context };
+            if (existing >= 0) state.messages[existing] = message;
+            else state.messages.splice(Math.min(2, state.messages.length), 0, message);
+          }
+        }
+      }
+    } catch (error) { if (error && typeof error === 'object') error.coordinatorObserverFailure = true; throw error; }
+  }
+
+  function reserveSourceCalls(state, count) {
+    if (!state.callBudget || state.callBudget.used + count > maxCalls) fail('TOOL_CALL_LIMIT', 'Read batch shares the remaining turn call budget');
+    state.callBudget.used += count;
+  }
+
+  function cancelPendingRows(state, rows, reason, { start = 0, code = 'INVOKE_CANCELLED' } = {}) {
+    for (let index = start; index < rows.length; index++) {
+      const row = rows[index];
+      if (row.result?.status !== 'pending') continue;
+      const approvalId = row.result.approvalId;
+      let cancelled = false;
+      try {
+        const approval = capabilityBroker.approvals?.get(approvalId);
+        if (approval?.status === 'pending') capabilityBroker.approvals.cancel(approvalId, reason);
+        cancelled = capabilityBroker.approvals?.get(approvalId)?.status === 'cancelled';
+      } catch { /* Unknown approval persistence/status must retain its fence. */ }
+      const result = cancelled ? { status: 'cancelled', error: { code } }
+        : { status: 'outcome-unknown', error: { code: 'PARALLEL_APPROVAL_CHANGED' } };
+      const inner = row.result.batchContinuation?.current?.pending;
+      if (inner?.result?.approvalId === approvalId) persistSettlement(state, inner, result);
+      rows[index] = persistSettlement(state, row, result);
+      for (const [id, execution] of Object.entries(executions)) {
+        if (execution.approvalId === approvalId && execution.status === 'approval-pending') {
+          recordExecution(id, { status: cancelled ? 'failed' : 'outcome-unknown', settledAt: Date.now(),
+            content: safeJson(result), code: result.error.code });
+        }
+      }
+    }
+  }
+
+  async function retainPendingSiblings(state, rows) {
+    const first = rows.findIndex(row => row.result?.status === 'pending');
+    cancelPendingRows(state, rows, 'parallel-sibling-approval', { start: first + 1, code: 'PARALLEL_APPROVAL_CANCELLED' });
+    return first;
+  }
+
+  function consumeBatchBytes(frame, batch, bytes) {
+    if (!Number.isSafeInteger(batch.readBytes) || batch.readBytes < 0 || batch.readBytes > READ_BATCH_LIMITS.totalReadBytes) {
+      fail('BATCH_QUOTA_UNAVAILABLE', 'Restore a verified source-byte checkpoint before continuing this batch');
+    }
+    if (!Number.isSafeInteger(bytes) || bytes < 0 || batch.readBytes + bytes > READ_BATCH_LIMITS.totalReadBytes) {
+      recordExecution(frame.requestId, { batchReadBytes: batch.readBytes, batchQuotaExceeded: true });
+      fail('BATCH_BYTE_LIMIT', 'Source IO budget exhausted; use a smaller subtree or targeted file page');
+    }
+    batch.readBytes += bytes;
+  }
+
+  function resolvePendingReadContext({ approvalId, request }) {
+    const row = executions[request.requestId], source = request.origin?.readBatch;
+    const continuation = continuations[String(approvalId)];
+    if (!source) {
+      // Owner reads outside a model continuation keep their existing path.
+      // A known coordinator read must rejoin its original admission gate.
+      if (!row) return null;
+      const pending = continuation?.state?.pendingFrame;
+      if (!continuation || ['orphaned', 'reconciled', 'resuming'].includes(continuation.status)
+        || row.approvalId !== approvalId || pending?.requestId !== request.requestId
+        || continuation.requestFingerprint !== capabilityBroker.approvals?.get(approvalId)?.fingerprint
+        || request.actor.kind !== continuation.state.actor.kind || request.actor.id !== continuation.state.actor.id
+        || request.taskId !== (continuation.state.scope.taskId ?? null) || request.workspaceId !== (continuation.state.scope.workspaceId ?? null)
+        || request.origin?.sessionId !== continuation.target.sessionId || request.origin?.turnId !== continuation.target.turnId
+        || (request.origin?.runId ?? null) !== (continuation.state.runId ?? null)
+        || JSON.stringify(request.input) !== JSON.stringify(pending.input)
+        || !isTrustedParallelRead(capabilityBroker.registry?.require(request.capability))) {
+        fail('APPROVAL_CONTINUATION_INVALID', 'This approved read needs its exact retained coordinator context');
+      }
+      return { acquireReadSlot: readSlot };
+    }
+    const batch = continuation?.state?.pendingBatch;
+    const pending = batch?.current?.pending;
+    if (!source || !row?.parentRequestId || !continuation || ['orphaned', 'reconciled', 'resuming'].includes(continuation.status)
+      || continuation.requestFingerprint !== capabilityBroker.approvals?.get(approvalId)?.fingerprint
+      || pending?.requestId !== request.requestId || row.parentRequestId !== source.parentRequestId
+      || row.batchStepId !== source.stepId || row.itemIndex !== source.itemIndex
+      || request.actor.kind !== continuation.state.actor.kind || request.actor.id !== continuation.state.actor.id
+      || request.taskId !== (continuation.state.scope.taskId ?? null) || request.workspaceId !== (continuation.state.scope.workspaceId ?? null)
+      || request.origin.sessionId !== continuation.target.sessionId || request.origin.turnId !== continuation.target.turnId
+      || (request.origin.runId ?? null) !== (continuation.state.runId ?? null)
+      || JSON.stringify(request.input) !== JSON.stringify(pending.input)
+      || !isTrustedParallelRead(capabilityBroker.registry?.require(request.capability))
+      || batch.quotaInFlight || !Number.isSafeInteger(batch.readBytes) || batch.readBytes < 0 || batch.readBytes > READ_BATCH_LIMITS.totalReadBytes) {
+      fail('BATCH_CONTEXT_UNAVAILABLE', 'This approved source needs its exact retained batch checkpoint; review interrupted IO before retrying');
+    }
+    // This marker is in the existing continuation, not the permission grant.
+    // A crash after admission cannot reset a partially consumed search quota.
+    batch.quotaInFlight = { requestId: request.requestId, at: Date.now() };
+    save();
+    return { acquireReadSlot: readSlot, consumeReadBytes: bytes => consumeBatchBytes(continuation.state.pendingFrame, batch, bytes) };
+  }
+
+  async function runReadBatch(frameContext, checkpoint = null, decisionResult = null) {
+    const { state, frame, signal } = frameContext;
+    const batch = checkpoint ?? { plan: validateReadBatchPlan(frame.input), stepIndex: 0, values: {}, sources: [],
+      transforms: [], observations: {}, readBytes: 0, current: null };
+    if (!Number.isSafeInteger(batch.readBytes) || batch.readBytes < 0 || batch.readBytes > READ_BATCH_LIMITS.totalReadBytes) {
+      fail('BATCH_QUOTA_UNAVAILABLE', 'The retained batch does not contain a valid source-byte counter');
+    }
+    const sourceIds = new Set(batch.plan.steps.flatMap(step => step.op === 'search' ? ['filesystem.search']
+      : ['read', 'readEach'].includes(step.op) ? ['filesystem.read'] : []));
+    for (const id of sourceIds) {
+      if (!state.manifest.some(item => item.id === id) || !isTrustedParallelRead(capabilityBroker.registry?.require(id))
+        || frameContext.actor.kind !== 'owner' && !frameContext.actor.grants?.capabilities?.includes(id)) {
+        fail('BATCH_SOURCE_NOT_GRANTED', 'Grant each requested Core source capability on the current Task before using context.batch');
+      }
+    }
+    if (!evidenceStore) fail('BATCH_EVIDENCE_UNAVAILABLE', 'Read batch requires the existing Tool Evidence store');
+    for (; batch.stepIndex < batch.plan.steps.length; batch.stepIndex++) {
+      if (signal?.aborted) fail('INVOKE_CANCELLED', 'Read batch was cancelled');
+      const step = batch.plan.steps[batch.stepIndex];
+      if (['read', 'search', 'readEach'].includes(step.op)) {
+        if (!batch.current) {
+          let inputs;
+          if (step.op === 'search') {
+            const literal = step.input.glob?.split(/[*?/]+/).filter(Boolean).sort((a, b) => b.length - a.length)[0];
+            if (!step.input.query && !literal) fail('READ_BATCH_INVALID', 'A glob search needs a bounded literal candidate query');
+            inputs = [{ query: step.input.query ?? literal, path: step.input.path ?? '.', maxResults: 100 }];
+          } else if (step.op === 'read') inputs = [{ path: step.input.path ?? batchField(batch.values[step.input.pathRef.from]?.[step.input.pathRef.index ?? 0], step.input.pathRef.field),
+            maxBytes: step.input.maxBytes ?? READ_BATCH_LIMITS.readBytes, offset: step.input.offset ?? 0 }];
+          else {
+            const rows = batch.values[step.from] ?? [];
+            const cap = step.maxItems ?? READ_BATCH_LIMITS.items;
+            if (rows.length > cap) { batch.observations.truncated = true; batch.observations.omittedItems = (batch.observations.omittedItems ?? 0) + rows.length - cap; }
+            inputs = rows.slice(0, cap).map(row => ({ path: batchField(row, step.pathField), maxBytes: step.maxBytes ?? READ_BATCH_LIMITS.readBytes }));
+          }
+          batch.current = { inputs, cursor: 0, rows: [], pending: null, held: [] };
+        }
+        const current = batch.current;
+        const accept = async receipt => {
+          batch.sources.push({ capability: receipt.capability, step: receipt.batchStepId, itemIndex: receipt.itemIndex,
+            status: receipt.result?.status, evidence: receipt.evidence ?? null });
+          await finalizeSettledCall(state, receipt, { appendMessage: false });
+          if (receipt.result?.status !== 'completed') return false;
+          const value = JSON.parse(sanitizeToolEvidence(receipt.result.result));
+          if (value?.truncated) batch.observations.truncated = true;
+          if (step.op === 'search') {
+            const rows = (value?.results ?? []).filter(row => !step.input.glob || batchGlobMatches(step.input.glob,
+              row.path.startsWith((step.input.path ?? '.') + '/') ? row.path.slice(step.input.path.length + 1) : row.path));
+            const cap = step.input.limit ?? READ_BATCH_LIMITS.items;
+            if (rows.length > cap) { batch.observations.truncated = true; batch.observations.omittedItems = (batch.observations.omittedItems ?? 0) + rows.length - cap; }
+            current.rows.push(...rows.slice(0, cap).map(row => ({ ...row, sourceRef: receipt.evidence })));
+          } else current.rows.push({ ...value, sourceRef: receipt.evidence });
+          return true;
+        };
+        if (current.pending) {
+          const pending = current.pending;
+          current.pending = null;
+          batch.quotaInFlight = null;
+          const receipt = persistSettlement(state, pending, decisionResult?.status === 'completed' ? { status: 'completed', result: decisionResult.result }
+            : decisionResult?.status === 'outcome-unknown' ? decisionResult : { status: 'denied', error: { code: decisionResult?.status === 'rejected' ? 'APPROVAL_REJECTED' : decisionResult?.error?.code ?? 'CAPABILITY_DENIED' } });
+          const retained = [receipt, ...current.held]; current.held = [];
+          let failed = null;
+          for (const row of retained) if (!await accept(row)) failed ??= row;
+          if (failed) {
+            const uncertain = retained.find(row => row.result?.status === 'outcome-unknown');
+            return { ...(uncertain ?? failed).result, batchSources: batch.sources };
+          }
+          decisionResult = null;
+        }
+        while (current.cursor < current.inputs.length) {
+          if (signal?.aborted) fail('INVOKE_CANCELLED', 'Read batch was cancelled');
+          const group = current.inputs.slice(current.cursor, current.cursor + 2).map((input, offset) => {
+            const itemIndex = current.cursor + offset;
+            const sourceFrame = callFrame({ ...state, scope: frame.scope }, null, frame.cycle, frame.originalIndex,
+              { capability: step.op === 'search' ? 'filesystem.search' : 'filesystem.read', input,
+                parentRequestId: frame.requestId, parentCallId: frame.callId, batchStepId: step.id, itemIndex });
+            sourceFrame.consumeReadBytes = bytes => consumeBatchBytes(frame, batch, bytes);
+            return sourceFrame;
+          });
+          reserveSourceCalls(state, group.length);
+          const rows = await dispatchGroup(state, group, signal);
+          try {
+            recordExecution(frame.requestId, { batchReadBytes: batch.readBytes });
+            current.cursor += group.length;
+            if (signal?.aborted) {
+              cancelPendingRows(state, rows, 'turn-cancelled');
+              for (const row of rows) await accept(row);
+              fail('INVOKE_CANCELLED', 'Read batch was cancelled');
+            }
+            const pendingIndex = rows.findIndex(row => row.result?.status === 'pending');
+            if (pendingIndex >= 0) {
+              await retainPendingSiblings(state, rows);
+              if (rows.some(row => row.result?.status === 'outcome-unknown')) {
+                cancelPendingRows(state, rows, 'unknown-parallel-sibling');
+                for (const row of rows) await accept(row);
+                return { status: 'outcome-unknown', error: { code: 'PARALLEL_APPROVAL_CHANGED' }, batchSources: batch.sources };
+              }
+              let failed = null;
+              for (const row of rows.slice(0, pendingIndex)) if (!await accept(row)) failed ??= row;
+              if (failed) {
+                cancelPendingRows(state, rows, 'failed-batch-sibling', { code: 'BATCH_SIBLING_FAILED' });
+                for (const row of rows.slice(pendingIndex)) await accept(row);
+                const uncertain = rows.find(row => row.result?.status === 'outcome-unknown');
+                return { ...(uncertain ?? failed).result, batchSources: batch.sources };
+              }
+              current.pending = retainedSettlement(rows[pendingIndex]);
+              current.held = rows.slice(pendingIndex + 1).map(retainedSettlement);
+              return { ...rows[pendingIndex].result, batchContinuation: batch };
+            }
+            let failed = null;
+            for (const row of rows) if (!await accept(row)) failed ??= row;
+            if (failed) {
+              const uncertain = rows.find(row => row.result?.status === 'outcome-unknown');
+              return { ...(uncertain ?? failed).result, batchSources: batch.sources };
+            }
+            if (signal?.aborted) fail('INVOKE_CANCELLED', 'Read batch was cancelled');
+          } catch (error) {
+            cancelPendingRows(state, rows, 'batch-finalization-failed', { code: 'TOOL_GROUP_INTERRUPTED' });
+            throw error;
+          }
+        }
+        batch.values[step.id] = current.rows;
+        batch.current = null;
+      } else {
+        const input = batch.values[step.from];
+        const output = applyBatchTransform(step, input, batch.observations);
+        const receipt = { step: step.id, op: step.op, inputRows: input.length, outputRows: output.length,
+          inputSha256: crypto.createHash('sha256').update(sanitizeToolEvidence(input)).digest('hex'),
+          outputSha256: crypto.createHash('sha256').update(sanitizeToolEvidence(output)).digest('hex') };
+        batch.transforms.push(receipt);
+        // Derived transforms are metadata under the existing parent receipt,
+        // never synthetic Broker effects or independently verified file facts.
+        recordExecution(frame.requestId, { batchTransforms: batch.transforms });
+        batch.values[step.id] = output;
+      }
+    }
+    let output = batch.values[batch.plan.output.from];
+    if (batch.plan.output.fields) output = selectBatchFields(output, batch.plan.output.fields);
+    const envelope = () => ({ status: 'completed', capability: 'context.batch', result: { output, sources: batch.sources,
+      complete: !batch.observations.truncated && !batch.observations.invalidJsonl && !batch.observations.nonTextSources
+        && !batch.observations.nonScalarGroups, observations: { ...batch.observations, readBytes: batch.readBytes }, transforms: batch.transforms } });
+    if (sanitizeToolEvidence({ status: 'completed', result: envelope().result }).length > READ_BATCH_LIMITS.outputChars) {
+      const original = output, previousOmitted = batch.observations.omittedOutputRows ?? 0;
+      let minimum = 0, maximum = original.length;
+      batch.observations.truncated = true;
+      while (minimum < maximum) {
+        const length = Math.ceil((minimum + maximum) / 2);
+        output = original.slice(0, length);
+        batch.observations.omittedOutputRows = previousOmitted + original.length - length;
+        if (sanitizeToolEvidence({ status: 'completed', result: envelope().result }).length <= READ_BATCH_LIMITS.outputChars) minimum = length;
+        else maximum = length - 1;
+      }
+      output = original.slice(0, minimum);
+      batch.observations.omittedOutputRows = previousOmitted + original.length - minimum;
+    }
+    recordExecution(frame.requestId, { batchReadBytes: batch.readBytes });
+    return envelope();
+  }
+
+  async function executeReadBatch(request) {
+    const context = batchFrames.get(request?.requestId);
+    if (!context || context.entered || context.frame.capability !== 'context.batch' || context.frame.input !== request.input
+      && JSON.stringify(context.frame.input) !== JSON.stringify(request.input)
+      || context && (request.actor?.kind !== context.actor.kind || request.actor.id !== context.actor.id
+        || request.taskId !== (context.frame.scope.taskId ?? null) || request.workspaceId !== (context.frame.scope.workspaceId ?? null)
+        || request.origin?.sessionId !== context.state.sessionId || request.origin?.turnId !== context.state.turnId
+        || (request.origin?.runId ?? null) !== (context.state.runId ?? null)
+        || (request.origin?.phase ?? null) !== (context.state.phase ?? null) || request.origin?.targetKind !== context.state.targetKind)) {
+      fail('BATCH_CONTEXT_UNAVAILABLE', 'Read batch requires its currently accepted Core tool turn');
+    }
+    context.entered = true;
+    return runReadBatch(context);
+  }
+
+  async function suspendGroup(state, calls, cycle, rows, pendingIndex, nextIndex, { usage, resolvedModel, limitReached }) {
+    const pending = rows[pendingIndex], result = pending.result;
+    await notifyActivity(state, { id: pending.activityId, capability: pending.capability,
+      status: 'waiting-approval', durationMs: Date.now() - pending.startedAt });
+    const approvalId = String(result.approvalId ?? '');
+    let fingerprint = '';
+    try { fingerprint = capabilityBroker.approvals?.get(approvalId)?.fingerprint ?? ''; } catch { /* Invalid reference fails closed below. */ }
+    if (!approvalId || !fingerprint) fail('APPROVAL_CONTINUATION_INVALID', 'Broker returned an invalid approval reference');
+    const id = crypto.randomUUID();
+    const continuation = { id, approvalId, requestFingerprint: fingerprint,
+      target: { sessionId: state.sessionId, turnId: state.turnId }, targetKind: state.targetKind,
+      state: { providerId: state.providerId, model: state.model ?? null, reasoning: state.reasoning ?? null,
+        manifest: structuredClone(state.manifest), actor: { kind: state.actor.kind, id: state.actor.id },
+        sessionId: state.sessionId, turnId: state.turnId, runId: state.runId ?? null, phase: state.phase ?? null,
+        accountingTaskId: state.accountingTaskId ?? null, scope: { ...pending.scope },
+        messages: safePersistedMessages(state.messages), cycle, totalCalls: state.callBudget.used,
+        usage, resolvedModel, limitReached,
+        ...(state.configurationObservation ? { configurationObservation: structuredClone(state.configurationObservation) } : {}),
+        ...(typeof state.onContext === 'function' ? { onContext: state.onContext } : {}),
+        seenCallIds: state.seenCallIds, pendingToolCallId: pending.callId,
+        pendingActivityId: pending.activityId, pendingActivityStartedAt: pending.startedAt,
+        pendingRequestId: pending.requestId, pendingCapability: pending.capability,
+        pendingInput: { path: typeof pending.input?.path === 'string' ? pending.input.path : null,
+          tool: typeof pending.input?.tool === 'string' ? pending.input.tool : null },
+        pendingEvidenceInput: (() => {
+          if (!evidenceStore || !EVIDENCE_SOURCE_CAPABILITIES.includes(pending.capability)
+            || !state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false)) return null;
+          try { return Buffer.byteLength(JSON.stringify(pending.input)) <= 65536 ? structuredClone(validateEvidenceSourceInput(pending.input)) : null; } catch { return null; }
+        })(),
+        pendingBatch: result.batchContinuation ? retainedBatchCheckpoint(result.batchContinuation) : null,
+        pendingFrame: retainedSettlement({ ...pending, result: { status: 'pending', approvalId } }),
+        settledCalls: rows.slice(pendingIndex + 1).map(retainedSettlement),
+        pendingCalls: calls, pendingCallIndex: nextIndex }, createdAt: Date.now() };
+    continuations[approvalId] = continuation;
+    try { save(); }
+    catch (error) {
+      cancelPendingRows(state, rows, 'continuation-persist-failed', { code: 'APPROVAL_CONTINUATION_PERSIST_FAILED' });
+      delete continuations[approvalId];
+      throw error;
+    }
+    return { status: 'pending', toolCalling: 'supported', approvalId, expiresAt: result.expiresAt,
+      text: '', usage, resolvedModel, continuationId: id };
+  }
+
   async function recordUsage(state, usage) {
     if (typeof onUsage !== 'function') return;
     try { await onUsage({ sessionId: state.sessionId, turnId: state.turnId,
@@ -333,9 +912,23 @@ export function createToolExecutionCoordinator({
     catch { fail('TOOL_USAGE_PERSIST_FAILED', 'Request usage could not be durably recorded'); }
   }
 
+  function observeConfiguration(state, value, notify = false) {
+    const observed = configurationObservation(value);
+    if (!observed) return;
+    state.configurationObservation = observed;
+    if (notify && typeof state.onConfiguration === 'function') {
+      try { const result = state.onConfiguration(structuredClone(observed)); result?.catch?.(() => {}); }
+      catch { /* Telemetry observers cannot undo accepted tool work. */ }
+    }
+  }
+
+  function withConfiguration(state, result) {
+    return state.configurationObservation ? { ...result, configurationObservation: structuredClone(state.configurationObservation) } : result;
+  }
+
   async function runLoop(state, signal) {
     const { providerId, model, reasoning, actor, sessionId, turnId, scope } = state;
-    let totalCalls = state.totalCalls ?? 0;
+    const budget = state.callBudget = { used: state.totalCalls ?? 0 };
     const seenCallIds = new Set(state.seenCallIds ?? []);
     let text = '';
     let usage = state.usage ?? null;
@@ -354,12 +947,13 @@ export function createToolExecutionCoordinator({
         await state.onStreamReset({ cycle });
       }
       const resumingToolBatch = Array.isArray(state.pendingCalls);
-      const toolsAllowed = cycle < maxCycles && totalCalls < maxCalls;
+      const toolsAllowed = cycle < maxCycles && budget.used < maxCalls;
       const request = {
         providerId, model, reasoning, messages: toolsAllowed || finalSynthesisAtLimit !== true ? state.messages : [...state.messages, { role: 'system', content: 'The bounded tool budget is exhausted. Do not request or simulate more tools. Summarize the verified results already available, explain any missing evidence, and answer the user now. Do not claim unperformed work is complete.' }], signal,
         tools: toolsAllowed || finalSynthesisAtLimit !== true ? state.manifest.map((item) => ({ id: item.id, description: item.description, inputSchema: item.inputSchema })) : [],
-        toolChoice: cycle < maxCycles && totalCalls < maxCalls ? 'auto' : 'none'
+        toolChoice: cycle < maxCycles && budget.used < maxCalls ? 'auto' : 'none'
       };
+      request.onConfiguration = value => observeConfiguration(state, value, true);
       if (!resumingToolBatch && !toolsAllowed && finalSynthesisAtLimit !== true) limitReached = true;
       if (!resumingToolBatch) {
         const projected = projectMessageBudget(request.messages, { evidenceStore, binding: evidenceBinding(state), canRetrieveEvidence: state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false) });
@@ -389,6 +983,7 @@ export function createToolExecutionCoordinator({
         let streamReason = null;
         let modelContinuation = null;
         for await (const event of modelRuntime.stream(request)) {
+          if (event?.data?.configurationObservation) observeConfiguration(state, event.data.configurationObservation);
           if (typeof event?.data?.providerId === 'string' && event.data.providerId.trim()) activeProviderId = event.data.providerId.trim();
           if (typeof event?.data?.resolvedModel === 'string' && event.data.resolvedModel.trim()) activeModel = event.data.resolvedModel.trim();
           if (event?.data?.requestDiagnostics) activeRequestDiagnostics = event.data.requestDiagnostics;
@@ -442,6 +1037,7 @@ export function createToolExecutionCoordinator({
         activeModel = null;
         activeRequestDiagnostics = null;
         response = await modelRuntime.chat(request);
+        if (response?.configurationObservation) observeConfiguration(state, response.configurationObservation);
         activeRequestId = null;
       }
       if (typeof response?.text === 'string') text = response.text;
@@ -453,7 +1049,7 @@ export function createToolExecutionCoordinator({
       if (typeof response?.resolvedModel === 'string' && response.resolvedModel.trim()) resolvedModel = response.resolvedModel.trim();
       else if (typeof response?.model === 'string' && response.model.trim()) resolvedModel = response.model.trim();
       const calls = Array.isArray(response?.toolCalls) ? response.toolCalls : [];
-      if (!calls.length) return { status: limitReached ? 'partial' : 'completed', ...(limitReached ? { code: 'TOOL_CALL_LIMIT' } : {}), toolCalling: 'supported', text, usage, resolvedModel, totalCalls, messages: state.messages, ...(response?.modelContinuation ? { modelContinuation: response.modelContinuation } : {}) };
+      if (!calls.length) return { status: limitReached ? 'partial' : 'completed', ...(limitReached ? { code: 'TOOL_CALL_LIMIT' } : {}), toolCalling: 'supported', text, usage, resolvedModel, totalCalls: budget.used, messages: state.messages, ...(response?.modelContinuation ? { modelContinuation: response.modelContinuation } : {}) };
       const known = new Set(state.manifest.map((item) => item.id));
 
       const firstCallIndex = resumingToolBatch ? Math.max(0, Number(state.pendingCallIndex) || 0) : 0;
@@ -472,194 +1068,64 @@ export function createToolExecutionCoordinator({
       delete state.pendingCalls;
       delete state.pendingCallIndex;
 
-      for (let index = firstCallIndex; index < calls.length; index++) {
+      for (let index = firstCallIndex; index < calls.length;) {
+        if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
         const call = calls[index];
         const callId = String(call?.id || `call-${cycle}-${index}`).slice(0, 200);
-        if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
         if (seenCallIds.has(callId)) {
           state.messages.push({ role: 'tool', tool_call_id: callId, content: safeJson({ error: { code: 'DUPLICATE_TOOL_CALL' } }) });
+          index++;
           continue;
         }
-        seenCallIds.add(callId);
-        state.seenCallIds = [...seenCallIds].slice(-MAX_TOTAL_CALLS);
-        if (index >= maxBatchCalls || totalCalls >= maxCalls || cycle >= maxCycles) {
-          limitReached = true;
-          state.limitReached = true;
+        if (index >= maxBatchCalls || budget.used >= maxCalls || cycle >= maxCycles) {
+          seenCallIds.add(callId);
+          limitReached = state.limitReached = true;
           state.messages.push({ role: 'tool', tool_call_id: callId, content: safeJson({ error: { code: 'TOOL_CALL_LIMIT' } }) });
+          index++;
           continue;
         }
-        totalCalls += 1;
-        const capability = capabilityFromCall(call, known);
-        const activityId = `${turnId}:${callId}`.slice(0, 200);
-        const activityStartedAt = Date.now();
-        if (typeof state.onActivity === 'function') {
-          await state.onActivity({ id: activityId, capability, status: 'running', durationMs: null });
+        const frames = [callFrame(state, call, cycle, index)];
+        // Group formation never crosses malformed, duplicate or serial calls.
+        // Live Broker authorization remains separate for every admitted call.
+        const next = calls[index + 1];
+        const nextId = next ? String(next.id || `call-${cycle}-${index + 1}`).slice(0, 200) : '';
+        if (eligibleCall(state, call) && next && index + 1 < maxBatchCalls && budget.used + 1 < maxCalls
+          && nextId !== callId && !seenCallIds.has(nextId) && eligibleCall(state, next)) {
+          frames.push(callFrame(state, next, cycle, index + 1));
         }
-        let result;
-        let input;
-        const baseToolRequestId = 'model:' + crypto.createHash('sha256')
-          .update(JSON.stringify([sessionId, turnId, cycle, index])).digest('hex');
-        let toolRequestId = baseToolRequestId;
-        let retryCount = 0;
+        for (const frame of frames) seenCallIds.add(frame.callId);
+        state.seenCallIds = [...seenCallIds].slice(-MAX_TOTAL_CALLS);
+        budget.used += frames.length;
+        const rows = await dispatchGroup(state, frames, signal);
         try {
-          input = parseArguments(call?.arguments);
-          const descriptor = state.manifest.find((item) => item.id === capability);
-          if (!descriptor) fail('UNKNOWN_TOOL_IN_TURN', 'Tool was not authorized in this turn');
-          const registered = capabilityBroker.registry?.require(capability) ?? descriptor;
-          const hasEffect = (registered.effect && registered.effect !== 'read-only')
-            || ['message.send', 'filesystem.write', 'git.commit', 'test.run', 'publish', 'network'].includes(registered.permission ?? capability);
-          validateSchema(descriptor.inputSchema, input);
-          const retryStartedAt = Date.now();
-          let retryError = null;
-          for (let attempt = 0; attempt < SAFE_TOOL_RETRY.maxAttempts; attempt++) {
-            if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
-            if (attempt && Date.now() - retryStartedAt > SAFE_TOOL_RETRY.deadlineMs) throw retryError;
-            toolRequestId = attempt ? `${baseToolRequestId}:r${attempt}` : baseToolRequestId;
-            // Both the trusted actor and the Broker policy are resolved afresh on each attempt.
-            const liveActor = typeof actorResolver === 'function'
-              ? await actorResolver({ actorKind: actor.kind, actorId: actor.id, sessionId, turnId, scope: state.scope })
-              : actor;
-            if (!liveActor || liveActor.kind !== actor.kind || liveActor.id !== actor.id) {
-              fail('TOOL_ACTOR_UNAVAILABLE', 'The trusted CetaMesh actor is no longer available');
-            }
-            if (attempt && Date.now() - retryStartedAt >= SAFE_TOOL_RETRY.deadlineMs) throw retryError;
-            recordExecution(toolRequestId, { status: 'started', sessionId, turnId,
-              taskId: state.scope?.taskId ?? null, capability, at: Date.now() });
-            try {
-              const executeBroker = attemptSignal => capabilityBroker.execute({
-                requestId: toolRequestId, actor: liveActor,
-                ...(hasEffect && !registered.delegatesOperation && state.scope?.taskId && state.scope?.workspaceId ? {
-                  operationId: 'tool:' + crypto.createHash('sha256').update(baseToolRequestId).digest('hex')
-                } : {}),
-                taskId: state.scope?.taskId ?? null,
-                workspaceId: state.scope?.workspaceId ?? null,
-                capability, input, reason: 'Model structured tool call',
-                origin: { sessionId, turnId, runId: state.runId, phase: state.phase, targetKind: state.targetKind },
-                ...(attemptSignal ? { signal: attemptSignal } : {})
-              }, { signal: attemptSignal });
-              result = attempt
-                ? await runBoundedRetryAttempt(executeBroker, { signal,
-                  remainingMs: SAFE_TOOL_RETRY.deadlineMs - (Date.now() - retryStartedAt) })
-                : await executeBroker(signal);
-              break;
-            } catch (error) {
-              if (!mayRetrySafeTool({ capability, error, attempt, startedAt: retryStartedAt,
-                signal, dispatchStatus: capabilityBroker.dispatchStatus?.(toolRequestId) })) throw error;
-              retryError = error;
-              recordExecution(toolRequestId, { status: 'failed', code: String(error.code).slice(0, 100) });
-              retryCount = attempt + 1;
-              if (typeof state.onActivity === 'function') {
-                await state.onActivity({ id: activityId, capability, status: 'retrying',
-                  retryCount, durationMs: Date.now() - activityStartedAt });
-              }
-              await delay(SAFE_TOOL_RETRY.delayMs, undefined, { signal });
-            }
+          if (signal?.aborted) {
+            cancelPendingRows(state, rows, 'turn-cancelled');
+            for (const row of rows) await finalizeSettledCall(state, row);
+            fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
           }
+          const nextIndex = index + frames.length;
+          const pendingIndex = rows.findIndex(row => row.result?.status === 'pending');
+          if (pendingIndex >= 0) await retainPendingSiblings(state, rows);
+          const unknown = rows.find(row => row.result?.status === 'outcome-unknown');
+          if (unknown) {
+            cancelPendingRows(state, rows, 'unknown-parallel-sibling');
+            for (const row of rows) await finalizeSettledCall(state, row);
+            return { status: 'partial', code: 'OUTCOME_UNKNOWN', toolCalling: 'supported', text: '', usage, resolvedModel, totalCalls: budget.used };
+          }
+          for (const row of rows.slice(0, pendingIndex < 0 ? rows.length : pendingIndex)) await finalizeSettledCall(state, row);
+          if (signal?.aborted) fail('INVOKE_CANCELLED', 'Tool execution was cancelled');
+          if (pendingIndex >= 0) return await suspendGroup(state, calls, cycle, rows, pendingIndex, nextIndex, { usage, resolvedModel, limitReached });
+          index = nextIndex;
         } catch (error) {
-          if (executions[toolRequestId]?.status === 'started' && !capabilityBroker.dispatchStatus?.(toolRequestId)
-            && error?.code !== 'INVOKE_CANCEL_UNCONFIRMED' && error?.code !== 'TOOL_EXECUTION_PERSIST_FAILED') {
-            recordExecution(toolRequestId, { status: 'failed', code: String(error?.code ?? 'CAPABILITY_DENIED').slice(0, 100) });
-          }
-          result = { status: error?.effectStatus === 'unknown' ? 'outcome-unknown' : 'denied', ...errorResult(error) };
-        }
-        if (result && typeof result === 'object') result = { ...result, retryCount };
-
-        if (result?.status === 'pending') {
-          if (typeof state.onActivity === 'function') {
-            await state.onActivity({ id: activityId, capability, status: 'waiting-approval', durationMs: Date.now() - activityStartedAt });
-          }
-          const approvalId = String(result.approvalId ?? '');
-          let fingerprint = '';
-          try { fingerprint = capabilityBroker.approvals?.get(approvalId)?.fingerprint ?? ''; }
-          catch { fingerprint = ''; }
-          if (!approvalId || !fingerprint) fail('APPROVAL_CONTINUATION_INVALID', 'Broker returned an invalid approval reference');
-          const id = crypto.randomUUID();
-          const storedState = { ...state, messages: safePersistedMessages(state.messages) };
-          delete storedState.refreshContext;
-          delete storedState.onCapabilityResult;
-          const continuation = {
-            id, approvalId, requestFingerprint: fingerprint,
-            target: { sessionId, turnId },
-            targetKind: state.targetKind,
-            state: {
-              providerId, model: model ?? null, reasoning: reasoning ?? null,
-              manifest: structuredClone(state.manifest), actor: { kind: actor.kind, id: actor.id },
-              sessionId, turnId, runId: state.runId ?? null, phase: state.phase ?? null, accountingTaskId: state.accountingTaskId ?? null, scope: { taskId: scope?.taskId ?? null, workspaceId: scope?.workspaceId ?? null },
-              messages: storedState.messages, cycle,
-              totalCalls, usage, resolvedModel,
-              limitReached,
-              // Functions stay process-local; the JSON primitive omits this observer from durable state.
-              ...(typeof state.onContext === 'function' ? { onContext: state.onContext } : {}),
-              seenCallIds: state.seenCallIds,
-              pendingToolCallId: callId,
-              pendingActivityId: activityId,
-              pendingActivityStartedAt: activityStartedAt,
-              pendingCapability: capability,
-              pendingInput: { path: typeof input.path === 'string' ? input.path : null,
-                tool: typeof input.tool === 'string' ? input.tool : null },
-              pendingEvidenceInput: (() => {
-                if (!evidenceStore || !EVIDENCE_SOURCE_CAPABILITIES.includes(capability)
-                  || !state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false)) return null;
-                try {
-                  if (Buffer.byteLength(JSON.stringify(input)) > 65536) return null;
-                  return structuredClone(validateEvidenceSourceInput(input));
-                } catch { return null; }
-              })(),
-              pendingCalls: calls,
-              pendingCallIndex: index + 1
-            },
-            createdAt: Date.now()
-          };
-          continuations[approvalId] = continuation;
-          save();
-          recordExecution(toolRequestId, { status: 'approval-pending', approvalId });
-          return { status: 'pending', toolCalling: 'supported', approvalId, expiresAt: result.expiresAt, text: '', usage, resolvedModel, continuationId: id };
-        }
-
-        state.messages.push({
-          role: 'tool', tool_call_id: callId,
-          content: result?.status === 'completed'
-            ? completedResultContent(result, state, capability, input)
-            : safeJson(result?.status === 'outcome-unknown' ? result
-              : result?.error ?? result ?? { status: 'denied', code: 'CAPABILITY_DENIED' })
-        });
-        if (typeof state.onActivity === 'function') {
-          await state.onActivity(terminalActivity(result, { id: activityId, capability, startedAt: activityStartedAt }));
-        }
-        if (typeof state.onCapabilityResult === 'function') {
-          await state.onCapabilityResult({ capability, result, input, eventId: activityId,
-            sessionId, turnId, scope: state.scope });
-        }
-        if (result?.status === 'outcome-unknown') {
-          // The Broker owns reconciliation of this dispatch. No model recovery turn or
-          // subsequent tool call may replay an effect whose outcome is still unknown.
-          recordExecution(toolRequestId, { status: 'outcome-unknown', code: result.error?.code ?? 'OUTCOME_UNKNOWN' });
-          return { status: 'partial', code: 'OUTCOME_UNKNOWN', toolCalling: 'supported',
-            text: '', usage, resolvedModel, totalCalls };
-        }
-        if (typeof state.refreshContext === 'function') {
-          const refreshed = await state.refreshContext({ capability, result, sessionId, turnId, scope: state.scope });
-          if (refreshed && typeof refreshed === 'object') {
-            if (Array.isArray(refreshed.manifest)) state.manifest = refreshed.manifest;
-            if (typeof refreshed.context === 'string' && refreshed.context.trim()) {
-              const marker = 'CetaMesh dynamic context (JSON reference data):\n';
-              const existing = state.messages.findIndex((message) => message.role === 'system' && String(message.content ?? '').startsWith(marker));
-              const contextMessage = { role: 'system', content: marker + refreshed.context };
-              if (existing >= 0) state.messages[existing] = contextMessage;
-              else state.messages.splice(Math.min(2, state.messages.length), 0, contextMessage);
-            }
-            if (refreshed.scope && typeof refreshed.scope === 'object') {
-              state.scope = { taskId: refreshed.scope.taskId ?? null, workspaceId: refreshed.scope.workspaceId ?? null };
-            }
-          }
-        }
-        if (executions[toolRequestId]?.status === 'started') {
-          recordExecution(toolRequestId, { status: result?.status === 'completed' ? 'completed' : 'failed' });
+          cancelPendingRows(state, rows, 'group-finalization-failed', { code: 'TOOL_GROUP_INTERRUPTED' });
+          throw error;
         }
       }
     }
-    return { status: 'partial', code: 'TOOL_CALL_LIMIT', toolCalling: 'supported', text, usage, resolvedModel, totalCalls, messages: state.messages };
+    return { status: 'partial', code: 'TOOL_CALL_LIMIT', toolCalling: 'supported', text, usage, resolvedModel, totalCalls: budget.used, messages: state.messages };
     } catch (error) {
+      if (error?.configurationObservation) observeConfiguration(state, error.configurationObservation);
+      if (state.configurationObservation && error && typeof error === 'object') error.configurationObservation = structuredClone(state.configurationObservation);
       // A failed transport may still be billable, but its usage is unknown. Keep
       // earlier receipts and a distinct unknown attempt rather than reporting 0.
       if (activeRequestId) usage = accumulateModelUsage(usage, activeUsage, {
@@ -675,7 +1141,7 @@ export function createToolExecutionCoordinator({
     }
   }
 
-  async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, runId = null, phase = null, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset, onContext } = {}) {
+  async function run({ providerId, model, reasoning, messages = [], manifest = [], actor, sessionId, turnId, runId = null, phase = null, targetKind = 'chat', scope = {}, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset, onContext, onConfiguration } = {}) {
     if (!actor || !['owner', 'agent'].includes(actor.kind) || typeof actor.id !== 'string') fail('UNAUTHORIZED', 'Trusted Model actor required');
     const normalizedSessionId = String(sessionId ?? 'session').slice(0, 160);
     const normalizedTurnId = turnId == null ? null : String(turnId).slice(0, 160);
@@ -705,7 +1171,7 @@ export function createToolExecutionCoordinator({
     if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(capabilityError('TOOL_EXECUTION_TIMEOUT', 'Model tool turn exceeded its time limit')), timeoutMs);
     try {
-      return await runLoop({
+      const state = {
         providerId, model, reasoning, manifest: safeManifest, actor,
         sessionId: String(sessionId ?? 'session').slice(0, 160),
         turnId: String(turnId ?? crypto.randomUUID()).slice(0, 160),
@@ -719,9 +1185,11 @@ export function createToolExecutionCoordinator({
         ...(typeof onTextDelta === 'function' ? { onTextDelta } : {}),
         ...(typeof onStreamReset === 'function' ? { onStreamReset } : {}),
         ...(typeof onContext === 'function' ? { onContext } : {}),
+        ...(typeof onConfiguration === 'function' ? { onConfiguration } : {}),
         ...(typeof refreshContext === 'function' ? { refreshContext } : {}),
         ...(typeof onCapabilityResult === 'function' ? { onCapabilityResult } : {})
-      }, controller.signal);
+      };
+      return withConfiguration(state, await runLoop(state, controller.signal));
     } finally {
       clearTimeout(timer);
       signal?.removeEventListener('abort', abort);
@@ -746,13 +1214,15 @@ export function createToolExecutionCoordinator({
     return { recorded: rows.length };
   }
 
-  async function resumeApproval({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset, onContext } = {}) {
+  async function resumeApprovalInternal({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset, onContext, onConfiguration } = {}) {
     const continuation = continuations[String(approvalId ?? '')];
     if (!continuation) fail('APPROVAL_CONTINUATION_NOT_FOUND', 'No Model turn is waiting for this approval');
+    if (continuation.status === 'resuming') fail('REQUEST_RECOVERY_REQUIRED', 'This consumed approval already resumed; inspect retained receipts before starting a fresh turn');
     if (continuation.status === 'orphaned' || continuation.status === 'reconciled') {
       fail('APPROVAL_CONTINUATION_ORPHANED', 'Interrupted Agent approval requires Owner reconciliation');
     }
     if (continuation.requestFingerprint !== requestFingerprint) fail('APPROVAL_MISMATCH', 'Approval continuation fingerprint mismatch');
+    const modelOnlyResume = continuation.status === 'model-retry' && continuation.state.approvalDelivered === true;
     const activity = { id: continuation.state.pendingActivityId ?? `${continuation.target.turnId}:${continuation.state.pendingToolCallId}`.slice(0, 200),
       capability: continuation.state.pendingCapability, startedAt: continuation.state.pendingActivityStartedAt };
     if(decisionResult?.status==='pending'){
@@ -767,8 +1237,8 @@ export function createToolExecutionCoordinator({
       continuations[nextId]=moved;delete continuations[String(approvalId)];
       try{save();}catch(error){delete continuations[nextId];continuations[String(approvalId)]=continuation;throw error;}
       for(const [id,row]of Object.entries(executions))if(row?.approvalId===approvalId)recordExecution(id,{status:'approval-pending',approvalId:nextId,parentApprovalId:approvalId});
-      return {status:'pending',approvalId:nextId,expiresAt:next.expiresAt,text:'',usage:continuation.state.usage??null,
-        toolCalling:'supported',target:continuation.target,targetKind:continuation.targetKind};
+      return withConfiguration(continuation.state, {status:'pending',approvalId:nextId,expiresAt:next.expiresAt,text:'',usage:continuation.state.usage??null,
+        toolCalling:'supported',target:continuation.target,targetKind:continuation.targetKind});
     }
     if (decisionResult?.status === 'outcome-unknown') {
       recordApprovalOutcomeUnknown({ approvalId, requestFingerprint, decisionResult });
@@ -781,14 +1251,14 @@ export function createToolExecutionCoordinator({
       });
       delete continuations[String(approvalId)];
       try { save(); } catch (error) { continuations[String(approvalId)] = continuation; throw error; }
-      return { status: 'partial', code: 'OUTCOME_UNKNOWN', toolCalling: 'supported', text: '',
+      return withConfiguration(continuation.state, { status: 'partial', code: 'OUTCOME_UNKNOWN', toolCalling: 'supported', text: '',
         usage: continuation.state.usage ?? null, resolvedModel: continuation.state.resolvedModel ?? null,
-        totalCalls: continuation.state.totalCalls, target: continuation.target, targetKind: continuation.targetKind };
+        totalCalls: continuation.state.totalCalls, target: continuation.target, targetKind: continuation.targetKind });
     }
     // Distinguish a durably consumed result from a stale pending projection;
     // startup must review the latter even if the external effect completed late.
     for (const [id, row] of Object.entries(executions)) {
-      if (row?.approvalId === approvalId) recordExecution(id, {
+      if (row?.approvalId === approvalId && !continuation.state.pendingFrame) recordExecution(id, {
         status: decisionResult?.status === 'completed' ? 'completed' : 'failed'
       });
     }
@@ -805,24 +1275,66 @@ export function createToolExecutionCoordinator({
     if (typeof onTextDelta === 'function') state.onTextDelta = onTextDelta;
     if (typeof onStreamReset === 'function') state.onStreamReset = onStreamReset;
     if (typeof onContext === 'function') state.onContext = onContext;
-    const result = decisionResult?.status === 'completed'
+    if (typeof onConfiguration === 'function') state.onConfiguration = onConfiguration;
+    let result = decisionResult?.status === 'completed'
       ? { status: 'completed', result: decisionResult.result }
       : decisionResult?.status === 'rejected' ? { status: 'rejected', error: { code: 'APPROVAL_REJECTED' } }
         : { status: ['cancelled', 'failed', 'denied'].includes(decisionResult?.status) ? decisionResult.status : 'failed',
           error: { code: decisionResult?.error?.code ?? 'CAPABILITY_DENIED' } };
-    state.messages.push({
-      role: 'tool', tool_call_id: state.pendingToolCallId,
-      content: result.status === 'completed' ? completedResultContent(result, state, state.pendingCapability, state.pendingEvidenceInput) : safeJson(result)
-    });
-    if (typeof state.onActivity === 'function') await state.onActivity(terminalActivity(result, activity));
-    if (typeof state.onCapabilityResult === 'function' && state.pendingCapability) {
-      await state.onCapabilityResult({ capability: state.pendingCapability, result,
-        input: state.pendingInput ?? {},
-        eventId: activity.id,
-        sessionId: continuation.target.sessionId, turnId: continuation.target.turnId, scope: state.scope });
+    // Claim delivery before any resumed source/observer/model work. A later
+    // failed ACK cannot run the old cursor a second time, even in this process.
+    continuation.status = 'resuming';
+    continuation.resumeStartedAt = Date.now();
+    save();
+    if (state.pendingBatch) {
+      state.callBudget = { used: state.totalCalls };
+      const actor = typeof actorResolver === 'function' ? await actorResolver({ actorKind: state.actor.kind, actorId: state.actor.id,
+        sessionId: state.sessionId, turnId: state.turnId, scope: state.scope }) : state.actor;
+      if (!actor || actor.kind !== state.actor.kind || actor.id !== state.actor.id) fail('TOOL_ACTOR_UNAVAILABLE', 'The trusted batch actor is unavailable');
+      const controller = new AbortController();
+      const abort = () => controller.abort(signal?.reason);
+      if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
+      const timer = setTimeout(() => controller.abort(), timeoutMs);
+      try { result = await runReadBatch({ state, frame: state.pendingFrame, signal: controller.signal, actor }, state.pendingBatch, decisionResult); }
+      finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+      state.totalCalls = state.callBudget.used;
+      if (result?.status === 'pending') {
+        const row = persistSettlement(state, state.pendingFrame, result);
+        const pending = await suspendGroup(state, state.pendingCalls, state.cycle, [row], 0, state.pendingCallIndex,
+          { usage: state.usage, resolvedModel: state.resolvedModel, limitReached: state.limitReached });
+        delete continuations[String(approvalId)]; save();
+        return withConfiguration(state, { ...pending, target: continuation.target, targetKind: continuation.targetKind });
+      }
     }
-    state.pendingCalls = structuredClone(continuation.state.pendingCalls ?? []);
-    state.pendingCallIndex = Math.max(0, Number(continuation.state.pendingCallIndex) || 0);
+    if (!modelOnlyResume) {
+      const acceptedRow = state.pendingFrame ? persistSettlement(state, state.pendingFrame, result) : null;
+      state.messages.push({
+        role: 'tool', tool_call_id: state.pendingToolCallId,
+        content: acceptedRow?.content ?? (result.status === 'completed' ? completedResultContent(result, state, state.pendingCapability, state.pendingEvidenceInput) : safeJson(result))
+      });
+      if (typeof state.onActivity === 'function') await state.onActivity(terminalActivity(result, activity));
+      if (typeof state.onCapabilityResult === 'function' && state.pendingCapability) {
+        await state.onCapabilityResult({ capability: state.pendingCapability, result,
+          input: state.pendingInput ?? {},
+          eventId: activity.id,
+          sessionId: continuation.target.sessionId, turnId: continuation.target.turnId, scope: state.scope });
+      }
+      for (const row of state.settledCalls ?? []) await finalizeSettledCall(state, row);
+      if (result?.status === 'outcome-unknown') {
+        delete continuations[String(approvalId)]; save();
+        return withConfiguration(state, { status: 'partial', code: 'OUTCOME_UNKNOWN', toolCalling: 'supported', text: '', usage: state.usage,
+          resolvedModel: state.resolvedModel, totalCalls: state.totalCalls, target: continuation.target, targetKind: continuation.targetKind });
+      }
+      delete state.settledCalls;
+      delete state.pendingBatch;
+      state.pendingCalls = structuredClone(continuation.state.pendingCalls ?? []);
+      state.pendingCallIndex = Math.max(0, Number(continuation.state.pendingCallIndex) || 0);
+    } else {
+      delete state.pendingCalls;
+      delete state.pendingCallIndex;
+      delete state.settledCalls;
+      delete state.pendingBatch;
+    }
     if (typeof state.refreshContext === 'function') {
       const refreshed = await state.refreshContext({ capability: null, result: decisionResult,
         sessionId: continuation.target.sessionId, turnId: continuation.target.turnId, scope: state.scope, approvalResumed: true });
@@ -844,17 +1356,57 @@ export function createToolExecutionCoordinator({
     const abort = () => controller.abort(signal?.reason);
     if (signal?.aborted) abort(); else signal?.addEventListener('abort', abort, { once: true });
     const timer = setTimeout(() => controller.abort(capabilityError('TOOL_EXECUTION_TIMEOUT', 'Model tool turn exceeded its time limit')), timeoutMs);
+    const canRetryModelOnly = modelOnlyResume || !continuation.state.pendingBatch
+      && state.pendingCallIndex >= state.pendingCalls.length;
+    const modelRetryCycle = state.cycle + (modelOnlyResume ? 0 : 1);
+    const settledMessageCount = state.messages.length;
+    const turnDispatchIds = () => Object.entries(executions).filter(([, row]) => row?.sessionId === state.sessionId
+      && row?.turnId === state.turnId).map(([id]) => id).sort();
+    const settledDispatchIds = JSON.stringify(turnDispatchIds());
     try {
-      const resumed = await runLoop(state, controller.signal);
+      let resumed;
+      try { resumed = await runLoop(state, controller.signal); }
+      catch (error) {
+        // Retrying a failed first Model continuation is the pre-existing path:
+        // no remaining call, transcript advance or new dispatch can be replayed.
+        // Once any later source/tool was admitted, retain the resuming fence.
+        if (canRetryModelOnly && !controller.signal.aborted && error?.effectStatus !== 'unknown'
+          && !String(error?.code ?? '').endsWith('_PERSIST_FAILED')
+          && state.messages.length === settledMessageCount && JSON.stringify(turnDispatchIds()) === settledDispatchIds
+          && !uncertainExecutions().some(row => row.sessionId === state.sessionId && row.turnId === state.turnId)) {
+          continuation.status = 'model-retry';
+          continuation.state.approvalDelivered = true;
+          continuation.state.messages = safePersistedMessages(state.messages);
+          continuation.state.cycle = modelRetryCycle;
+          continuation.state.totalCalls = state.callBudget?.used ?? state.totalCalls;
+          continuation.state.scope = { ...state.scope };
+          continuation.state.manifest = structuredClone(state.manifest);
+          delete continuation.state.pendingCalls;
+          delete continuation.state.pendingCallIndex;
+          delete continuation.state.settledCalls;
+          if (error?.usage) continuation.state.usage = structuredClone(error.usage);
+          if (state.configurationObservation) continuation.state.configurationObservation = structuredClone(state.configurationObservation);
+          save();
+        }
+        throw error;
+      }
       delete continuations[String(approvalId)];
       try { save(); }
       catch (error) {
         continuations[String(approvalId)] = continuation;
         throw error;
       }
-      return { ...resumed, target: continuation.target, targetKind: continuation.targetKind };
+      return withConfiguration(state, { ...resumed, target: continuation.target, targetKind: continuation.targetKind });
     }
     finally { clearTimeout(timer); signal?.removeEventListener('abort', abort); }
+  }
+
+  async function resumeApproval(options = {}) {
+    const id = String(options.approvalId ?? '');
+    if (activeResumes.has(id)) fail('APPROVAL_CONTINUATION_BUSY', 'This exact approval result is already being delivered');
+    activeResumes.add(id);
+    try { return await resumeApprovalInternal(options); }
+    finally { activeResumes.delete(id); }
   }
 
   function cancelSession(sessionId, reason = 'chat-deleted') {
@@ -871,6 +1423,9 @@ export function createToolExecutionCoordinator({
         if (!['APPROVAL_NOT_FOUND', 'APPROVAL_EXPIRED'].includes(error?.code)) throw error;
       }
       delete continuations[approvalId];
+      for (const [id, row] of Object.entries(executions)) if (row?.approvalId === approvalId && row.status === 'approval-pending') {
+        recordExecution(id, { status: 'failed', settledAt: Date.now(), code: 'INVOKE_CANCELLED' });
+      }
       cancelled += 1;
       changed = true;
     }
@@ -881,10 +1436,12 @@ export function createToolExecutionCoordinator({
   function pendingTarget(approvalId) {
     const entry = continuations[String(approvalId ?? '')];
     return entry && entry.status !== 'orphaned' && entry.status !== 'reconciled'
+      && (entry.status !== 'resuming' || activeResumes.has(String(approvalId)))
       ? { ...entry.target, kind: entry.targetKind ?? 'chat' } : null;
   }
 
-  return { run, resumeApproval, recordApprovalOutcomeUnknown, pendingTarget, cancelSession, recoveryForSession, recoveryForTask,
+  capabilityBroker.setReadContextResolver?.(resolvePendingReadContext);
+  return { run, executeReadBatch, resumeApproval, recordApprovalOutcomeUnknown, pendingTarget, cancelSession, recoveryForSession, recoveryForTask,
     acknowledgeTaskRecovery,
     taskReviewState(taskId) {
       return {

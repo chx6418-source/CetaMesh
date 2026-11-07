@@ -19,6 +19,7 @@ import { createNativeApprovalAdapter } from '../agent/native-approval-bridge.js'
 import { canDispatchConfiguredNativeAgent, hasNegativeAgentReadiness } from '../agent/execution-security.js';
 import { rankTaskAgents, subscriptionBillingFingerprint } from '../router/agent-assignment.js';
 import { isControlledL2Write } from './l2-grants.js';
+import { READ_BATCH_INPUT_SCHEMA, validateReadBatchPlan } from '../model/read-batch-program.js';
 
 // Only this module can mark a failure as occurring before Agent side effects.
 // Provider supplied error fields must never authorize an automatic replay.
@@ -108,6 +109,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   const workspaceImportStates = new Map();
   let approvalDecisionListener = null;
+  let readBatchExecutor = null;
   const journalFile = stateDir ? path.join(stateDir, 'capability', 'requests.json') : null;
   const journal = journalFile ? readJsonFile(journalFile, { missing: {} }) : {};
   // This write-ahead ownership record is independent of Task JSON. A native
@@ -541,7 +543,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       throw capabilityError('TASK_CHILD_READ_ONLY', 'Child grant cannot advertise write or unrelated tools');
     }
     const capabilities = new Set(readOnlyChild ? ['filesystem.read', 'filesystem.search']
-      : value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'git.status', 'git.diff', 'memory.read', 'operation.read', 'operation.continue', ...(evidenceStore ? ['context.evidence.read'] : [])]);
+      : value?.capabilities ?? ['filesystem.read', 'filesystem.write', 'filesystem.search', 'context.batch', 'git.status', 'git.diff', 'memory.read', 'operation.read', 'operation.continue', ...(evidenceStore ? ['context.evidence.read'] : [])]);
     if (capabilities.has('filesystem.write')) capabilities.add('workspace.apply');
     for (const id of capabilities) broker.registry.require(id);
     if ((value?.workspaceIds ?? [task.workspaceId]).some(id => id !== task.workspaceId)) {
@@ -592,6 +594,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         .filter(ref => readOnlyRefs[ref.scope]?.includes(ref.memoryId)).map(ref => ref.type)])], readOnlyRefs } };
   }
   if (workspaceService) {
+    broker.register({ id: 'context.batch', permission: 'filesystem.read', provider: 'context', workspace: true,
+      risk: 'low', effect: 'read-only', readOnly: true, parallelSafe: false, delegatesOperation: true,
+      description: 'Run a bounded read-only Workspace program: search/read/readEach, lines(text/jsonl), filter/select/sort/unique/aggregate(count). Only selected output and source evidence references return; every source needs its own current grant.',
+      inputSchema: READ_BATCH_INPUT_SCHEMA, category: 'context',
+      validate(request) { validateReadBatchPlan(request.input); },
+      execute(request) {
+        if (!readBatchExecutor) throw capabilityError('BATCH_CONTEXT_UNAVAILABLE', 'The Core tool coordinator is not bound');
+        return readBatchExecutor(request);
+      } });
     for (const [method, id] of Object.entries(WORKSPACE_CAPABILITIES)) {
       const concurrentRead = id === 'filesystem.read' || id === 'filesystem.search';
       broker.register({ id, cancellationAware: concurrentRead || id === 'test.run',
@@ -721,6 +732,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               ...(id === 'git.diff' ? { excludeSensitive: request.actor.kind !== 'owner' } : {}),
               ...(request.workspaceId ? { id: request.workspaceId } : {}), actor: request.actor.id } },
               concurrentRead ? { signal: request.signal, assertAuthorized: request.assertAuthorized,
+                consumeReadBytes: request.consumeReadBytes,
                 restricted: request.actor.kind !== 'owner' } : undefined);
           };
           return id === 'workspace.create' ? idempotent(request, run) : run();
@@ -1532,6 +1544,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   const environment = registerEnvironmentCapabilities({broker,taskRuntime,principalForTask,stateDir,ownedArtifactRoot,client:environmentClient,onChanged:onEnvironmentChanged});
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
+    setReadBatchExecutor(executor) {
+      if (readBatchExecutor || typeof executor !== 'function') throw new TypeError('A read batch executor can be bound exactly once');
+      readBatchExecutor = executor;
+    },
     requestAgentNativeApproval: (request, options) => nativeApproval.request(request, options),
     settleAgentNativeEffect: request => nativeApproval.settleEffect(request),
     cancelTaskOperations: scope => { environment.cancel(scope); return operations.cancelScope(scope); },

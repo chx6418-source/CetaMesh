@@ -179,6 +179,7 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
 
   function readExecution(entry, context) {
     return { signal: context.signal, restricted: context.restricted === true,
+      consumeReadBytes: typeof context.consumeReadBytes === 'function' ? context.consumeReadBytes : undefined,
       assertAuthorized: async () => {
         await context.assertAuthorized?.();
         if (context.signal?.aborted) fail('INVOKE_CANCELLED', 'Workspace read cancelled');
