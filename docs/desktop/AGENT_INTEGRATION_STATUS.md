@@ -1,12 +1,12 @@
 # Agent integration status
 
-Updated: 2026-11-06. This page describes the current Desktop source and verification boundaries. It does not establish general runtime availability or a new signed release.
+Updated: 2026-11-07. This page describes the current Desktop source and verification boundaries. It does not establish general runtime availability or a new signed release.
 
 ## Registered providers
 
 | Provider | Current implementation | Availability boundary |
 | --- | --- | --- |
-| DSH | Existing staged Provider retained | Requires its configured runtime and task authorization |
+| DSH | Existing staged Provider with local and authenticated native preset discovery; old `0.1.5-rc.1` and upstream `0.2.2-rc.1` common wire contracts covered | Local preset documents must match the Host's exact document. Native builtins remain `PARTIAL / native-tool-policy-unverified` until their tools are bound to mandatory Core approval; see [DSH compatibility](DSH_COMPATIBILITY.md) |
 | Codex | Existing exec transport stays default; App Server adapter added | App Server requires a verified version/schema and native policy; old sessions are not blindly migrated |
 | Claude | Configured native Claude Code runtime, pinned SDK 0.3.308, supervised private runner and all-tool approvals; bounded discovery includes the native coding executable shipped with supported Desktop installations | Explicit API configuration or opt-in existing CLI subscription login on verified 2.1.308. Native read/edit/test/import is exercised with a local synthetic model; real account execution and dynamic session reasoning remain unverified |
 | Gemini CLI | Shared ACP, official 0.65.0/0.66.0 discovery/handshake and native policy probes | These verified probes omit exact tool input from ACP permission requests; native_input_unverified keeps Task execution unavailable |
@@ -16,6 +16,22 @@ Updated: 2026-11-06. This page describes the current Desktop source and verifica
 | WorkBuddy | Fixed-origin, bounded private API client | Real OAuth/account authorization and local Workspace execution remain unavailable |
 
 Registration is not execution permission. The existing Broker/Registry, Owner approvals, Workspace identity and Capability-mediated imports remain authoritative. Staging is a working copy, not an operating-system sandbox.
+
+Explicit coding collaboration in Chat can create the existing Task and use its bounded
+handoff policy. A policy may explicitly permit the verified Codex ChatGPT subscription
+route without a per-token monetary estimate; cost stays unknown. The execution pins
+the login method and account/route fingerprint, and API credential overrides do not
+inherit that permission. Policy expiration, revocation and execution identity are
+checked again immediately before the Provider send. An isolated real Codex subscription
+acceptance exercised Managed coordination with a local synthetic model, Codex edits,
+exact Core import, independent fixed Node verification and return to the original Chat.
+It does not establish a real Managed model, heterogeneous concurrency or all-Provider
+acceptance.
+
+Runtime Codex refreshes share asynchronous CLI inspection, allowing authenticated Core
+IPC to respond while the probes run. Initial construction still performs its existing
+synchronous discovery; runtime responsiveness evidence does not establish a bounded
+cold-start time for every host configuration.
 
 Desktop-client installation is reported separately from CLI installation and Agent readiness.
 Bounded local binary checks and the Claude Windows Store package query identify supported

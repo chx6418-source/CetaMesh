@@ -15,11 +15,17 @@ CetaMesh 通过已有 Core DSH connector 连接独立安装的 DSH，不安装�
 
 HTTP/WebSocket 合成 peer 覆盖两种版本的上述公共接口，不等于已在新版真实模型与原生工具上验收。旧版不提供的 `session/state`、`session/projections` 不是该公共路径的必要条件；不向不存在的接口重放写请求。
 
+Provider 关闭同时拥有尚未完成的创建操作。预设校验与远端创建返回后均重新检查关闭状态；远端创建结果不明时保留 pending 归属及暂存目录。只有取消后读取到唯一同 ID、`running:false` 的 Session，才可报告停止并清理；缺项、重复 ID、仍在运行或单纯 archive/close 回执均不替代停止证明。关闭等待有界，`PROVIDER_CLOSE_UNKNOWN` 保留后续核验所需的记录。
+
+新的创建请求若返回已归属的 Session ID，报 `DSH_SESSION_ID_CONFLICT`。它不会修改旧会话的模型、Task 绑定或暂存目录，也不会把旧会话当作新请求的清理对象。新请求的未知结果继续保留，后续唯一 ID 的合法请求仍走原创建流程。
+
 ## 预设发现与明确选择
 
 本机 `.agent-presets/<id>/agent.cordis.yml` 与 authenticated `agentPresets/read` 复用同一有界 persona parser。预设 ID、`trust`、默认标记以及 persona 格式均不授予工具权限。目录读取仅用于发现；Owner 在执行器页面选择任务预设并保存，配置按原有版本化连接文件持久化，当前 Core generation 及其 Session 保持原配置，重启 Core 后采用待生效配置。
 
 `local-persona-only` 仅表示本机 persona 格式；绑定真实 connector 时，同名本机文档还必须与 DSH 实际返回文档的 SHA-256 指纹一致。健康检查及最终 Session 创建均校验该绑定，避免用同名本机文件为不同的系统预设背书。已有本机预设执行与 staging/import 路径保留，仍须接受现有 Task、Workspace、Broker 与审批检查。
+
+Windows 的 home 路径仅大小写不同时，还须核对实际目录的非零设备及文件身份一致。大小写敏感目录中的不同对象、不同目录及其他 junction 别名不能共享原连接的预设或凭据范围；异步保存仍检查配置 revision，不能覆盖并发的新选择。
 
 原生系统预设可被发现、读取、校验格式并由 Owner 显式保存，标记为 `native-persona-only`。这类预设没有本机受控工具边界时，Task Provider 返回 `taskEligible: false` / `native-tool-policy-unverified`，创建 Task Session 以现有 `AGENT_BOUNDARY_UNSUPPORTED` 拒绝。UI 同时说明可使用现有 Core 默认模型或已就绪的其他执行器。
 
