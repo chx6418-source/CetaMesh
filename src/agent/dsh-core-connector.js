@@ -2,6 +2,7 @@
 // a DSH process, a Legacy Bridge, an IPC listener or a second data writer.
 import { NodeApiClient } from '../dsh-client.js';
 import { createDshConfiguration } from './dsh-configuration.js';
+import { createDshNativePresets } from './dsh-native-presets.js';
 
 export function createDshCoreConnector({ config = {}, env = process.env, stateDir, configFile, dataRoot, configLoadError } = {}) {
   const configuration = createDshConfiguration({ legacy: config?.dsh && typeof config.dsh === 'object' ? config.dsh : {}, env, stateDir, configFile, dataRoot, legacyLoadError: configLoadError });
@@ -11,8 +12,10 @@ export function createDshCoreConnector({ config = {}, env = process.env, stateDi
     dshHome: () => dsh.homeDir || env?.DSH_HOME || null,
     timeoutMs: 120_000
   });
+  const nativePresets = createDshNativePresets({ api });
+  configuration.bindNativePresets(nativePresets);
   return { api, configuration, presetConfig: { coding: typeof dsh.codingPreset === 'string' ? dsh.codingPreset : null,
     social: typeof dsh.socialPreset === 'string' ? dsh.socialPreset : null,
-    dshHome: dsh.homeDir || env?.DSH_HOME || null } };
+    dshHome: dsh.homeDir || env?.DSH_HOME || null, nativePresets } };
 }
 

@@ -10,7 +10,7 @@ export function mergeAgentHealth(previous: Agent, health: Agent): Agent {
 
 export function AgentSetupDiagnostic({ agent }: { agent: Agent }) {
   const reason = agent.reason || agent.preset?.reason;
-  return <div className="agent-diagnostic">{reason && <small>{dshSetupReasonLabel(reason)}</small>}{agent.preset && <small>编程预设 {agent.preset.id || '未选择'} · {agent.preset.loadState === 'loaded' ? '原生已加载' : agent.preset.loadState === 'not-loaded' ? '原生未加载' : '加载状态未知'} · {agent.preset.compatible === true ? '本地 persona 已验证' : agent.preset.compatible === false ? '本地 persona 不兼容' : '本地 persona 未验证'}</small>}{agent.diagnostic && <details><summary>诊断详情</summary><small>阶段：{agent.diagnostic.stage || '未知'} · 错误码：{agent.diagnostic.code || '无'} · {agent.diagnostic.retryable ? '允许重新检查连接' : '请先处理配置'}{agent.diagnostic.checkedAt ? ` · ${dateLabel(agent.diagnostic.checkedAt)}` : ''}</small></details>}</div>;
+  return <div className="agent-diagnostic">{reason && <small>{dshSetupReasonLabel(reason)}</small>}{agent.preset && <small>编程预设 {agent.preset.id || '未选择'} · {agent.preset.loadState === 'loaded' ? '原生已加载' : agent.preset.loadState === 'not-loaded' ? '原生未加载' : '加载状态未知'} · {agent.preset.compatible === true ? 'persona 格式已验证' : agent.preset.compatible === false ? 'persona 格式不兼容' : 'persona 格式未验证'}</small>}{agent.diagnostic && <details><summary>诊断详情</summary><small>阶段：{agent.diagnostic.stage || '未知'} · 错误码：{agent.diagnostic.code || '无'} · {agent.diagnostic.retryable ? '允许重新检查连接' : '请先处理配置'}{agent.diagnostic.checkedAt ? ` · ${dateLabel(agent.diagnostic.checkedAt)}` : ''}</small></details>}</div>;
 }
 
 export function DshSetupForm({ configuration, draft, presets, saving, conflicted = false, onDraftChange, onSave, onRefresh }: {
@@ -22,7 +22,7 @@ export function DshSetupForm({ configuration, draft, presets, saving, conflicted
   const preset = (key: 'codingPreset' | 'socialPreset', label: string) => <div className="dsh-preset-field"><span>{label}</span><Select label={label} value={draft[key] ?? ''} disabled={saving || catalog.state === 'loading'} onChange={event => onDraftChange({ ...draft, [key]: event.target.value || null })}>
     <option value="">请选择预设</option>
     {draft[key] && !catalog.presets.some(row => row.id === draft[key]) && <option value={draft[key] ?? ''} disabled>{String(draft[key]) + '（未找到或尚未读取）'}</option>}
-    {catalog.presets.map(row => <option key={row.id} value={row.id} disabled={!row.compatible}>{row.id + (row.compatible ? '' : '（不兼容）')}</option>)}
+    {catalog.presets.map(row => <option key={row.id} value={row.id} disabled={!row.compatible}>{row.id + (!row.compatible ? '（不兼容）' : row.verification === 'native-persona-only' ? '（原生工具待验证）' : '')}</option>)}
   </Select></div>;
   const listingMessage = catalog.state === 'loading' ? '正在读取本机预设…'
     : catalog.state === 'missing' ? '未找到预设目录，可在高级设置中检查 DSH 数据目录。'
@@ -31,9 +31,10 @@ export function DshSetupForm({ configuration, draft, presets, saving, conflicted
     : !catalog.presets.some(row => row.compatible) ? '未发现兼容预设；不会自动修改已有文件。请在 DSH 中核对后刷新。'
     : null;
   return <form className="dsh-setup-form" onSubmit={event => { event.preventDefault(); if (!saving && !conflicted) onSave(); }}>
-    <h4>DSH 设置</h4><p>从本机预设中选择，无需手填名称或编辑文件。</p>
+    <h4>DSH 设置</h4><p>从本机及 DSH 已加载的预设中选择，无需手填名称或编辑文件。</p>
     {preset('codingPreset', '任务预设')}
-    <small>选择后保存；实际可用状态以连接检查为准。</small>
+    <small>选择后保存；预设格式校验只验证 persona 内容，任务执行仍需通过工具与权限检查。</small>
+    {catalog.presets.some(row => row.id === draft.codingPreset && row.verification === 'native-persona-only') && <small role="status">此原生预设可以保存；Core 尚未验证其 Shell 与工具权限，保存不会开放任务执行。</small>}
     {listingMessage && <small role="status">{listingMessage}</small>}
     {catalog.presets.some(row => !row.compatible) && <small>部分预设不兼容，已禁用；原因见高级设置。</small>}
     {catalog.truncated && <small>预设数量较多，仅显示本次有界扫描结果。</small>}
@@ -58,6 +59,7 @@ export function dshSetupErrorMessage(cause: unknown): string {
   const message = ({
     DSH_AUTH_SCOPE_CHANGE_REQUIRES_REVIEW: '服务地址或目录变更涉及已有认证范围，请先核对 DSH 凭据归属，再单独处理连接范围。',
     DSH_PRESET_INCOMPATIBLE: '预设校验未通过，请检查编程与社交预设的文件、格式和 persona 内容后保存。',
+    DSH_CONFIG_CONFLICT: '配置在校验期间已更改，请重新读取配置后保存。',
     CONFIGURATION_UNSUPPORTED: '当前 Core 无法保存 DSH 配置，请检查本机数据目录。',
     INVALID_PARAMS: '配置字段无效，请检查预设名称、绝对目录路径与服务地址。',
     WRITE_FAILED: '无法写入连接配置，请检查数据目录的写入权限。'
@@ -104,6 +106,16 @@ export function DshSetupPanel({ agent, onConfigured }: { agent: Agent; onConfigu
     finally { if (epoch === mounted.current) { savingRef.current = false; setSaving(false); } }
   }
   return configuration ? <><DshSetupForm configuration={configuration} draft={draft} presets={presets} onRefresh={() => setRefresh(value => value + 1)} saving={saving} conflicted={conflicted} onDraftChange={value => { dirty.current = true; setDraft(value); }} onSave={() => void save()} />{conflicted && <div role="status">配置已变化，当前草稿仍保留；重新载入将替换当前草稿。 <Button compact type="button" disabled={saving} onClick={() => { dirty.current = false; setDraft(configuration.pending ?? configuration.active); setConflicted(false); setError(''); }}>放弃草稿并载入配置</Button></div>}{error && <ErrorNotice error={error} />}</> : <small>尚未取得连接配置，请检查连接。</small>;
+}
+
+export function DshSetupDisclosure({ agent, onConfigured }: { agent: Agent; onConfigured(configuration: DshConfiguration): void }) {
+  const disclosure = useRef<HTMLDetailsElement>(null);
+  const missingPreset = agent.reason === 'preset-not-configured' || agent.configuration?.active.codingPreset === null;
+  return <>{(missingPreset || agent.reason === 'native-tool-policy-unverified') && <Button compact aria-label="选择 DSH 任务预设" onClick={() => {
+    if (!disclosure.current) return;
+    disclosure.current.open = true;
+    disclosure.current.querySelector<HTMLButtonElement>('button[aria-label="任务预设"]')?.focus();
+  }}>选择任务预设</Button>}<details ref={disclosure} className="agent-setup-disclosure"><summary>连接设置</summary><DshSetupPanel agent={agent} onConfigured={onConfigured} /></details></>;
 }
 
 type AgentRuntimeDraft = Required<Pick<AgentRuntimeInput, 'enabled' | 'runtimePath' | 'nodePath' | 'model' | 'baseUrl' | 'apiKey'>> & Pick<AgentRuntimeInput, 'authMode' | 'servicePreset' | 'providerId' | 'methodId'>;

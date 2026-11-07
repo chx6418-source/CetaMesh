@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { agentProviderError, defineAgentProvider } from './agent-provider.js';
+import { agentProviderError, defineAgentProvider, isAgentCreationPreflightFailure } from './agent-provider.js';
 import { cleanupStagingWorkspace, collectStagedChanges, createStagingWorkspace, refreshStagingBaseline } from '../workspace/staging.js';
 
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -17,7 +17,7 @@ function withTurnFailure(item, event, message, code = 'WORKSPACE_IMPORT_FAILED')
 /** Preserve the DSH protocol while staging all Task writes for Capability Broker import. */
 export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, listWorkspaceRoots = () => [],
   excludedRoots = [], stagingRoot = null, createStage = createStagingWorkspace,
-  applyChanges, approvalStatus = () => null, cancelApproval = async () => ({ cancelled: false }), log = () => {} } = {}) {
+  applyChanges, approvalStatus = () => null, cancelApproval = async () => ({ cancelled: false }), log = () => {}, shutdownTimeoutMs = 3000 } = {}) {
   if (!provider || typeof provider.createSession !== 'function' || typeof provider.follow !== 'function') {
     throw agentProviderError('INVALID_PARAMS', 'A DSH Agent Provider is required for Task staging');
   }
@@ -25,12 +25,42 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
     throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', 'DSH Task staging requires Task resolution and Capability Broker import');
   }
   const sessions = new Map();
+  const pendingCreations = new Set();
+  let closing = false, shutdownWork = null;
+  const assertOpen = () => { if (closing) throw agentProviderError('PROVIDER_SHUTTING_DOWN', 'DSH Task Provider is shutting down'); };
   const baseCapabilities = provider.capabilities();
 
   function requireSession(sessionId) {
+    assertOpen();
     const session = sessions.get(String(sessionId ?? ''));
     if (!session || session.closed) throw agentProviderError('SESSION_NOT_FOUND', 'DSH Task staging session is not available');
     return session;
+  }
+
+  function ownSession(creation, sessionId) {
+    if (sessions.has(sessionId)) throw agentProviderError('DSH_SESSION_ID_CONFLICT', 'DSH returned a Session identity already owned by another creation');
+    creation.sessionId = sessionId;
+    const session = { id: sessionId, taskId: creation.binding.task.id, workspaceId: creation.binding.workspace.id,
+      stage: creation.stage, waitingForApproval: null, cancelRequested: false, closed: false,
+      lastImportedTurn: null, reconciledTurns: new Set(), reconciliationInFlight: new Map() };
+    sessions.set(sessionId, session);
+    return session;
+  }
+
+  async function closeOwnedSession(session) {
+    if (session.closePromise) return session.closePromise;
+    session.closed = true;
+    session.cancelRequested = true;
+    const work = (async () => {
+      if (session.waitingForApproval) await cancelApproval(session.waitingForApproval);
+      const result = await provider.closeSession({ sessionId: session.id });
+      if (result?.stopped !== true) throw agentProviderError('PROVIDER_CLOSE_UNKNOWN', 'DSH Session stop is unconfirmed; staging and ownership retained');
+      cleanupStagingWorkspace(session.stage);
+      sessions.delete(session.id);
+      return { closed: true, stopped: true, provider: provider.id, sessionId: session.id };
+    })();
+    session.closePromise = work;
+    try { return await work; } finally { session.closePromise = null; }
   }
 
   async function waitForApproval(session, approvalId, signal) {
@@ -124,13 +154,23 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
       },
       methods: {
         async createSession({ taskId, workspaceId, model, reasoningEffort, modelProvider } = {}) {
+          assertOpen();
+          const creation = { stage: null, binding: null, invocation: null, remoteAttempted: false, sessionId: null, promise: null };
+          const work = (async () => {
+          try {
+          if (provider.capabilities()?.nativePresetRequiresPolicy === true) {
+            throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', 'DSH native preset tool policy is not verified; select a verified Core tool preset');
+          }
           if (!taskId || !workspaceId) throw agentProviderError('TASK_REQUIRED', 'DSH Task sessions require a Task and Workspace');
           const binding = await resolveTaskWorkspace({ taskId: String(taskId), workspaceId: String(workspaceId) });
+          assertOpen();
           if (!binding?.task || binding.task.id !== String(taskId) || binding.task.workspaceId !== String(workspaceId)
             || binding.workspace?.id !== String(workspaceId) || typeof binding.workspace.root !== 'string') {
             throw agentProviderError('TASK_WORKSPACE_MISMATCH', 'DSH Task and Workspace binding is invalid');
           }
+          creation.binding = binding;
           const roots = await listWorkspaceRoots();
+          assertOpen();
           const stage = await createStage({
             taskId: binding.task.id,
             attemptId:binding.task.attempts?.at(-1)?.provider===provider.id?binding.task.attempts.at(-1).id:null,
@@ -141,27 +181,34 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
             additionalWorkspaceRoots: (Array.isArray(roots) ? roots : []).map(row => typeof row === 'string' ? row : row.root),
             excludedRoots
           });
-          try {
-            const created = await provider.createSession({ cwd: stage.root, model, reasoningEffort, modelProvider, purpose: 'coding' });
+          creation.stage = stage;
+          assertOpen();
+            creation.invocation = { cwd: stage.root, model, reasoningEffort, modelProvider, purpose: 'coding', requireLocalPreset: true };
+            creation.remoteAttempted = true;
+            const created = await provider.createSession(creation.invocation);
             if (!created?.sessionId) throw agentProviderError('PROVIDER_ERROR', 'DSH did not return a sessionId');
+            ownSession(creation, created.sessionId);
+            assertOpen();
             if(stage.versionContext)stage.versionContext.executorId=provider.id+':'+created.sessionId;
-            sessions.set(created.sessionId, {
-              id: created.sessionId,
-              taskId: binding.task.id,
-              workspaceId: binding.workspace.id,
-              stage,
-              waitingForApproval: null,
-              cancelRequested: false,
-              closed: false,
-              lastImportedTurn: null,
-              reconciledTurns: new Set(),
-              reconciliationInFlight: new Map()
-            });
             return { ...created, taskId: binding.task.id, workspaceId: binding.workspace.id, cwd: stage.root, versionContext:stage.versionContext };
           } catch (error) {
-            cleanupStagingWorkspace(stage);
+            if (!creation.remoteAttempted || isAgentCreationPreflightFailure(error, creation.invocation)) {
+              cleanupStagingWorkspace(creation.stage);
+              creation.remoteAttempted = false;
+            } else if (typeof error?.sessionId === 'string' && error.sessionId) {
+              ownSession(creation, error.sessionId);
+            }
+            if (creation.sessionId) {
+              try { await closeOwnedSession(sessions.get(creation.sessionId)); }
+              catch { /* Stop remains unconfirmed: keep this owned Session and its stage. */ }
+            }
             throw error;
           }
+          })();
+          creation.promise = work;
+          pendingCreations.add(creation);
+          try { return await work; }
+          finally { if (!creation.remoteAttempted || creation.sessionId) pendingCreations.delete(creation); }
         },
         async send({ sessionId, content, mode, runId, phase, onRequestId } = {}) {
           const session = requireSession(sessionId);
@@ -203,21 +250,9 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
           return provider.resume({ sessionId });
         },
         async closeSession({ sessionId } = {}) {
-          const session = requireSession(sessionId);
-          session.closed = true;
-          session.cancelRequested = true;
-          let approvalError = null;
-          if (session.waitingForApproval) {
-            try { await cancelApproval(session.waitingForApproval); }
-            catch (error) { approvalError = error; }
-          }
-          try { await provider.closeSession({ sessionId }); }
-          finally {
-            cleanupStagingWorkspace(session.stage);
-            sessions.delete(session.id);
-          }
-          if (approvalError) throw agentProviderError('WORKSPACE_IMPORT_CANCEL_FAILED', 'Pending Workspace import approval could not be revoked');
-          return { closed: true, provider: provider.id, sessionId };
+          const session = sessions.get(String(sessionId ?? ''));
+          if (!session) throw agentProviderError('SESSION_NOT_FOUND', 'DSH Task staging session is not available');
+          return closeOwnedSession(session);
         },
         async selectModel(params = {}) {
           requireSession(params.sessionId);
@@ -225,8 +260,10 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         },
         async health(options = {}) {
           const health = await provider.health(options);
-          return { ...health, provider: provider.id, taskEligible: health.ready === true && health.sessionCapable === true,
-            workspaceBoundary: 'capability-broker' };
+          const nativePolicyRequired = provider.capabilities()?.nativePresetRequiresPolicy === true;
+          return { ...health, provider: provider.id, taskEligible: !nativePolicyRequired && health.ready === true && health.sessionCapable === true,
+            ...(nativePolicyRequired && health.ready === true ? { reason: 'native-tool-policy-unverified' } : {}),
+            workspaceBoundary: nativePolicyRequired ? 'unverified' : 'capability-broker' };
         },
         async *follow({ sessionId, signal, sinceSequence } = {}) {
           const session = requireSession(sessionId);
@@ -244,22 +281,32 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         }
       }
     }),
-    async shutdown() {
-      for (const session of sessions.values()) {
-        session.closed = true;
-        session.cancelRequested = true;
-        if (session.waitingForApproval) {
-          try { await cancelApproval(session.waitingForApproval); }
-          catch (error) { log(`DSH Workspace import approval cancellation failed: ${error?.code ?? 'APPROVAL_CANCEL_FAILED'}`); }
-        }
-        try { await provider.closeSession({ sessionId: session.id }); }
-        catch (error) { log(`DSH session close failed: ${error?.code ?? 'PROVIDER_ERROR'}`); }
-        try { cleanupStagingWorkspace(session.stage); }
-        catch (error) { log(`DSH staging cleanup failed: ${error?.code ?? 'STAGING_CLEANUP_FAILED'}`); }
-      }
-      sessions.clear();
-      await provider.shutdown?.();
+    capabilities() {
+      const source = provider.capabilities();
+      return { ...source, displayName: 'DSH', workspaceBoundary: source.nativePresetRequiresPolicy === true ? 'unverified' : 'capability-broker',
+        requiresSessionCleanup: true, supportsFreshSession: true };
     },
-    _sessions: sessions
+    async shutdown() {
+      closing = true;
+      if (!shutdownWork) {
+        let nativeShutdown;
+        try { nativeShutdown = Promise.resolve(provider.shutdown?.()); }
+        catch (error) { nativeShutdown = Promise.reject(error); }
+        nativeShutdown.catch(() => {});
+        shutdownWork = (async () => {
+          await Promise.allSettled([...pendingCreations].map(row => row.promise));
+          const results = await Promise.allSettled([...sessions.values()].map(closeOwnedSession));
+          const native = await Promise.allSettled([nativeShutdown]);
+          if (pendingCreations.size || sessions.size || [...results, ...native].some(row => row.status === 'rejected')) {
+            throw agentProviderError('PROVIDER_CLOSE_UNKNOWN', 'DSH Task shutdown is unconfirmed; staging and ownership retained');
+          }
+        })().finally(() => { shutdownWork = null; });
+      }
+      let timer;
+      try { await Promise.race([shutdownWork, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(agentProviderError('PROVIDER_CLOSE_UNKNOWN', 'DSH Task creation is pending; staging retained')), Math.max(10, Math.min(30000, Number(shutdownTimeoutMs) || 3000)));
+      })]); } finally { clearTimeout(timer); }
+    },
+    _sessions: sessions, _pendingCreations: pendingCreations
   });
 }

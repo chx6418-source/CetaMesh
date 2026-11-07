@@ -107,7 +107,7 @@ async function bundle(directory) {
         if(method==='ui.agent.list'){if(window.fixtureState.failNextAgentList){window.fixtureState.failNextAgentList=false;throw new Error('Synthetic Agent list failed');}const snapshot=structuredClone(agents.map(row=>({...row,...(window.fixtureState.coldAgentDirectory&&row.id==='codex'&&params.refresh!==true?{status:'not-checked',available:null,eligible:null,taskEligible:null,authenticated:null,compatible:null,reason:'not-checked'}:{}),...window.fixtureAgentOverrides[row.id]})));if(window.fixtureState.holdNextAgentList){window.fixtureState.holdNextAgentList=false;await new Promise(resolve=>window.fixtureAgentListReleases.push(resolve));}return{agents:snapshot};}
         if(method==='ui.agent.health'){if(window.fixtureState.failNextAgentHealth){window.fixtureState.failNextAgentHealth=false;throw new Error('Synthetic Agent health failed');}const row=agents.find(item=>item.id===params.provider)||agents[0];const snapshot=structuredClone({...row,...window.fixtureAgentOverrides[row.id]});if(window.fixtureState.holdNextAgentHealth){window.fixtureState.holdNextAgentHealth=false;await new Promise(resolve=>window.fixtureAgentHealthReleases.push(resolve));}return snapshot;}
         if(method==='ui.agent.configure'){if(window.fixtureState.failNextAgentConfigure){window.fixtureState.failNextAgentConfigure=false;throw new Error('Synthetic Agent save failed');}const row=agents.find(item=>item.id===params.agentId);if(row?.id==='dsh'){row.configuration={...row.configuration,revision:row.configuration.revision+1,pending:params.config};return{provider:'dsh',supported:true,applied:false,restartRequired:true,configuration:row.configuration};}if(!row?.runtimeConfiguration)throw new Error('Unsupported fixture configuration');if(window.fixtureState.holdNextAgentConfigure){window.fixtureState.holdNextAgentConfigure=false;await new Promise(resolve=>window.fixtureAgentConfigureReleases.push(resolve));}const {apiKey,...safeConfig}=params.config;row.runtimeConfiguration={...row.runtimeConfiguration,...safeConfig,credentialConfigured:!!apiKey||row.runtimeConfiguration.credentialConfigured,revision:row.runtimeConfiguration.revision+1};return{provider:row.id,supported:true,applied:true,configuration:row.runtimeConfiguration};}
-        if(method==='ui.agent.presets')return{state:'missing',truncated:false,presets:[]};
+        if(method==='ui.agent.presets')return window.fixtureDshPresets??{state:'missing',truncated:false,presets:[]};
         if(method==='ui.agent.auth.describe')return{provider:params.provider,attemptId:null,state:'no-session',reason:'not-configured',revision:1,epoch:1};
         if(method==='ui.devices.overview')return{available:true,enabled:false,local:{id:'synthetic-local-node',name:'Synthetic Desktop',role:'desktop',transportRunning:false},peers:[{id:'synthetic-mobile-node',name:'Synthetic offline device',role:'mobile',trust:'unknown',presence:'offline',grants:[],lastSeenAt:null,lastError:'连接尚未验证'}],audit:[{at:timestamp,code:'SYNTHETIC_OFFLINE_OBSERVATION',direction:'inbound'}],truncated:false};
         if(method==='ui.workspace.list')return{workspaces:[workspace],activeId:workspace.id};if(method==='ui.workspace.open')return{workspace,activeId:workspace.id};
@@ -327,8 +327,18 @@ try {
         await pointerClick(gemini+'?.querySelector(".agent-setup-disclosure [role=status] button")','reload newer in-flight configuration');
         assert.equal(await evaluate('document.querySelector("input[aria-label=\\"模型（必填）\\"]")?.value'),'newer-during-save','explicit reload uses the newer observed revision');
         const dsh='[...document.querySelectorAll(".agent-card")].find(n=>n.querySelector("h3")?.textContent==="DSH")';
-        await pointerClick(dsh+'?.querySelector(".agent-setup-disclosure summary")','DSH setup');
+        await evaluate('(()=>{const row=window.fixture.agents.find(a=>a.id==="dsh");row.reason="preset-not-configured";row.status="needs-setup";row.configuration.active.codingPreset=null;window.fixtureDshPresets={state:"ready",truncated:false,presets:[{id:"fixture-coding",compatible:true,reason:null,verification:"local-persona-only"},{id:"standard",compatible:true,reason:null,verification:"native-persona-only"}]}})()');
+        await textClick('刷新状态');await until(dsh+'?.innerText.includes("尚未选择")','DSH missing selection');
+        assert.ok(await evaluate('!!('+dsh+'?.querySelector("button[aria-label=\\"选择 DSH 任务预设\\"]"))'),'missing DSH preset offers a direct configuration action');
+        await pointerClick(dsh+'?.querySelector("button[aria-label=\\"选择 DSH 任务预设\\"]")','choose DSH task preset');
         await until('!!('+dsh+'?.querySelector("form"))','DSH form');
+        const presetReads=await evaluate('window.fixtureCalls.filter(row=>row.method==="ui.agent.presets").length');
+        await pointerClick(dsh+'&&[...('+dsh+').querySelectorAll("form button")].find(n=>n.textContent.trim()==="刷新预设")','refresh the newly available DSH preset catalog');
+        await until('window.fixtureCalls.filter(row=>row.method==="ui.agent.presets").length>'+presetReads,'DSH preset refresh reached Core');
+        await until(dsh+'?.querySelector("button[aria-label=\\"任务预设\\"]")?.disabled===false','DSH preset catalog loaded');
+        await pointerClick(dsh+'?.querySelector("button[aria-label=\\"任务预设\\"]")','DSH task preset options');
+        assert.match(await evaluate('[...document.querySelectorAll("[role=option]")].find(n=>n.textContent.startsWith("standard"))?.textContent??""'),/工具待验证/,'native schema compatibility must not be presented as verified tool execution');
+        await pointerClick('[...document.querySelectorAll("[role=option]")].find(n=>n.textContent.trim()==="fixture-coding")','choose verified local DSH preset');
         await evaluate(dsh+'?.querySelector("form details > summary")?.scrollIntoView({block:"center",behavior:"instant"})');await delay(250);
         await pointerClick(dsh+'?.querySelector("form details > summary")','DSH advanced settings');
         await fill('input[aria-label="DSH 服务地址"]','http://127.0.0.1:3081');
@@ -337,6 +347,8 @@ try {
         assert.equal(await evaluate('document.querySelector("input[aria-label=\\"DSH 服务地址\\"]")?.value'),'http://127.0.0.1:3081','DSH failure retains draft');
         await pointerClick(dsh+'?.querySelector("form button[type=submit]")','retry DSH save');
         await until('window.fixture.agents.find(a=>a.id==="dsh").configuration.revision===2','DSH retry completed');
+        assert.equal(await evaluate('window.fixture.agents.find(a=>a.id==="dsh").configuration.pending.codingPreset'),'fixture-coding','the selected preset reaches the existing save route');
+        assert.equal(await evaluate('window.fixture.agents.find(a=>a.id==="dsh").configuration.active.codingPreset'),null,'saving does not swap an active DSH generation');
         await fill('input[aria-label="DSH 服务地址"]','http://127.0.0.1:3082');
         await evaluate('(()=>{const saved=window.fixture.agents.find(a=>a.id==="dsh").configuration;window.fixtureAgentOverrides.dsh={configuration:{...saved,revision:saved.revision+1,pending:{...saved.pending,baseUrl:"http://127.0.0.1:3083"}}}})()');
         await textClick('刷新状态');await until(dsh+'?.innerText.includes("配置已变化")','DSH configuration conflict');

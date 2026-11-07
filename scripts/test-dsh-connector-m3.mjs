@@ -132,6 +132,7 @@ const presetProvider = createDshAgentProvider({ api: {
   async callEndpoint(endpoint, args) {
     if (endpoint === 'session/create') { createdRequests.push(args.request); return { sessionId: `preset-${createdRequests.length}` }; }
     if (endpoint === 'agentPresets/list') return { presets: [{ id: 'coding-safe' }] };
+    if (endpoint === 'session/list') return { items: [] };
     return {};
   },
   async *openRemoteStream() {}

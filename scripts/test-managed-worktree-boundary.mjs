@@ -63,6 +63,7 @@ try {
     fs.mkdirSync(path.join(target.root, 'private-output')); fs.writeFileSync(path.join(target.root, 'private-output', 'secret.txt'), 'nested secret');
     const external = defineAgentProvider({ id: 'dsh-fixture', label: 'Fixture transport', methods: {
       async createSession({ cwd }) { assert.equal(fs.readFileSync(path.join(cwd, 'a.txt'), 'utf8'), 'project bytes'); return { sessionId: 'fixture-session' }; },
+      async closeSession() { return { closed: true, stopped: true }; },
       async *follow() {}
     } });
     const options = { provider: external, stagingRoot: path.join(f.base, 'stages'), excludedRoots: [f.stateDir, path.join(target.root, 'private-output')],

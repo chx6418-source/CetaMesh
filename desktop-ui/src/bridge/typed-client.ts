@@ -183,7 +183,7 @@ export interface AgentRuntimeInput {
   authMode?: 'api-key' | 'provider-login' | 'native-cli'; servicePreset?: string; providerId?: string | null; methodId?: string | null;
   enabled?: boolean; runtimePath?: string; nodePath?: string; model?: string; baseUrl?: string; apiKey?: string; executionMode?: 'native-permissions';
 }
-export interface DshPresetCatalog { state: 'ready' | 'missing' | 'unreadable' | 'outside-root' | 'loading' | 'error'; truncated: boolean; presets: { id: string; compatible: boolean; reason: string | null }[] }
+export interface DshPresetCatalog { state: 'ready' | 'missing' | 'unreadable' | 'outside-root' | 'loading' | 'error'; truncated: boolean; presets: { id: string; compatible: boolean; reason: string | null; verification?: 'local-persona-only' | 'native-persona-only' | null }[] }
 export interface DshSelection { codingPreset: string | null; socialPreset: string | null; homeDir: string | null; baseUrl: string | null }
 export interface DshConfiguration {
   version: number; revision: number; activeRevision: number; pendingRevision: number | null; restartRequired: boolean;

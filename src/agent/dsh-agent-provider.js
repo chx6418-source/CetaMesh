@@ -19,13 +19,21 @@
 //
 // rolloverStrategy：DSH 无原生压缩/续接能力，上下文临限时的推荐策略是"开新会话"。
 import crypto from 'node:crypto';
-import { agentProviderError, defineAgentProvider, normalizePromptContent, AGENT_EVENT_PROTOCOL_DSH } from './agent-provider.js';
+import { agentProviderError, agentCreationPreflightFailure, runAgentCreationPreflight, defineAgentProvider, normalizePromptContent, AGENT_EVENT_PROTOCOL_DSH } from './agent-provider.js';
 import { fetchDshModelCatalog, selectDshSessionModel } from '../dsh-model-selection.js';
 import { createDshFollowHub } from './dsh-follow-hub.js';
 
 const CALL_TIMEOUT_MS = 15_000;
 const LIST_TIMEOUT_MS = 10_000;
 const HEALTH_TIMEOUT_MS = 3_000;
+function sessionRows(value) {
+  if (!Array.isArray(value?.items) || value.items.some(row => !row || typeof row.sessionId !== 'string'
+    || !row.sessionId || row.sessionId.length > 240 || /[\r\n\0]/.test(row.sessionId) || typeof row.running !== 'boolean')
+    || new Set(value.items.map(row => row.sessionId)).size !== value.items.length) {
+    throw agentProviderError('DSH_PROTOCOL_UNVERIFIED', 'DSH Session list does not match the supported protocol');
+  }
+  return value.items;
+}
 
 /**
  * 传输层失败 → PROVIDER_UNAVAILABLE（DSH 未启动/断连，调用方据此优雅降级）；
@@ -38,7 +46,7 @@ function wrapDshError(error, label) {
   return agentProviderError(transport ? 'PROVIDER_UNAVAILABLE' : 'PROVIDER_ERROR', `${label}：${message}`, { cause: error });
 }
 
-export function createDshAgentProvider({ api, defaults = {}, log = () => {}, presetPolicy = null } = {}) {
+export function createDshAgentProvider({ api, defaults = {}, log = () => {}, presetPolicy = null, shutdownTimeoutMs = 3000 } = {}) {
   if (!api || typeof api.callEndpoint !== 'function' || typeof api.openRemoteStream !== 'function') {
     throw new Error('createDshAgentProvider 需要注入 dsh-client.js 的 NodeApiClient 实例');
   }
@@ -49,6 +57,12 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
   };
   const followHub = createDshFollowHub({ api });
   const modelSessions = new Map();
+  const pendingCreations = new Set(), unclaimedSessions = new Set(), closingSessions = new Set(), closedSessions = new Set(), closeRequests = new Map();
+  let closing = false, shutdownWork = null;
+  const assertOpen = sessionId => {
+    if (closing) throw agentProviderError('PROVIDER_SHUTTING_DOWN', 'DSH Provider is shutting down');
+    if (sessionId && closingSessions.has(sessionId)) throw agentProviderError('SESSION_NOT_FOUND', 'DSH Session is closing');
+  };
   let modelCatalog=null,modelCatalogAt=0,modelCatalogRead=null;
   const nativeValue=(value,max=256)=>typeof value==='string'&&value.length>0&&value.length<=max&&!/[\x00-\x1f\x7f]/.test(value);
   const modelState=sid=>{
@@ -91,7 +105,7 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
     } catch (error) {
       throw wrapDshError(error, '读取 DSH 会话列表失败');
     }
-    const items = Array.isArray(value?.items) ? value.items : [];
+    const items = sessionRows(value);
     return items.find((item) => item?.sessionId === sessionId) ?? null;
   }
 
@@ -123,19 +137,36 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
       }
     },
     methods: {
-      async createSession({ cwd, model, reasoningEffort, modelProvider, purpose } = {}) {
+      async createSession(invocation = {}) {
+        if (closing) throw agentCreationPreflightFailure(invocation, agentProviderError('PROVIDER_SHUTTING_DOWN', 'DSH Provider is shutting down'));
+        const creation = { remoteAttempted: false, sessionId: null, promise: null };
+        const work = (async () => {
+        const { cwd, model, reasoningEffort, modelProvider, purpose, requireLocalPreset = false } = invocation;
         const request = {};
+        await runAgentCreationPreflight(invocation, async () => {
+        assertOpen();
         if (cwd !== undefined && cwd !== null && String(cwd).trim()) request.cwd = String(cwd);
         if (presetPolicy && !purpose) throw agentProviderError('INVALID_PARAMS', 'DSH Session purpose must be coding or social');
-        if (presetPolicy) request.agentPreset = presetPolicy.require(purpose);
+        if (presetPolicy) request.agentPreset = presetPolicy.requireVerified
+          ? await presetPolicy.requireVerified(purpose, { localOnly: requireLocalPreset }) : presetPolicy.require(purpose);
+        assertOpen();
+        });
+        if (closing) throw agentCreationPreflightFailure(invocation, agentProviderError('PROVIDER_SHUTTING_DOWN', 'DSH Provider is shutting down'));
         let value;
         try {
+          creation.remoteAttempted = true;
           value = await api.callEndpoint('session/create', { request }, AbortSignal.timeout(CALL_TIMEOUT_MS));
         } catch (error) {
           throw wrapDshError(error, '创建 DSH 会话失败');
         }
         const sessionId = String(value?.sessionId ?? '');
         if (!sessionId) throw agentProviderError('PROVIDER_ERROR', 'DSH 未返回 sessionId');
+        if (modelSessions.has(sessionId) || unclaimedSessions.has(sessionId) || closingSessions.has(sessionId) || closedSessions.has(sessionId)) {
+          throw agentProviderError('DSH_SESSION_ID_CONFLICT', 'DSH returned a Session identity already owned by this Provider');
+        }
+        creation.sessionId = sessionId;
+        unclaimedSessions.add(sessionId);
+        assertOpen();
         // 模型绑定：显式入参优先，其次 bridge 默认模型（与 QQ 桥接 ensureSessionModel 行为一致）。
         // 未绑定成功的会话不能对外返回 Ready；尽力归档失败的半初始化 session 后报错。
         const wantModel = model !== undefined && model !== null ? String(model) : dshDefaults.model;
@@ -149,23 +180,38 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
               model: wantModel,
               reasoningEffort: desiredReasoning
             }, { timeoutMs: CALL_TIMEOUT_MS, log });
+            assertOpen();
             bound=confirmedSelection(result,{model:wantModel,modelProvider:applied.provider,reasoningEffort:desiredReasoning});
             modelState(sessionId).selection=bound;
           } catch (error) {
             try {
-              await api.callEndpoint('workspace/archiveSession', { request: { sessionId } }, AbortSignal.timeout(LIST_TIMEOUT_MS));
+              await contract.closeSession({ sessionId });
             } catch (cleanupError) {
               log(`DSH 模型绑定失败后的临时会话清理失败（${sessionId}）：${cleanupError?.code ?? 'cleanup-error'}`);
             }
-            modelSessions.delete(sessionId);
+            if (closing) throw agentProviderError('PROVIDER_SHUTTING_DOWN', 'DSH Provider closed during model binding', { cause: error });
             throw agentProviderError('MODEL_BIND_FAILED', `DSH Agent 模型绑定失败，未创建可用会话：${String(error?.message ?? error)}`, { cause: error });
           }
         }
-        return { sessionId, provider: 'dsh', model: bound?.model ?? null, modelBindingError: null,modelControl:await modelControl(sessionId) };
+        assertOpen();
+        const control = await modelControl(sessionId);
+        assertOpen();
+        unclaimedSessions.delete(sessionId); // Ownership transfers only with the ready result.
+        return { sessionId, provider: 'dsh', model: bound?.model ?? null, modelBindingError: null, modelControl: control };
+        })();
+        creation.promise = work;
+        pendingCreations.add(creation);
+        try { return await work; }
+        catch (error) { if (creation.sessionId) error.sessionId = creation.sessionId; throw error; }
+        finally {
+          if (!creation.remoteAttempted || creation.sessionId) pendingCreations.delete(creation);
+          // A failed remote create without an identity remains owned and unreplayable.
+        }
       },
 
       async send({ sessionId, content, mode = 'queue', onRequestId } = {}) {
         const sid = requireSessionId(sessionId);
+        assertOpen(sid);
         const configuration=modelState(sid);
         if(configuration.configuring)throw agentProviderError('CONFIG_BUSY','DSH model configuration is awaiting acknowledgement');
         if(configuration.unknown)throw agentProviderError('AGENT_CONFIGURATION_UNKNOWN','DSH configuration outcome is unknown; reconcile the session before dispatch');
@@ -248,17 +294,30 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
 
       async closeSession({ sessionId } = {}) {
         const sid = requireSessionId(sessionId);
+        if (closedSessions.has(sid)) return { closed: true, stopped: true, sessionId: sid };
+        if (closeRequests.has(sid)) return closeRequests.get(sid);
+        closingSessions.add(sid);
+        const work = (async () => {
         try {
+          await contract.cancel({ sessionId: sid });
+          const item = await findSessionItem(sid);
+          if (!item || item.running !== false) throw agentProviderError('PROVIDER_CLOSE_UNKNOWN', 'DSH Session stop is not confirmed');
           await api.callEndpoint('workspace/archiveSession', { request: { sessionId: sid } }, AbortSignal.timeout(LIST_TIMEOUT_MS));
           followHub.closeSession(sid);
           modelSessions.delete(sid);
-          return { closed: true, sessionId: sid };
+          unclaimedSessions.delete(sid);
+          closedSessions.add(sid);
+          return { closed: true, stopped: true, sessionId: sid };
         } catch (error) {
+          if (error?.code === 'PROVIDER_CLOSE_UNKNOWN') throw error;
           if (String(error?.message ?? error).includes('session/not-found')) {
             throw agentProviderError('SESSION_NOT_FOUND', `会话不存在：${sid}`, { cause: error });
           }
           throw wrapDshError(error, '关闭会话失败');
         }
+        })();
+        closeRequests.set(sid, work);
+        try { return await work; } finally { closeRequests.delete(sid); }
       },
 
       // 直接返回 async iterable（不包 async 包装，消费方 for await 即可）：
@@ -316,15 +375,23 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
           await api.callEndpoint('settings/describe', {}, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
           settingsVerified = true;
           stage = 'session-api';
-          await api.callEndpoint('session/list', { _request: {} }, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
-          const preset = presetPolicy?.inspect('coding') ?? null;
-          let presetLoaded = null;
+          sessionRows(await api.callEndpoint('session/list', { _request: {} }, AbortSignal.timeout(HEALTH_TIMEOUT_MS)));
+          const preset = presetPolicy?.inspectVerified ? await presetPolicy.inspectVerified('coding') : presetPolicy?.inspect('coding') ?? null;
+          let presetLoaded = preset?.loaded === true ? true : null;
+          let presetBroken = false;
           let discoveryError = null;
           stage = 'native-loading';
-          if (preset?.compatible) {
+          if (preset?.compatible && presetLoaded !== true) {
             try {
               const listed = await api.callEndpoint('agentPresets/list', {}, AbortSignal.timeout(HEALTH_TIMEOUT_MS));
-              if (Array.isArray(listed?.presets)) presetLoaded = listed.presets.some(row => row?.id === preset.id);
+              if (Array.isArray(listed?.presets)) {
+                const matched = listed.presets.filter(row => row?.id === preset.id);
+                if (matched.length > 1 || matched.some(row => row.broken !== undefined && typeof row.broken !== 'string')) discoveryError = diagnostic({ code: 'DSH_PRESET_LIST_UNVERIFIED' });
+                else {
+                  presetBroken = matched.length === 1 && matched[0].broken !== undefined;
+                  presetLoaded = matched.length === 1 && !presetBroken;
+                }
+              }
               else discoveryError = diagnostic({ code: 'DSH_PRESET_LIST_UNVERIFIED' });
             } catch (error) {
               log(`DSH preset discovery failed: ${safeCode(error)}`);
@@ -332,7 +399,7 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
             }
           }
           const presetReady = !preset || (preset.compatible && presetLoaded === true);
-          const presetReason = preset && !preset.compatible ? preset.reason
+          const presetReason = presetBroken ? 'native-preset-broken' : preset && !preset.compatible ? preset.reason
             : preset && presetLoaded === false ? 'preset-not-loaded' : preset && presetLoaded === null ? 'preset-load-unknown' : null;
           const authRejected = discoveryError?.code === 'DSH_AUTHENTICATION_FAILED';
           return { status: presetReady ? 'available' : 'needs-setup', available: !authRejected, provider: 'dsh', processAlive: null,
@@ -341,7 +408,7 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
             diagnostic: discoveryError ?? { stage: presetReason === 'preset-not-configured' ? 'preset-selection' : presetReason === 'preset-not-loaded' ? 'native-loading' : presetReason ? 'preset-schema' : 'ready', code: null, retryable: false, checkedAt },
             preset: preset ? { purpose: 'coding', id: preset.id, compatible: preset.compatible, loaded: presetLoaded,
               loadState: presetLoaded === true ? 'loaded' : presetLoaded === false ? 'not-loaded' : 'unknown', reason: presetReason,
-              verification: 'local-persona-only' } : null,
+              verification: preset.verification ?? 'local-persona-only' } : null,
             reason: authRejected ? 'authentication-required' : discoveryError?.code === 'DSH_AUTH_MATERIAL_MISSING' ? 'authentication-material-missing' : presetReason };
         } catch (error) {
           const code = String(error?.code ?? '');
@@ -362,5 +429,22 @@ export function createDshAgentProvider({ api, defaults = {}, log = () => {}, pre
       }
     }
   });
-  return Object.freeze({ ...contract, shutdown: () => followHub.shutdown() });
+  return Object.freeze({ ...contract, capabilities: () => ({ ...contract.capabilities(),
+    nativePresetRequiresPolicy: presetPolicy?.needsNativeToolPolicy?.() === true }),
+    async shutdown() {
+      closing = true;
+      followHub.shutdown();
+      if (!shutdownWork) shutdownWork = (async () => {
+        await Promise.allSettled([...pendingCreations].map(row => row.promise));
+        const results = await Promise.allSettled([...unclaimedSessions].map(sessionId => contract.closeSession({ sessionId })));
+        if (pendingCreations.size || unclaimedSessions.size || results.some(row => row.status === 'rejected')) {
+          throw agentProviderError('PROVIDER_CLOSE_UNKNOWN', 'DSH creation or stop is unconfirmed; ownership retained');
+        }
+      })().finally(() => { shutdownWork = null; });
+      let timer;
+      try { await Promise.race([shutdownWork, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(agentProviderError('PROVIDER_CLOSE_UNKNOWN', 'DSH shutdown is pending; ownership retained')), Math.max(10, Math.min(30000, Number(shutdownTimeoutMs) || 3000)));
+      })]); } finally { clearTimeout(timer); }
+    },
+    _pendingCreations: pendingCreations, _unclaimedSessions: unclaimedSessions });
 }

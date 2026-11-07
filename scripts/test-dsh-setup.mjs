@@ -10,6 +10,7 @@ import { createAgentService } from '../src/agent/service.js';
 import { createAgentProviderRegistry } from '../src/agent/registry.js';
 import { createAgentBroker } from '../src/agent/broker.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
+await import('./helpers/dsh-wire-compatibility-fixtures.mjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-dsh-setup-'));
 const home = path.join(root, 'home');
@@ -89,13 +90,19 @@ try {
     if (endpoint === 'agentPresets/list') {
       if (listMode === 'timeout') throw Object.assign(new Error('never expose token'), { code: 'DSH_REQUEST_TIMEOUT' });
       if (listMode === 'auth') throw Object.assign(new Error('expired'), { code: 'DSH_AUTHENTICATION_FAILED' });
-      return listMode === 'malformed' ? {} : { presets: listMode === 'loaded' ? [{ id: 'coding-a' }] : [] };
+      return listMode === 'malformed' ? {} : { presets: listMode === 'loaded' ? [{ id: 'coding-a' }]
+        : listMode === 'broken' ? [{ id: 'coding-a', broken: 'synthetic activation failure' }] : [] };
     }
     if (endpoint === 'session/create') return { sessionId: 'synthetic-session' };
+    if (endpoint === 'session/list') return { items: [] };
     return {};
   }, async *openRemoteStream() {} };
   const provider = createDshAgentProvider({ api, defaults: { model: null }, presetPolicy: createDshPresetPolicy({ coding: 'coding-a', dshHome: home }) });
   assert.equal((await provider.health()).ready, true);
+  listMode = 'broken';
+  const brokenNative = await provider.health();
+  assert.equal(brokenNative.ready, false, 'a registered preset with a current native activation failure is not loaded');
+  assert.equal(brokenNative.preset.reason, 'native-preset-broken');
   listMode = 'absent';
   assert.equal((await provider.health()).preset.loaded, false);
   listMode = 'timeout';
@@ -142,3 +149,4 @@ try {
   assert.equal(corrupt.active.codingPreset, null, 'corrupt override never silently falls back to stale executable selection');
   console.log('DSH setup: production parser, configuration generation, native discovery and Owner DTO contracts PASS');
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
+await import('./helpers/dsh-native-preset-fixtures.mjs');

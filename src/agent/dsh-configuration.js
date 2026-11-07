@@ -1,5 +1,6 @@
 import path from 'node:path';
 import os from 'node:os';
+import fs from 'node:fs';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { agentProviderError } from './agent-provider.js';
 import { inspectDshPreset, validDshPresetId, listDshPresets } from './dsh-preset-policy.js';
@@ -20,6 +21,17 @@ function normalize(value) {
     result.baseUrl = url.href.replace(/\/$/, '');
   } catch (error) { throw agentProviderError('INVALID_PARAMS', 'Invalid DSH baseUrl'); }
   return result;
+}
+
+function sameHome(left, right) {
+  const first = path.resolve(left), second = path.resolve(right);
+  if (first === second) return true;
+  if (process.platform !== 'win32' || first.toLowerCase() !== second.toLowerCase()) return false;
+  try {
+    const a = fs.statSync(first, { bigint: true }), b = fs.statSync(second, { bigint: true });
+    return a.isDirectory() && b.isDirectory() && a.dev !== 0n && a.ino !== 0n
+      && a.dev === b.dev && a.ino === b.ino;
+  } catch { return false; }
 }
 
 // One versioned source overrides the read-only legacy config.dsh. Saving never
@@ -46,9 +58,11 @@ export function createDshConfiguration({ legacy = {}, stateDir, configFile = nul
   const activeRevision = revision;
   const activeSource = source;
   let pending = null;
+  let nativePresets = null;
   const home = active.homeDir || env?.DSH_HOME || path.join(os.homedir(), '.dsh');
   return {
     active: Object.freeze({ ...active, homeDir: home, authCookie: legacy.authCookie || null }),
+    bindNativePresets(value) { if (nativePresets) throw agentProviderError('DSH_CONFIG_INVALID', 'Native preset source is already bound'); nativePresets = value; },
     describe() {
       return { version: 1, revision, activeRevision, pendingRevision: pending ? revision : null,
         restartRequired: Boolean(pending), source: activeSource, loadError,
@@ -60,27 +74,40 @@ export function createDshConfiguration({ legacy = {}, stateDir, configFile = nul
     listPresets({ homeDir } = {}) {
       if (homeDir !== undefined && homeDir !== null && (typeof homeDir !== 'string' || !path.isAbsolute(homeDir) || homeDir.length > 4096)) throw agentProviderError('INVALID_PARAMS', 'DSH homeDir must be an absolute local path');
       const selected = homeDir === undefined ? (pending?.homeDir ?? home) : homeDir || env?.DSH_HOME || path.join(os.homedir(), '.dsh');
-      return listDshPresets({ dshHome: selected });
+      const local = listDshPresets({ dshHome: selected });
+      return nativePresets && sameHome(selected, home) ? nativePresets.list(local) : local;
     },
     configure(input) {
       if (!file) throw agentProviderError('CONFIGURATION_UNSUPPORTED', 'Connector persistence is unavailable');
       if (!input || typeof input !== 'object' || Array.isArray(input)) throw agentProviderError('INVALID_PARAMS', 'DSH configuration must be an object');
       const candidate = normalize({ ...(pending ?? active), ...input });
+      const candidateHome = candidate.homeDir || env?.DSH_HOME || path.join(os.homedir(), '.dsh');
       if (legacy.authCookie && (candidate.baseUrl !== active.baseUrl
-        || (candidate.homeDir || env?.DSH_HOME || path.join(os.homedir(), '.dsh')) !== home)) {
+        || !sameHome(candidateHome, home))) {
         throw agentProviderError('DSH_AUTH_SCOPE_CHANGE_REQUIRES_REVIEW', 'Explicit authentication is pinned to its existing endpoint and home; review credential scope before changing either');
       }
       const checks = ['coding', 'social'].map(purpose => ({ purpose, ...inspectDshPreset({ id: candidate[`${purpose}Preset`], dshHome: candidate.homeDir || env?.DSH_HOME }) }));
+      const expectedRevision = revision;
+      const save = checks => {
       // Missing selections may be saved deliberately, but selected files must be
       // verified. Native loading is checked after an explicit Core restart.
       if (checks.some(check => candidate[`${check.purpose}Preset`] && !check.compatible)) {
         throw agentProviderError('DSH_PRESET_INCOMPATIBLE', `DSH preset preflight failed: ${checks.filter(c => !c.compatible && candidate[`${c.purpose}Preset`]).map(c => `${c.purpose}:${c.reason}`).join(', ')}`);
       }
+      if (revision !== expectedRevision) throw agentProviderError('DSH_CONFIG_CONFLICT', 'DSH configuration changed during preset validation');
       const next = Math.max(revision, activeRevision) + 1;
       try { writeJsonAtomic(file, { version: 1, revision: next, ...candidate }); }
       catch (error) { throw agentProviderError('DSH_CONFIG_WRITE_FAILED', 'Could not save DSH connector configuration', { cause: error }); }
       revision = next; pending = candidate;
       return { provider: 'dsh', supported: true, applied: false, restartRequired: true, configuration: this.describe(), preflight: checks };
+      };
+      const sameSource = candidate.baseUrl === active.baseUrl
+        && sameHome(candidateHome, home);
+      if (nativePresets && sameSource && checks.some(check => check.reason === 'preset-file-not-found')) {
+        return Promise.all(checks.map(async check => check.reason === 'preset-file-not-found'
+          ? { purpose: check.purpose, ...await nativePresets.inspect(candidate[`${check.purpose}Preset`]) } : check)).then(save);
+      }
+      return save(checks);
     }
   };
 }

@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { parseDocument, isAlias, isCollection, isPair } from 'yaml';
 import { agentProviderError } from './agent-provider.js';
 
@@ -32,6 +33,16 @@ export function inspectDshPreset({ id, dshHome } = {}) {
   } catch (error) {
     return { compatible: false, reason: error?.code === 'ENOENT' ? 'preset-file-not-found' : 'preset-file-unreadable' };
   } finally { if (fd !== undefined) fs.closeSync(fd); }
+  return inspectDshPresetContent(source);
+}
+
+// The same bounded persona check accepts a local file or an authenticated native
+// read document. Compatibility describes schema only, never tool authority.
+export function inspectDshPresetContent(content, verification = 'local-persona-only') {
+  if (typeof content !== 'string' || Buffer.byteLength(content, 'utf8') > MAX_PRESET_BYTES) {
+    return { compatible: false, reason: 'preset-file-too-large' };
+  }
+  const source = content.replace(/^\uFEFF/, '');
   try {
     const doc = parseDocument(source, { schema: 'core', uniqueKeys: true, strict: true });
     if (doc.errors.length) return { compatible: false, reason: 'preset-yaml-invalid' };
@@ -52,7 +63,8 @@ export function inspectDshPreset({ id, dshHome } = {}) {
     if (persona.length !== 1 || persona[0].name !== '@deepseek-ai/dsh-persona') return { compatible: false, reason: 'preset-schema-unverified' };
     const prefix = persona[0].config?.prefix;
     const compatible = typeof prefix === 'string' && prefix.trim().length > 0;
-    return { compatible, reason: compatible ? null : 'persona-prefix-required', verification: 'local-persona-only' };
+    return { compatible, reason: compatible ? null : 'persona-prefix-required', verification,
+      contentFingerprint: crypto.createHash('sha256').update(source, 'utf8').digest('hex') };
   } catch (error) {
     return { compatible: false, reason: 'preset-yaml-limits-exceeded' };
   }
@@ -92,6 +104,26 @@ export function createDshPresetPolicy(config = {}) {
       const result = this.inspect(purpose);
       if (!result.compatible) throw agentProviderError('DSH_PRESET_INCOMPATIBLE', `DSH ${purpose} preset is not verified: ${result.reason}`);
       return result.id;
+    },
+    async inspectVerified(purpose = 'coding', { localOnly = false } = {}) {
+      const local = this.inspect(purpose);
+      if (!config.nativePresets || !local.compatible && (localOnly || local.reason !== 'preset-file-not-found')) return local;
+      const native = await config.nativePresets.inspect(local.id);
+      if (!local.compatible) return { purpose, id: local.id, ...native };
+      if (!native.compatible) return { ...local, compatible: false, reason: native.reason, loaded: false };
+      if (native.contentFingerprint !== local.contentFingerprint) {
+        return { ...local, compatible: false, reason: 'native-preset-document-mismatch', loaded: false };
+      }
+      return { ...local, loaded: true };
+    },
+    async requireVerified(purpose = 'coding', options) {
+      const result = await this.inspectVerified(purpose, options);
+      if (!result.compatible) throw agentProviderError('DSH_PRESET_INCOMPATIBLE', `DSH ${purpose} preset is not verified: ${result.reason}`);
+      return result.id;
+    },
+    needsNativeToolPolicy() {
+      const local = this.inspect('coding');
+      return Boolean(local.id && local.reason === 'preset-file-not-found' && config.nativePresets);
     }
   };
 }

@@ -97,6 +97,11 @@ export const dateLabel = (value: string | number | null | undefined) => {
 export function dshSetupReasonLabel(reason: string | null | undefined) {
   const messages: Record<string, string> = {
     'preset-not-configured': '尚未选择编程预设，请配置 DSH 编程预设后重新检查。',
+    'native-preset-broken': 'DSH 报告此预设加载失败，请在 DSH 中修复后重新检查。',
+    'native-preset-document-unverified': 'DSH 返回的预设文档与所选身份不一致，已保留原配置，请重新检查连接。',
+    'native-preset-document-mismatch': 'DSH 实际加载的同名预设与本机文件不同，暂不能创建任务会话。请在 DSH 核对预设来源后重新检查，或选择已就绪的其他执行器。',
+    'native-preset-discovery-unavailable': '无法读取 DSH 原生预设文档，请检查服务与版本后刷新预设。',
+    'native-tool-policy-unverified': '原生预设格式已验证；此预设的工具调用尚未接入 Core 必经审批，暂不能执行任务。请使用 CetaMesh 默认模型或已就绪的 Codex。',
     'preset-file-not-found': '找不到预设文件，请检查 DSH 目录和预设名称。',
     'preset-file-unreadable': '无法读取预设文件，请检查本地文件权限。',
     'preset-file-too-large': '预设文件过大，请缩小文件后重新检查。',

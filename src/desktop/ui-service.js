@@ -1547,7 +1547,8 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (p.provider !== 'dsh') throw uiError('INVALID_PARAMS', 'Preset discovery is available for DSH only');
       const result = await agent('agent.presets.list', { provider: 'dsh', homeDir: p.homeDir });
       return { state: string(result.state, 30), truncated: result.truncated === true,
-        presets: (result.presets ?? []).slice(0, 200).map(row => ({ id: string(row.id, 100), compatible: row.compatible === true, reason: string(row.reason, 100) || null })) };
+        presets: (result.presets ?? []).slice(0, 200).map(row => ({ id: string(row.id, 100), compatible: row.compatible === true, reason: string(row.reason, 100) || null,
+          verification: ['local-persona-only', 'native-persona-only'].includes(row.verification) ? row.verification : null })) };
     },
     'ui.agent.configure': async p => {
       const provider = string(p.agentId ?? p.provider, 80);
