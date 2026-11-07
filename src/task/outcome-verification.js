@@ -6,8 +6,9 @@ const review = (kind, reason) => ({ status: 'NEEDS_REVIEW', kind, evidenceEventI
 const verified = (kind, rows) => ({ status: 'VERIFIED', kind,
   evidenceEventIds: rows.map(row => row.eventId), reasons: [] });
 
-/** Read-only check of observed Task evidence. It never changes Task status or grants. */
-export function verifyTaskOutcome(task, { kind, expectedFile, expectedSha256, expectedCapability } = {},
+/** Read-only evidence check; current-code callers must additionally verify their file/test contract.
+ * The opt-in current execution boundary does not change historical/Owner review semantics. */
+export function verifyTaskOutcome(task, { kind, expectedFile, expectedSha256, expectedCapability, requireCurrentCodeEvidence = false } = {},
   { workspaceRoot = null, verifiedImportEventIds = null } = {}) {
   if (!task || !['running', 'waiting', 'completed'].includes(task.status)) return review(kind, 'TASK_NOT_ACTIVE');
   if (!Array.isArray(task.acceptance) || !task.acceptance.length || task.acceptance.some(item => item.met !== true)) {
@@ -18,18 +19,33 @@ export function verifyTaskOutcome(task, { kind, expectedFile, expectedSha256, ex
     return review(kind, 'OUTCOME_UNKNOWN');
   }
   if (kind === 'code') {
+    if (typeof requireCurrentCodeEvidence !== 'boolean') return review(kind, 'CURRENT_EVIDENCE_REQUIREMENT_INVALID');
+    const observed = task.executionObservation;
+    const current = row => row?.provider === observed?.provider && row?.sessionId === observed?.sessionId
+      && row?.runId === observed?.runId && row?.phase === 'user';
+    if (requireCurrentCodeEvidence === true && (!observed?.runId || !observed.provider || !observed.sessionId
+      || observed.state !== 'awaiting-review' || observed.provider !== task.currentAgent?.provider
+      || observed.sessionId !== task.currentAgent?.sessionId)) return review(kind, 'CURRENT_EXECUTION_NOT_SETTLED');
     const diffIndex = evidence.findLastIndex(item => item.capability === 'git.diff');
     const currentImports=Array.isArray(verifiedImportEventIds)?evidence.filter(row=>verifiedImportEventIds.includes(row.eventId)&&row.source==='core-import'&&row.status==='completed'):[];
     const changeProof=diffIndex>=0&&evidence[diffIndex].status==='completed'&&evidence[diffIndex].hasChanges===true?[evidence[diffIndex]]:currentImports;
     if(!changeProof.length)return review(kind,'DIFF_NOT_VERIFIED');
+    if(requireCurrentCodeEvidence===true&&changeProof.some(row=>!current(row)))return review(kind,'CURRENT_CHANGE_NOT_VERIFIED');
     const proofIndex=Math.max(...changeProof.map(row=>evidence.indexOf(row)));
     const mutations = new Set(['filesystem.write', 'git.commit', 'workspace.apply', 'git.apply', 'git.stage']);
     if (evidence.slice(proofIndex + 1).some(item => item.status === 'completed' && mutations.has(item.capability))) {
       return review(kind, 'CODE_CHANGED_AFTER_DIFF');
     }
-    const testIndex=evidence.findLastIndex(item=>item.capability==='test.run');
+    // Core records the actual runner result before Managed emits its display
+    // receipt. The display receipt can agree with, but cannot replace, proof.
+    const testIndex=evidence.findLastIndex(item=>item.capability==='test.run'
+      &&(!requireCurrentCodeEvidence||item.source==='core-test'));
     const test=evidence[testIndex];
     if(test?.status!=='completed'||test.exitCode!==0)return review(kind,'TEST_NOT_VERIFIED');
+    if(requireCurrentCodeEvidence===true&&(!current(test)||test.source!=='core-test'
+      ||!/^[a-f0-9]{64}$/.test(test.resultSha256??'')))return review(kind,'CURRENT_CORE_TEST_NOT_VERIFIED');
+    if(requireCurrentCodeEvidence===true&&evidence.slice(testIndex+1).some(row=>row.capability==='test.run'
+      &&(!current(row)||row.status!=='completed'||row.exitCode!==0)))return review(kind,'LATER_TEST_NOT_VERIFIED');
     if(evidence.slice(testIndex+1).some(item=>item.status==='completed'&&mutations.has(item.capability)))return review(kind,'CODE_CHANGED_AFTER_TEST');
     return verified(kind,[...changeProof,test]);
   }

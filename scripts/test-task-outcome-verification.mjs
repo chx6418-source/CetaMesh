@@ -48,6 +48,42 @@ try {
   assert.equal(verifyTaskOutcome(task, { kind: 'code' }, { workspaceRoot: root }).status, 'NEEDS_REVIEW', 'an unresolved side effect blocks automatic verification');
   task.executionEvidence.pop();
 
+  const currentCodeTask = {
+    ...task, currentAgent: { provider: 'cetamesh', sessionId: 'current-session' },
+    executionObservation: { provider: 'cetamesh', sessionId: 'current-session', runId: 'current-run', state: 'awaiting-review' },
+    executionEvidence: [
+      { eventId: 'current-diff', capability: 'git.diff', status: 'completed', hasChanges: true,
+        provider: 'cetamesh', sessionId: 'current-session', runId: 'current-run', phase: 'user' },
+      { eventId: 'current-test', capability: 'test.run', status: 'completed', exitCode: 0,
+        provider: 'cetamesh', sessionId: 'current-session', runId: 'current-run', phase: 'user',
+        source: 'core-test', resultSha256: 'a'.repeat(64) }
+    ]
+  };
+  const strict = value => verifyTaskOutcome(value, { kind: 'code', requireCurrentCodeEvidence: true }, { workspaceRoot: root });
+  assert.equal(strict(currentCodeTask).status, 'VERIFIED');
+  const projectedTest = { ...currentCodeTask.executionEvidence[1], eventId: 'tool-result', source: undefined, resultSha256: undefined };
+  assert.equal(strict({ ...currentCodeTask, executionEvidence: [...currentCodeTask.executionEvidence, projectedTest] }).status,
+    'VERIFIED', 'the current successful Core receipt survives its matching presentation result');
+  for (const patch of [{ exitCode: 1 }, { status: 'failed' }, { runId: 'other-run' }, { sessionId: 'other-session' }]) {
+    assert.equal(strict({ ...currentCodeTask, executionEvidence: [...currentCodeTask.executionEvidence, { ...projectedTest, ...patch }] }).status,
+      'NEEDS_REVIEW', 'a later conflicting test result cannot be ignored');
+  }
+  for (const patch of [{ runId: 'historical-run' }, { sessionId: 'other-session' }, { provider: 'other-provider' },
+    { phase: 'bootstrap' }, { source: 'native-result' }, { source: undefined }, { resultSha256: undefined }]) {
+    const stale = { ...currentCodeTask, executionEvidence: [currentCodeTask.executionEvidence[0], { ...currentCodeTask.executionEvidence[1], ...patch }] };
+    assert.equal(strict(stale).status, 'NEEDS_REVIEW', 'automatic current-code acceptance rejects ' + JSON.stringify(patch));
+    assert.equal(verifyTaskOutcome(stale, { kind: 'code' }, { workspaceRoot: root }).status, 'VERIFIED',
+      'explicit legacy/history inspection keeps its existing meaning');
+  }
+  assert.equal(strict({ ...currentCodeTask, executionObservation: null }).status, 'NEEDS_REVIEW');
+  assert.equal(strict({ ...currentCodeTask, currentAgent: { provider: 'cetamesh', sessionId: 'replacement-session' } }).status, 'NEEDS_REVIEW');
+  assert.equal(strict({ ...currentCodeTask, executionObservation: { ...currentCodeTask.executionObservation, state: 'unknown' } }).status, 'NEEDS_REVIEW');
+  assert.equal(strict({ ...currentCodeTask, executionEvidence: [{ ...currentCodeTask.executionEvidence[0], runId: 'old-run' }, currentCodeTask.executionEvidence[1]] }).status, 'NEEDS_REVIEW',
+    'historical diff proof cannot supply the current code change');
+  for (const flag of ['true', 1, null]) assert.equal(verifyTaskOutcome(currentCodeTask,
+    { kind: 'code', requireCurrentCodeEvidence: flag }, { workspaceRoot: root }).status, 'NEEDS_REVIEW',
+  'the optional current-code boundary requires a real boolean');
+
   fs.writeFileSync(path.join(root, 'result.md'), 'verified content');
   const digest = crypto.createHash('sha256').update('verified content').digest('hex');
   task.executionEvidence = [{ eventId: 'write-1', capability: 'filesystem.write', status: 'completed', filePath: 'result.md' }];
@@ -83,6 +119,26 @@ try {
     'real Task evidence must feed the read-only verifier');
   assert.equal((await service.execute({ method: 'task.outcome.verify', params: { id: created.id, kind: 'code' } })).status,
     'VERIFIED', 'Owner Task service must expose the read-only result');
+  assert.equal((await service.execute({ method: 'task.outcome.verify', params: { id: created.id, kind: 'code', requireCurrentCodeEvidence: true } })).status,
+    'NEEDS_REVIEW', 'the formal Core method must forward the strict option instead of stripping it');
+  let replaceRun = false;
+  const concurrent = createTaskService({ stateDir: path.join(root, 'concurrent-state'), resolveWorkspace: async id => {
+    if (replaceRun) concurrent.runtime.beginExecutionObservation({ id: concurrentId, provider: 'cetamesh', sessionId: 'concurrent-session', runId: 'replacement-run', phase: 'user' });
+    return { id, root };
+  } });
+  let concurrentTask = concurrent.runtime.create({ goal: 'Current run only', workspaceId: 'ws-one', acceptanceCriteria: ['Fixed tests pass'] });
+  const concurrentId = concurrentTask.id;
+  concurrentTask = concurrent.runtime.start({ id: concurrentId, expectedRev: concurrentTask.rev, provider: 'cetamesh', sessionId: 'concurrent-session' }).task;
+  concurrent.runtime.setAcceptance({ id: concurrentId, expectedRev: concurrentTask.rev, acceptanceId: concurrentTask.acceptance[0].id, met: true });
+  concurrent.runtime.beginExecutionObservation({ id: concurrentId, provider: 'cetamesh', sessionId: 'concurrent-session', runId: 'verified-run', phase: 'user' });
+  for (const row of currentCodeTask.executionEvidence) concurrent.runtime.recordToolOutcome({ ...row, id: concurrentId,
+    provider: 'cetamesh', sessionId: 'concurrent-session', runId: 'verified-run', phase: 'user' });
+  concurrent.runtime.observeExecution({ id: concurrentId, provider: 'cetamesh', sessionId: 'concurrent-session', runId: 'verified-run', phase: 'user', state: 'awaiting-review' });
+  const currentRequest = { method: 'task.outcome.verify', params: { id: concurrentId, kind: 'code', requireCurrentCodeEvidence: true } };
+  assert.equal((await concurrent.execute(currentRequest)).status, 'VERIFIED');
+  replaceRun = true;
+  assert.equal((await concurrent.execute(currentRequest)).status, 'NEEDS_REVIEW',
+    'a Run replaced while Workspace resolution awaits cannot return stale current-code success');
   console.log('task outcome verification: objective evidence and review boundary passed');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });

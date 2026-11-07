@@ -25,7 +25,7 @@ export function createTaskService({ stateDir, now, resolveWorkspace, workspacesO
     'task.child.verify': (p) => runtime.verifyChild({ id: p.id, expectedRev: p.expectedRev }),
     'task.outcome.verify': (p) => runtime.verifyOutcome({ id: p.id, kind: p.kind,
       expectedFile: p.expectedFile, expectedSha256: p.expectedSha256,
-      expectedCapability: p.expectedCapability }),
+      expectedCapability: p.expectedCapability, requireCurrentCodeEvidence: p.requireCurrentCodeEvidence }),
     'task.create': (p) => runtime.create({
       goal: p.goal,
       requirements: p.requirements,

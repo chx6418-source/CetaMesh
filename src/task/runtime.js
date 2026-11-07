@@ -1218,7 +1218,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   async function verifyOutcome({ id, kind, expectedFile, expectedSha256, expectedCapability,
-    evidenceCandidate = false } = {}) {
+    evidenceCandidate = false, requireCurrentCodeEvidence = false } = {}) {
     const task = requireTask(id);
     let workspaceRoot = null;
     if (task.workspaceId) {
@@ -1229,9 +1229,12 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         return { status: 'NEEDS_REVIEW', kind, evidenceEventIds: [], reasons: ['WORKSPACE_UNAVAILABLE'] };
       }
     }
+    if (requireCurrentCodeEvidence === true && requireTask(id).rev !== task.rev) {
+      return { status: 'NEEDS_REVIEW', kind, evidenceEventIds: [], reasons: ['TASK_CHANGED_DURING_VERIFICATION'] };
+    }
     const candidate = evidenceCandidate && task.parentTaskId && task.childContract?.outputKind === 'tool'
       ? { ...task, acceptance: task.acceptance.map(item => ({ ...item, met: true })) } : task;
-    return verifyTaskOutcome(candidate, { kind, expectedFile, expectedSha256, expectedCapability }, { workspaceRoot });
+    return verifyTaskOutcome(candidate, { kind, expectedFile, expectedSha256, expectedCapability, requireCurrentCodeEvidence }, { workspaceRoot });
   }
 
   async function verifyDelegationOutcome({id}={}) {
