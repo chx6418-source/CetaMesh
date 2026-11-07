@@ -193,6 +193,18 @@ assert.ok(ordinaryChat.bytes < 40000, 'ordinary long Chat history benefits witho
 assert.equal(JSON.parse(ordinaryChat.synopsis.content).task, null);
 console.log('context synopsis: exact irreducible instructions refuse and ordinary short histories are unchanged');
 
+const publicOnly = conversation();
+toolTurn(publicOnly, 0, 'private-arguments', JSON.stringify({ status: 'completed', result: { token: 'SYNTHETIC-HISTORY-OUTPUT-SECRET', observed: 'PUBLIC-TOOL-OBSERVATION' } }));
+publicOnly.find(row => row.tool_calls?.[0]?.id === 'private-arguments').tool_calls[0].function.arguments = '{"apiKey":"SYNTHETIC-HISTORY-PRIVATE-ARG"}';
+const publicSynopsis = buildContextSynopsis({ task, messages: publicOnly, sourceBinding: binding });
+const publicReference = JSON.parse(publicSynopsis.content).sources[0];
+const publicPage = readHistorySource({ messages: publicOnly, sourceBinding: binding, sourceId: publicReference.sourceId, maxChars: 8000, authorizeSource: () => true });
+assert.equal(publicPage.content.includes('SYNTHETIC-HISTORY-PRIVATE-ARG'), false, 'ordinary history pages exclude every raw tool argument');
+assert.equal(publicPage.content.includes('SYNTHETIC-HISTORY-OUTPUT-SECRET'), false, 'tool result pages retain existing redaction');
+assert.ok(publicPage.content.includes('PUBLIC-TOOL-OBSERVATION'));
+assert.equal(publicSynopsis.content.includes('SYNTHETIC-HISTORY-OUTPUT-SECRET'), false, 'tool excerpts use the same public representation');
+console.log('context synopsis: public history pages preserve text and tool IDs without raw private arguments or result secrets');
+
 const tempRoot = fs.realpathSync(os.tmpdir());
 const directory = fs.mkdtempSync(path.join(tempRoot, 'context-synopsis-'));
 try {

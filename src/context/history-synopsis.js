@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import { sanitizeToolEvidence } from './tool-evidence.js';
 
 const BINDING_KEYS = ['actorKind', 'actorId', 'sessionId', 'taskId', 'workspaceId'];
 const MAX_SYNOPSIS_CHARS = 8000;
@@ -53,6 +54,7 @@ function closedTurn(messages, startIndex, endIndex) {
       if (!pending.delete(message.tool_call_id)) valid = false;
       let result;
       try { result = JSON.parse(message.content); } catch { /* An opaque result remains attributed source text. */ }
+      if (hasPrivateProtocol(result)) protectedTurn = true;
       if (result?.incomplete === true && result?.representation !== 'stored-tool-evidence'
         || result?.truncated === true || ['pending', 'pending_approval', 'running', 'unknown', 'outcome-unknown', 'cancel-unconfirmed', 'needs-reconciliation', 'interrupted'].includes(result?.status)
         || result?.effectStatus === 'unknown' || result?.error?.effectStatus === 'unknown') protectedTurn = true;
@@ -93,12 +95,32 @@ export function fingerprintHistorySource({ messages, sourceBinding } = {}) {
 }
 
 function referenceFor(messages, range, sourceFingerprint, bindingFingerprint) {
-  const content = json(messages.slice(range.startIndex, range.endIndex));
-  const sha256 = digest(content);
+  const original = json(messages.slice(range.startIndex, range.endIndex));
+  const content = publicSourceText(messages.slice(range.startIndex, range.endIndex));
+  const sha256 = digest(original);
   return { sourceId: `history:${sourceFingerprint}:${messages.length}:${range.startIndex}:${range.endIndex}:${sha256}`,
     sourceFingerprint, sourceMessageCount: messages.length, bindingFingerprint, startIndex: range.startIndex, endIndex: range.endIndex,
-    sha256, chars: content.length, messageCount: range.endIndex - range.startIndex };
+    sha256, publicSha256: digest(content), chars: content.length, messageCount: range.endIndex - range.startIndex };
 }
+
+// Ordinary source pages contain public conversation and already sanitized tool
+// observations. Raw tool arguments/unknown metadata are protocol input, never a
+// public history interface. Hashes still validate the full original source.
+function publicMessage(message) {
+  const output = { role: message.role };
+  for (const key of ['id', 'tool_call_id', 'name']) if (typeof message[key] === 'string') output[key] = message[key];
+  if (message.role === 'tool') {
+    let value = message.content;
+    try { value = JSON.parse(value); } catch { /* Redact opaque tool output as text. */ }
+    const content = sanitizeToolEvidence(value);
+    output.content = typeof value === 'string' ? JSON.parse(content) : content;
+  } else if (typeof message.content === 'string' || message.content === null) output.content = message.content;
+  else if (Array.isArray(message.content)) output.content = message.content.filter(part => part?.type === 'text').map(part => ({ type: 'text', text: part.text }));
+  if (Array.isArray(message.tool_calls)) output.tool_calls = message.tool_calls.map(call => ({ id: call.id, type: call.type ?? 'function',
+    function: { name: call.function?.name ?? null, inputRepresentation: 'private-tool-arguments-omitted' } }));
+  return output;
+}
+const publicSourceText = messages => json(messages.map(publicMessage));
 
 const fields = (value, keys) => Object.fromEntries(keys.filter(key => ['string', 'number', 'boolean'].includes(typeof value?.[key]) || value?.[key] === null).map(key => [key, value[key]]));
 function taskFacts(task, binding) {
@@ -177,7 +199,7 @@ export function buildContextSynopsis({ task = null, messages, sourceBinding, sou
   const candidates = sources.flatMap((source, sourceIndex) => Array.from({ length: source.messageCount }, (_, offset) => ({ sourceIndex, index: source.startIndex + offset })));
   const order = candidates.length ? [candidates[0], ...candidates.slice(1).reverse()] : [];
   for (const { sourceIndex, index } of order) {
-    const message = messages[index], quote = excerpt(messageText(message));
+    const message = messages[index], quote = excerpt(messageText(publicMessage(message)));
     const row = { messageIndex: index, role: message.role, ...(typeof message.id === 'string' ? { messageId: message.id } : {}),
       ...quote, attribution: message.role === 'user' ? 'Owner source text' : 'unverified source text',
       ...(message.role === 'tool' ? toolObservation(messages, index) : {}) };
@@ -220,7 +242,7 @@ export function readHistorySource({ messages, resolveMessages, sourceBinding, so
   }
   const reference = referenceFor(retained, { startIndex, endIndex }, sourceFingerprint, digest(json(binding)));
   if (reference.sha256 !== wantedHash) fail('CONTEXT_SYNOPSIS_STALE', 'History source content changed.');
-  const content = json(retained.slice(startIndex, endIndex));
+  const content = publicSourceText(retained.slice(startIndex, endIndex));
   if (offset > content.length || (offset > 0 && /[\uDC00-\uDFFF]/.test(content[offset]) && /[\uD800-\uDBFF]/.test(content[offset - 1]))) fail('CONTEXT_HISTORY_PAGE_INVALID', 'Invalid history page offset.');
   let pageEnd = Math.min(offset + maxChars, content.length);
   if (pageEnd < content.length && /[\uD800-\uDBFF]/.test(content[pageEnd - 1])) pageEnd = pageEnd - offset === 1 ? pageEnd + 1 : pageEnd - 1;
@@ -253,8 +275,8 @@ export function projectHistoryLayers(messages, { synopsis = true, task = null, s
       if (['CONTEXT_HISTORY_DENIED', 'CONTEXT_SYNOPSIS_STALE'].includes(error?.code)) throw error;
       fail('CONTEXT_HISTORY_UNAVAILABLE', 'A retained history source cannot be retrieved. Preserve originals and restore the bound source or use verified fresh-session Continuity.');
     }
-    const exact = json(sourceMessages.slice(source.startIndex, source.endIndex));
-    if (!resolved || typeof resolved.then === 'function' || ['sourceId', 'sourceFingerprint', 'bindingFingerprint', 'sha256', 'chars'].some(key => resolved[key] !== source[key])
+    const exact = publicSourceText(sourceMessages.slice(source.startIndex, source.endIndex));
+    if (!resolved || typeof resolved.then === 'function' || ['sourceId', 'sourceFingerprint', 'bindingFingerprint', 'sha256', 'publicSha256', 'chars'].some(key => resolved[key] !== source[key])
       || (resolved.offset !== undefined && resolved.offset !== 0) || typeof resolved.content !== 'string' || !resolved.content.length || !exact.startsWith(resolved.content)) {
       fail('CONTEXT_HISTORY_UNAVAILABLE', 'History retrieval did not verify the exact current source. Original history is retained.');
     }

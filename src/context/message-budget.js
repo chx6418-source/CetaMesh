@@ -8,7 +8,7 @@ import { projectHistoryLayers } from './history-synopsis.js';
  * Originals remain owned by the caller; no external retrieval authority is added.
  */
 export function projectMessageBudget(messages, { maxBytes = 512 * 1024, evidenceStore = null, binding = null, canRetrieveEvidence = false, deduplicate = true,
-  synopsis = null, sourceBinding = binding, sourceResolver = null, task = null, keepRecentTurns = 4, maxSynopsisChars = 8000 } = {}) {
+  synopsis = null, sourceBinding = binding, sourceResolver = null, task = null, keepRecentTurns = 4, maxSynopsisChars = 8000, forceSynopsis = false } = {}) {
   // Binary modality bytes have their own explicit bound; text/tool accounting
   // remains unchanged and no image is silently removed during compaction.
   let imageBytes=0,imageCount=0;
@@ -68,7 +68,7 @@ export function projectMessageBudget(messages, { maxBytes = 512 * 1024, evidence
   }
   // Source references bind retained originals, even when the earlier safe tool
   // evidence/dedup layer produced a different request-only representation.
-  if (synopsis && Buffer.byteLength(JSON.stringify(projected), 'utf8') > maxBytes) {
+  if (synopsis && (forceSynopsis || Buffer.byteLength(JSON.stringify(projected), 'utf8') > maxBytes)) {
     // The synopsis restores every retained recent/native/open turn verbatim.
     // Earlier request-relative duplicate indexes cannot anchor removed sources.
     const layers = projectHistoryLayers(projected, { synopsis, task, sourceBinding, sourceResolver, sourceMessages: messages, keepRecentTurns, maxSynopsisChars });

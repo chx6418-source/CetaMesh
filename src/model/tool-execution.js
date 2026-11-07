@@ -1,5 +1,6 @@
 import { evidenceBinding, evidenceSummary, sanitizeToolEvidence, EVIDENCE_SOURCE_CAPABILITIES, validateEvidenceSourceInput } from '../context/tool-evidence.js';
 import { projectMessageBudget } from '../context/message-budget.js';
+import { readHistorySource, fingerprintHistorySource } from '../context/history-synopsis.js';
 import { accumulateModelUsage } from './usage.js';
 import { validateSchema, schemaFailureDetail } from './input-schema.js';
 import crypto from 'node:crypto';
@@ -201,6 +202,8 @@ export function createToolExecutionCoordinator({
   timeoutMs = 300000,
   actorResolver = null,
   resolvePostWriteVerification = null,
+  resolveHistoryContext = null,
+  onMessagesCheckpoint = null,
   evidenceStore = null,
   onUsage = null
 } = {}) {
@@ -237,6 +240,7 @@ export function createToolExecutionCoordinator({
   // Trusted delegates can access only their currently accepted coordinator call.
   // This is process-local context, never authority supplied by a tool argument.
   const batchFrames = new Map();
+  const historyFrames = new Map();
   let activeReads = 0;
   const waitingReads = [];
   const activeResumes = new Set();
@@ -318,6 +322,77 @@ export function createToolExecutionCoordinator({
     }
   }
 
+  async function historyContext(state, purpose, signal) {
+    if (typeof resolveHistoryContext !== 'function' || !state.manifest.some(row => row.id === 'context.history.read' && row.available !== false)) return null;
+    const descriptor = capabilityBroker.registry?.require('context.history.read');
+    if (!descriptor || descriptor.provider !== 'context' || descriptor.readOnly !== true || descriptor.effect !== 'read-only'
+      || descriptor.risk !== 'low' || descriptor.requiresApproval || descriptor.catalogOwner) fail('CONTEXT_HISTORY_DENIED', 'Current Core history descriptor required');
+    const actor = typeof actorResolver === 'function' ? await actorResolver({ actorKind: state.actor.kind, actorId: state.actor.id,
+      sessionId: state.sessionId, turnId: state.turnId, scope: state.scope }) : state.actor;
+    if (!actor || actor.kind !== state.actor.kind || actor.id !== state.actor.id
+      || actor.kind === 'agent' && !actor.grants?.capabilities?.includes('context.history.read')) fail('CONTEXT_HISTORY_DENIED', 'Current history principal required');
+    const binding = evidenceBinding(state);
+    const resolved = await resolveHistoryContext({ purpose, actorKind: actor.kind, actorId: actor.id,
+      sessionId: state.sessionId, turnId: state.turnId, runId: state.runId, targetKind: state.targetKind, scope: { ...state.scope }, signal });
+    // Optional source availability is not a new admission gate for ordinary
+    // short requests. Without authorization no omission/retrieval is enabled;
+    // the original complete byte/model guards remain authoritative.
+    if (purpose === 'projection' && (!resolved || resolved.authorized !== true)) return null;
+    if (!resolved || resolved.authorized !== true || !(Number.isSafeInteger(resolved.revision) && resolved.revision >= 0
+      || typeof resolved.revision === 'string' && resolved.revision.length > 0 && resolved.revision.length <= 160)
+      || binding.taskId !== null && resolved.task?.id !== binding.taskId
+      || JSON.stringify(binding) !== JSON.stringify(evidenceBinding(state))) fail('CONTEXT_HISTORY_DENIED', 'Current authorized history owner/revision required');
+    if (signal?.aborted) fail('INVOKE_CANCELLED', 'History access cancelled');
+    return { ...resolved, actor, binding, descriptor };
+  }
+
+  function sourcePage(state, context, input) {
+    return readHistorySource({ ...input, sourceBinding: context.binding,
+      resolveMessages: () => typeof context.resolveMessages === 'function' ? context.resolveMessages() : state.messages,
+      authorizeSource: () => context.authorized === true });
+  }
+
+  // This delegate is called only by the existing Broker's Core capability.
+  // A copied model origin/actor/input cannot create the process-local frame.
+  async function readHistory(request) {
+    const accepted = historyFrames.get(request?.requestId);
+    if (!accepted || accepted.entered || request.capability !== 'context.history.read'
+      || request.actor?.kind !== accepted.actor.kind || request.actor.id !== accepted.actor.id
+      || request.taskId !== (accepted.frame.scope.taskId ?? null) || request.workspaceId !== (accepted.frame.scope.workspaceId ?? null)
+      || request.origin?.sessionId !== accepted.state.sessionId || request.origin?.turnId !== accepted.state.turnId
+      || (request.origin?.runId ?? null) !== (accepted.state.runId ?? null) || (request.origin?.phase ?? null) !== (accepted.state.phase ?? null)
+      || request.origin?.targetKind !== accepted.state.targetKind
+      || JSON.stringify(request.input) !== JSON.stringify(accepted.frame.input)) fail('CONTEXT_HISTORY_DENIED', 'History requires its exact currently accepted Broker call');
+    accepted.entered = true;
+    const current = await historyContext(accepted.state, 'read', accepted.signal);
+    if (!current || current.revision !== accepted.state.historyRevision
+      || JSON.stringify(current.actor) !== JSON.stringify(accepted.actor)) fail('CONTEXT_SYNOPSIS_STALE', 'History authority changed; rebuild the current request');
+    // Leave room for JSON escaping and source metadata in the existing bounded
+    // tool-result envelope. maxChars is an upper bound, not an exact page size.
+    const input = { ...request.input, maxChars: Math.min(request.input.maxChars ?? 4000, 4000) };
+    const page = sourcePage(accepted.state, current, input);
+    const final = await historyContext(accepted.state, 'read', accepted.signal);
+    if (!final || final.revision !== current.revision || final.descriptor !== current.descriptor
+      || JSON.stringify(final.actor) !== JSON.stringify(current.actor)) fail('CONTEXT_SYNOPSIS_STALE', 'History authorization changed during retrieval');
+    const verified = sourcePage(accepted.state, final, input);
+    if (verified.sourceFingerprint !== page.sourceFingerprint || verified.publicSha256 !== page.publicSha256 || verified.content !== page.content) fail('CONTEXT_SYNOPSIS_STALE', 'History source changed during retrieval');
+    return verified;
+  }
+
+  async function messagesCheckpoint(state, phase) {
+    if (typeof onMessagesCheckpoint !== 'function') return;
+    const current = state.messages.slice(state.messages.findLastIndex(message => message.role === 'user') + 1);
+    const settled = new Set(current.filter(message => message.role === 'tool').map(message => message.tool_call_id));
+    const pending = current.flatMap(message => message.tool_calls ?? []).map(call => call.id).filter(id => !settled.has(id));
+    const binding = evidenceBinding(state);
+    try {
+      await onMessagesCheckpoint({ binding, turnId: state.turnId, runId: state.runId, targetKind: state.targetKind,
+        phase, revision: state.historyRevision ?? null, sourceFingerprint: fingerprintHistorySource({ messages: state.messages, sourceBinding: binding }),
+        messages: structuredClone(state.messages), synopsis: phase === 'request-projection' && state.contextSynopsis ? structuredClone(state.contextSynopsis) : null,
+        settledCallIds: [...settled], pendingCallIds: pending });
+    } catch { fail('CONTEXT_HISTORY_CHECKPOINT_PERSIST_FAILED', 'Original settled receipts are retained; restore checkpoint storage before continuing through verified fresh-session recovery'); }
+  }
+
   function recoveryForSession(sessionId) {
     const uncertain = uncertainExecutions().find(row => row.sessionId === sessionId);
     if (uncertain) return { state: 'needs-reconciliation', capability: uncertain.capability, turnId: uncertain.turnId };
@@ -384,6 +459,14 @@ export function createToolExecutionCoordinator({
     };
     const value = { status: 'completed', result: result.result,
       ...(result.postWriteVerification ? { postWriteVerification: result.postWriteVerification } : {}) };
+    if (capability === 'context.history.read' && result.result?.representation === 'retained-history-page'
+      && result.result.referenceOnly === true && typeof result.result.content === 'string' && result.result.content.length <= 4000) {
+      // The admitted Core delegate already excluded private protocol/arguments
+      // and sanitized tool observations. Public Owner source text must remain
+      // exact, including its JSON escaping and source-page hash/offsets.
+      const content = JSON.stringify(value);
+      if (content.length <= MAX_RESULT_CHARS) return content;
+    }
     if (capability === 'context.batch') {
       const content = sanitizeToolEvidence(value);
       if (content.length <= MAX_RESULT_CHARS) return content;
@@ -525,6 +608,7 @@ export function createToolExecutionCoordinator({
         try {
           const executeBroker = attemptSignal => {
             if (capability === 'context.batch') batchFrames.set(toolRequestId, { state, frame, signal: attemptSignal, actor: liveActor });
+            if (capability === 'context.history.read') historyFrames.set(toolRequestId, { state, frame, signal: attemptSignal, actor: liveActor, entered: false });
             const promise = Promise.resolve().then(() => capabilityBroker.execute({ requestId: toolRequestId, actor: liveActor,
               ...(hasEffect && !registered.delegatesOperation && scope.taskId && scope.workspaceId
                 ? { operationId: 'tool:' + crypto.createHash('sha256').update(frame.requestId).digest('hex') } : {}),
@@ -536,6 +620,10 @@ export function createToolExecutionCoordinator({
               ...(attemptSignal ? { signal: attemptSignal } : {}) }, { signal: attemptSignal,
                 ...(typeof frame.consumeReadBytes === 'function' ? { consumeReadBytes: frame.consumeReadBytes } : {}) }));
             accepted.push(promise);
+            if (capability === 'context.history.read') {
+              const acceptedHistoryId = toolRequestId;
+              promise.then(() => historyFrames.delete(acceptedHistoryId), () => historyFrames.delete(acceptedHistoryId));
+            }
             // Late completion is an observation, never permission to erase an
             // unknown receipt or retry an accepted operation.
             const acceptedId = toolRequestId;
@@ -1003,6 +1091,7 @@ export function createToolExecutionCoordinator({
         usage, resolvedModel, limitReached,
         ...(state.configurationObservation ? { configurationObservation: structuredClone(state.configurationObservation) } : {}),
         ...(state.postWriteState ? { postWriteState: structuredClone(state.postWriteState) } : {}),
+        ...(state.contextSynopsis ? { contextSynopsis: structuredClone(state.contextSynopsis), historyRevision: state.historyRevision } : {}),
         ...(typeof state.onContext === 'function' ? { onContext: state.onContext } : {}),
         seenCallIds: state.seenCallIds, pendingToolCallId: pending.callId,
         pendingActivityId: pending.activityId, pendingActivityStartedAt: pending.startedAt,
@@ -1074,16 +1163,39 @@ export function createToolExecutionCoordinator({
       }
       const resumingToolBatch = Array.isArray(state.pendingCalls);
       const toolsAllowed = cycle < maxCycles && budget.used < maxCalls;
+      const requestOnlyMessages = toolsAllowed || finalSynthesisAtLimit !== true ? [] : [{ role: 'system', content: 'The bounded tool budget is exhausted. Do not request or simulate more tools. Summarize the verified results already available, explain any missing evidence, and answer the user now. Do not claim unperformed work is complete.' }];
       const request = {
-        providerId, model, reasoning, messages: toolsAllowed || finalSynthesisAtLimit !== true ? state.messages : [...state.messages, { role: 'system', content: 'The bounded tool budget is exhausted. Do not request or simulate more tools. Summarize the verified results already available, explain any missing evidence, and answer the user now. Do not claim unperformed work is complete.' }], signal,
+        providerId, model, reasoning, messages: [...state.messages, ...requestOnlyMessages], signal,
         tools: toolsAllowed || finalSynthesisAtLimit !== true ? state.manifest.map((item) => ({ id: item.id, description: item.description, inputSchema: item.inputSchema })) : [],
         toolChoice: cycle < maxCycles && budget.used < maxCalls ? 'auto' : 'none'
       };
       request.onConfiguration = value => observeConfiguration(state, value, true);
       if (!resumingToolBatch && !toolsAllowed && finalSynthesisAtLimit !== true) limitReached = true;
       if (!resumingToolBatch) {
-        const projected = projectMessageBudget(request.messages, { evidenceStore, binding: evidenceBinding(state), canRetrieveEvidence: state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false) });
-        request.messages = projected.messages;
+        await messagesCheckpoint(state, 'settled-transcript');
+        const history = await historyContext(state, 'projection', signal);
+        const projectionOptions = { evidenceStore, binding: evidenceBinding(state), canRetrieveEvidence: state.manifest.some(item => item.id === 'context.evidence.read' && item.available !== false),
+          ...(history ? { synopsis: true, task: history.task ?? null, sourceBinding: history.binding, sourceResolver: input => sourcePage(state, history, input) } : {}) };
+        // Projection authority is independent of permission to dispatch another
+        // tool. Bind source refs only to actual retained originals; the final
+        // no-tool instruction is request-only and has no owner history row.
+        let projected = projectMessageBudget(state.messages, projectionOptions);
+        request.messages = [...projected.messages, ...requestOnlyMessages];
+        const modelBudget = history && typeof modelRuntime.contextBudget === 'function' ? modelRuntime.contextBudget(providerId, model, request) : null;
+        if (history && (modelBudget?.status === 'exceeded' || Buffer.byteLength(JSON.stringify(request.messages)) > projected.maxBytes)) {
+          projected = projectMessageBudget(state.messages, { ...projectionOptions, forceSynopsis: true });
+          request.messages = [...projected.messages, ...requestOnlyMessages];
+        }
+        if (requestOnlyMessages.length) {
+          // Count/guard the complete transport without rewriting protected
+          // recent tool bodies or introducing new relative duplicate indexes.
+          const complete = projectMessageBudget(request.messages, { deduplicate: false });
+          projected = { ...projected, bytes: complete.bytes, maxBytes: complete.maxBytes };
+        }
+        if (history) { state.historyRevision = history.revision; state.contextSynopsis = projected.synopsis ?? null; }
+        // Model Runtime still checks the complete final request, its live tool
+        // schemas/provider framing/output reservation; no usage anchor is reused.
+        await messagesCheckpoint(state, 'request-projection');
         if (typeof state.onContext === 'function') {
           // Only observed numeric projection facts leave the loop; evidence IDs and message bodies stay internal.
           const projection = { status: 'observed', bytes: projected.bytes, maxBytes: projected.maxBytes,
@@ -1190,6 +1302,7 @@ export function createToolExecutionCoordinator({
             function: { name: String(call?.name || (call?.capabilityId ? providerToolName(call.capabilityId) : 'unknown')), arguments: typeof call?.arguments === 'string' ? call.arguments : safeJson(call?.arguments ?? {}) }
           }))
         });
+        await messagesCheckpoint(state, 'tool-calls');
       }
       delete state.pendingCalls;
       delete state.pendingCallIndex;
@@ -1596,7 +1709,7 @@ export function createToolExecutionCoordinator({
   }
 
   capabilityBroker.setReadContextResolver?.(resolvePendingReadContext);
-  return { run, executeReadBatch, resumeApproval, recordApprovalOutcomeUnknown, pendingTarget, cancelSession, recoveryForSession, recoveryForTask,
+  return { run, executeReadBatch, readHistory, resumeApproval, recordApprovalOutcomeUnknown, pendingTarget, cancelSession, recoveryForSession, recoveryForTask,
     acknowledgeTaskRecovery,
     taskReviewState(taskId) {
       return {
