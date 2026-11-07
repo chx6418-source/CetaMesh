@@ -14,6 +14,11 @@ function taskFromRuntime(taskRuntime, taskId) {
   }
 }
 
+function taskWithChildren(taskRuntime, task) {
+  if (!task || task.parentTaskId || typeof taskRuntime?.listChildren !== 'function') return task;
+  return { ...task, children: taskRuntime.listChildren({ parentTaskId: task.id }).children };
+}
+
 function resolveMemoryReferences(memoryService, task, principal, onMemoryError = null) {
   if (!task || !Array.isArray(task.memoryRefs) || !memoryService?.runtime?.get) return [];
   const sourceScope = `task:${task.id}`;
@@ -284,7 +289,7 @@ export function createProductContextService({
       executionPath: 'chat',
       record: source,
       routing,
-      task,
+      task: taskWithChildren(taskRuntime, task),
       workspace,
       memoryReferences,
       skills,
@@ -344,7 +349,7 @@ export function createProductContextService({
       mode: 'managed-agent',
       executionPath: 'managed-agent',
       record: { id: sessionId },
-      task,
+      task: taskWithChildren(taskRuntime, task),
       workspace,
       memoryReferences,
       skills,

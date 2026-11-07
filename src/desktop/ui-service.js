@@ -1,4 +1,5 @@
 import {projectChatContext,projectModelCapabilities,projectAgentModelControl,projectModelUsageObservation} from './chat-telemetry.js';
+import { projectChildResultFacts } from '../task/child-result-projection.js';
 import { projectChatFailureDetails, projectChatFailureMessage } from './chat-failure-details.js';
 import { explicitDelegationTarget } from './explicit-delegation.js';
 import {SIMULATION_UI_METHODS} from '../simulation/ui-methods.js';
@@ -293,6 +294,8 @@ function projectTask(value) {
       attemptCount: Array.isArray(child.attempts) ? child.attempts.length : 0,
       usage: projectUsage(child.usage)
     })) : [],
+    childResults: Array.isArray(row.children) ? row.children.slice(0, 6)
+      .map(child => projectChildResultFacts(child, { parent: row, limit: 10, maxChars: 6000 })).filter(Boolean) : [],
     agent: currentAgent.provider ? string(currentAgent.provider, 100) : null,
     currentAgent: currentAgent.provider ? { provider: string(currentAgent.provider, 100), sessionId: string(currentAgent.sessionId, 160) } : null,
     createdAt: scalar(row.createdAt), updatedAt: scalar(row.updatedAt), rev: Number.isSafeInteger(row.rev) ? row.rev : null,

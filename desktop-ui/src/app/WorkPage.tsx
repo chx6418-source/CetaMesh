@@ -9,6 +9,7 @@ import { ApprovalOperationSummary } from './StatusPresentation';
 import { ErrorNotice, Heading, EmptyNotice, StatusBadge, messageOf, dateLabel, relativeLabel, dshSetupReasonLabel, availabilityReasonLabel } from './PagePresentation';
 import { SmallPager, taskDisplayStatus, taskProgressValue, taskProgressLabel, TaskProgress, taskDialogTitle, WorkTaskList, TaskCollaborationStatus, TaskDetailSection } from './TaskPresentation';
 import { activeTaskChildren, TaskDependencyNotice, taskOperationErrorMessage, validateTaskExecution } from './TaskExecutionFeedback';
+import { ChildTaskResults } from './ChildTaskResults';
 import { projectWorkspaceChoices } from './WorkspaceSidebar';
 import { GitWorkspace } from './GitWorkspace';
 import { WorkspaceChangesReview } from './WorkspaceChangesReview';
@@ -492,6 +493,9 @@ function TaskCollaborationSummary({ task, onReview, onCreateChild, onVerifyChild
     {task.parentTaskId && task.childOutputKind === 'tool' && task.status === 'completed' && task.verification !== 'VERIFIED' && <Button onClick={onVerifyChild}>重新核对已观察的证据</Button>}
     {children.slice(currentPage * 20, (currentPage + 1) * 20).map(child => <article key={child.id} className="task-child-summary"><div className="task-child-heading">{onOpenChild ? <Button compact variant="ghost" onClick={() => onOpenChild(child.id)}>{child.title}</Button> : <strong>{child.title}</strong>}<StatusBadge value={child.status} /></div><p>{child.agent || '未分配执行者'} · {child.verification === 'VERIFIED' ? '证据已核验' : '证据待核验'}</p><small>执行尝试 {child.attemptCount}</small><UsageSummary usage={child.usage} label="子任务用量" /></article>)}
     <SmallPager page={currentPage} total={children.length} size={20} onPage={setPage} label="子任务分页" />
+    {Boolean(task.childResults?.length) && <details className="task-advanced"><summary>查看子任务报告与真实回执</summary>
+      <ChildTaskResults results={task.childResults!} onOpenChild={onOpenChild} />
+    </details>}
   </section>;
 }
 

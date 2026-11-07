@@ -316,6 +316,13 @@ function compactContext(context, maxChars) {
     delete context.skills;
     context.omissions.skills = 1;
   }
+  // These are optional read-only projections, not the parent's Task or approval
+  // state. Omit complete child records rather than break their source IDs.
+  while (!fits() && context.task?.childResults?.length) {
+    context.task.childResults.pop();
+    context.omissions.childResults = (context.omissions.childResults ?? 0) + 1;
+  }
+  if (fits()) return context;
   for (const key of ['extensions', 'agentProviders', 'memoryReferences']) {
     if (context[key].length) {
       context.omissions[key] = context[key].length;

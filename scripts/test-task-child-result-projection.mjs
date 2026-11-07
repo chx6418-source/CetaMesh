@@ -9,6 +9,9 @@ import { createTaskService } from '../src/task/service.js';
 import { createWorkspaceService } from '../src/workspace/service.js';
 import { createCapabilityService } from '../src/capability/service.js';
 import { buildTaskContext } from '../src/context/task-context.js';
+import { createProductContextService } from '../src/context/service.js';
+import { projectProductContext } from '../src/context/product-context.js';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
 
 // Real Task/Workspace/Capability read receipts; Agent prose is deliberately
 // synthetic and never substitutes for a process or independently observed fact.
@@ -55,7 +58,7 @@ async function fixture(finishOrder = ['b', 'a']) {
     assert.equal((await rt.verifyChild({ id: child.id, expectedRev: current.rev })).status, 'VERIFIED');
     children[key] = rt.get({ id: child.id }).task;
   }
-  return { root, project, stateDir, parent, children, service, rt, capabilities, workspace,
+  return { root, project, stateDir, parent, children, service, rt, capabilities, workspace, workspaceService,
     list: () => rt.listChildren({ parentTaskId: parent.id }).children,
     async close() { await capabilities.close(); fs.rmSync(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }); } };
 }
@@ -65,6 +68,24 @@ for (const order of [['b', 'a'], ['a', 'b']]) {
   try {
     const before = JSON.stringify(f.list());
     const parent = { ...f.parent, children: f.list() };
+    const product = createProductContextService({ taskRuntime: f.rt, workspaceService: f.workspaceService,
+      capabilityService: f.capabilities, memorySettings: () => ({ enabled: false }) });
+    const modelView = JSON.parse((await product.buildForChatTurn({ record: { id: 'owner-child-facts',
+      taskId: parent.id, config: { workspaceId: f.workspace.id, mode: 'chat' },
+      children: [{ id: 'FORGED_RENDERER_CHILD' }] }, toolCalling: 'supported' })).context);
+    assert.deepEqual(new Set(modelView.task.childResults?.map(row => row.childId)), new Set(f.list().map(row => row.id)),
+      'ordinary parent Chat context resolves children from Task Runtime, not a caller-supplied snapshot');
+    const ui = createDesktopUiService({ services: { taskService: f.service, capabilityService: f.capabilities } });
+    const uiView = (await ui.execute({ method: 'ui.task.get', params: { id: parent.id } })).task;
+    assert.deepEqual(new Set(uiView.childResults?.map(row => row.childId)), new Set(f.list().map(row => row.id)),
+      'the actual Desktop read route carries child facts without adding another result store');
+    assert.equal(uiView.childResults[0].report.verified, false);
+    const compact = projectProductContext({ task: parent, executionPath: 'managed-agent', taskAvailable: true,
+      capabilities: { manifest: [], requestable: [], statusSummary: [], mcp: [], executionPath: 'managed-agent' } }, { maxChars: 2200 });
+    assert.ok(compact.serialized.length <= 2200, 'optional child facts must fit the outer Product Context budget');
+    const compactView = JSON.parse(compact.serialized);
+    assert.equal(compactView.task.id, parent.id);
+    assert.ok(compactView.omissions.childResults > 0, 'whole child facts are omitted with an explicit count before mandatory task/permission state');
     const context = buildTaskContext({ task: parent });
     assert.equal(context.task.childResults?.length, 2, 'linked parent context receives both structured child results in either actual completion order');
     const { projectChildResultFacts } = await import('../src/task/child-result-projection.js');
@@ -187,6 +208,17 @@ try {
     assert.match(html, /自述命令|执行者自述/); assert.match(html, /claimed npm test success/);
     assert.match(html, /读取路径未留存/); assert.match(html, /read-event-a/);
     assert.match(html, /自述引用未找到当前来源证据/);
+    // Maintained Work components import the browser bridge. SSR needs its timer
+    // surface only; no IPC request or model execution is performed by rendering.
+    globalThis.window ??= { setTimeout, clearTimeout };
+    const { TaskDetails } = await vite.ssrLoadModule('/src/app/WorkPage.tsx');
+    const task = (await createDesktopUiService({ services: { taskService: f.service, capabilityService: f.capabilities } })
+      .execute({ method: 'ui.task.get', params: { id: parent.id } })).task;
+    const detail = renderToStaticMarkup(React.createElement(TaskDetails, { task, providers: [],
+      onHandoff() {}, onAction() {}, onStart() {}, onReconcile() {}, onReview() {}, onCreateChild() {},
+      onComplete() {}, onVerifyChild() {}, onOpenChild() {} }));
+    assert.match(detail, /查看子任务报告与真实回执/, 'maintained Work Task details mount the same read-only child result component');
+    assert.match(detail, /claimed npm test success/); assert.match(detail, /读取路径未留存/);
     const changed = projectChildResultFacts({ ...f.children.a, rev: f.children.a.rev + 1 }, { parent });
     const staleHtml = renderToStaticMarkup(React.createElement(ChildTaskResults, { results: [changed] }));
     assert.doesNotMatch(staleHtml, /当前合同证据已核验/); assert.match(staleHtml, /待核验|来源已变化/);

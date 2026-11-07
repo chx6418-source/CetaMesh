@@ -1,25 +1,9 @@
 import { Button } from '../components/primitives/inputs';
 import { Badge } from '../components/primitives/surfaces';
 
-export type ChildTaskReadFact = { eventId: string; capability: string; status: string; path: string | null;
-  pathCoverage: 'retained' | 'not-retained'; provenance: 'core-observation' | 'native-observation'; verified: false };
-export type ChildTaskResultFacts = {
-  schemaVersion: 1; childId: string; taskRev: number | null; goal: string | null; status: string;
-  supersedesChildId: string | null; supersededBy: string | null; parentRev: number | null;
-  attempt: { id: string | null; provider: string; sessionId: string; runId: string; state: string; reviewed: boolean;
-    binding: 'current-run' | 'attempt-only' | 'unknown' } | null;
-  report: { source: 'agent-report'; eventId: string; sha256: string | null; verified: false; final: true; text: string;
-    summary: string | null; claimedFilesChanged: string[]; claimedCommands: string[]; claimedRemaining: string[]; truncated: boolean } | null;
-  findings: { kind: 'agent-claim'; text: string; evidenceEventIds: string[]; missingEvidenceIds: string[] }[];
-  hostFacts: { readOnly: boolean; coverage: 'complete' | 'partial' | 'none'; reads: ChildTaskReadFact[];
-    commands: readonly never[]; writes: readonly never[];
-    artifacts: { id: string; label: string | null; ref: string | null; sourceEventId: string | null;
-      provenance: 'task-artifact-record'; current: boolean; verified: false }[];
-    observations: { eventId: string; capability: string; status: string; provenance: string; verified: false }[]; evidenceEventIds: string[] };
-  verification: { status: string; verificationRev: number | null; current: boolean; scope: 'current-run' | 'stale' | 'unknown';
-    reasons: string[]; evidenceEventIds: string[] };
-  remaining: { blockers: string[]; nextSteps: string[] }; omitted: Record<string, number>;
-};
+import type { ChildTaskResultFacts } from '../bridge/typed-client';
+export type { ChildTaskReadFact, ChildTaskResultFacts } from '../bridge/typed-client';
+
 export type ChildTaskResultsProps = { results: readonly ChildTaskResultFacts[]; onOpenChild?: (id: string) => void | Promise<void> };
 
 const taskStatus: Record<string, string> = { queued: '待开始', running: '执行中', waiting: '等待中', paused: '已暂停',

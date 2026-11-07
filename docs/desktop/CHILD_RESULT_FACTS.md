@@ -37,7 +37,15 @@ to six children and 6,000 characters; outer context budgets still apply.
 callback opens an existing child by ID. It creates no capabilities, scheduler,
 ChildResult store, writer concurrency or external Provider support.
 
+The Desktop Task read route derives these facts from the Runtime's current
+children and the maintained Work detail page exposes the same component. The
+normal parent Chat and Managed context builders read children from Task Runtime;
+renderer rows and model text cannot supply the linked child snapshots. The outer
+Product Context budget may omit whole child records with an explicit count,
+while retaining mandatory parent and permission state.
+
 The registered suite uses local Workspace files, the existing Capability Broker
 and actual Task read receipts, including reverse completion order and invalid
-bindings. Source and component checks are distinct from final Work-page mounts,
-real external model time overlap, native product and release acceptance.
+bindings. It also covers the actual Desktop read route, parent context and Work
+detail React rendering. These checks are distinct from native product interaction,
+real external model time overlap, installed product and release acceptance.
