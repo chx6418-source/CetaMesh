@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from 'node:child_process';
+import { spawn, spawnSync, execFile } from 'node:child_process';
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -278,6 +278,7 @@ export class CliAgentProcess {
     this.name = String(name ?? 'cli-agent');
     this.executableOverride = executable;
     this.selectedExecutable = null;
+    this.hasSelectedExecutable = false;
     this.argsPrefix = [...argsPrefix].map(String);
     this.envSource = envSource;
     this.spawnImpl = spawnImpl;
@@ -292,22 +293,24 @@ export class CliAgentProcess {
     this.nodeExecutable = !isSea() && /^node(?:\.exe)?$/i.test(path.basename(nodeExecutable ?? '')) && isFile(nodeExecutable)
       ? nodeExecutable : null;
     this.sessions = new Map();
+    this.pendingProbes = new Set();
+    this.stopping = false;
   }
 
   environment() { return typeof this.envSource === 'function' ? this.envSource() : this.envSource; }
 
-  candidates() {
-    this.selectedExecutable = null;
+  candidates({ preserveSelection = false, whereImpl, environment } = {}) {
+    if (!preserveSelection) { this.selectedExecutable = null; this.hasSelectedExecutable = false; }
     if (this.executableOverride === null) return [];
-    const env = this.environment();
+    const env = environment ?? this.environment();
     const explicit = environmentValue(env, 'CODEX_CLI_PATH');
     this.discoveryCode = explicit && (!path.isAbsolute(explicit) || !isFile(explicit) || (this.platform === 'win32' && !/\.exe$/i.test(explicit))) ? 'CODEX_CLI_PATH_INVALID' : null;
     return this.executableOverride !== undefined
-      ? findCliCandidates(String(this.executableOverride), { env, platform: this.platform })
-      : findCliCandidates(this.name, { env, platform: this.platform });
+      ? findCliCandidates(String(this.executableOverride), { env, platform: this.platform, whereImpl })
+      : findCliCandidates(this.name, { env, platform: this.platform, whereImpl });
   }
 
-  selectExecutable(executable) { this.selectedExecutable = executable; }
+  selectExecutable(executable) { this.selectedExecutable = executable; this.hasSelectedExecutable = true; }
 
   installKind() {
     const exe = this.executable();
@@ -317,21 +320,20 @@ export class CliAgentProcess {
     return /[\\/]Programs[\\/]OpenAI[\\/]Codex[\\/]bin[\\/]/i.test(exe ?? '') ? 'standalone' : exe ? 'path' : 'not-detected';
   }
 
-  launchTarget() {
-    const executable = this.executable();
+  launchTarget(executable = this.executable(), { whereImpl, environment = this.environment() } = {}) {
     if (!executable) return null;
     if (this.platform !== 'win32' || !/\.(?:cmd|bat)$/i.test(executable)) {
       return { executable, argsPrefix: this.argsPrefix };
     }
     const script = resolveNpmShimScript(this.name, executable);
     if (!script) throw Object.assign(new Error('Windows command shim does not resolve to the requested installed npm CLI package'), { code: 'UNSUPPORTED_WINDOWS_SHIM' });
-    const nodeExecutable = this.nodeExecutable ?? findCliExecutable(this.platform === 'win32' ? 'node.exe' : 'node', { env: this.environment(), platform: this.platform });
+    const nodeExecutable = this.nodeExecutable ?? findCliExecutable(this.platform === 'win32' ? 'node.exe' : 'node', { env: environment, platform: this.platform, whereImpl });
     if (!nodeExecutable) throw Object.assign(new Error('Windows npm shim requires an installed standalone Node runtime'), { code: 'NODE_RUNTIME_UNAVAILABLE' });
     return { executable: nodeExecutable, argsPrefix: [script, ...this.argsPrefix] };
   }
 
   executable() {
-    if (this.selectedExecutable) return this.selectedExecutable;
+    if (this.hasSelectedExecutable) return this.selectedExecutable;
     return this.candidates()[0] ?? null;
   }
 
@@ -351,17 +353,17 @@ export class CliAgentProcess {
     };
   }
 
-  probe(args, { timeoutMs = 5000 } = {}) {
-    const executable = this.executable();
+  probe(args, { timeoutMs = 5000, executable = this.executable(), environment = this.environment() } = {}) {
+    if (this.stopping) return { available: false, executable, code: 'PROVIDER_UNAVAILABLE' };
     if (!executable) return { available: false, executable: null, code: 'not_installed' };
     let target;
-    try { target = this.launchTarget(); }
+    try { target = this.launchTarget(executable, { environment }); }
     catch (error) { return { available: false, executable, code: error?.code ?? 'unsupported_shim' }; }
     let result;
     try {
       result = this.probeImpl(target.executable, [...target.argsPrefix, ...args.map(String)], {
         encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 1024 * 1024,
-        env: createMinimalAgentEnv(this.environment())
+        env: createMinimalAgentEnv(environment)
       });
     } catch (error) {
       // A failed OS process launch is returned as provider health, not thrown from discovery.
@@ -376,8 +378,42 @@ export class CliAgentProcess {
     };
   }
 
+  async probeAsync(args, { timeoutMs = 5000, executable = this.executable(), environment = this.environment() } = {}) {
+    if (this.stopping) return { available: false, executable, code: 'PROVIDER_UNAVAILABLE' };
+    // Trusted injected probes keep existing fixtures deterministic. Production
+    // inspections use an async child, so a slow CLI cannot freeze every IPC pipe.
+    if (this.probeImpl !== spawnSync) return this.probe(args, { timeoutMs, executable, environment });
+    if (!executable) return { available: false, executable: null, code: 'not_installed' };
+    let target;
+    // where.exe only repeats files in the directories already enumerated by
+    // discovery. Avoid its synchronous subprocess on the live inspection path.
+    try { target = this.launchTarget(executable, { whereImpl: () => null, environment }); }
+    catch (error) { return { available: false, executable, code: error?.code ?? 'unsupported_shim' }; }
+    return new Promise(resolve => {
+      const controller = new AbortController();
+      let observedExit;
+      const probe = { controller, exited: new Promise(done => { observedExit = done; }) };
+      const release = () => { this.pendingProbes.delete(probe); observedExit(); };
+      this.pendingProbes.add(probe);
+      const finish = (error, stdout, stderr) => resolve({
+        available: !error, executable, code: error?.code ?? (error ? 'probe_failed' : null),
+        stdout: String(stdout ?? ''), stderr: String(stderr ?? '')
+      });
+      try { const child = execFile(target.executable, [...target.argsPrefix, ...args.map(String)], {
+        encoding: 'utf8', timeout: timeoutMs, windowsHide: true, maxBuffer: 1024 * 1024,
+        env: createMinimalAgentEnv(environment), signal: controller.signal
+      }, finish);
+        // Abort can reject the callback before close. Ownership ends only after
+        // the actual child close event, not the cancellation acknowledgement.
+        child.once('close', release);
+      }
+      catch (error) { release(); finish(error); }
+    });
+  }
+
   startSession({ sessionId = crypto.randomUUID(), cwd, args = [], input = '', env = {}, timeoutMs = 10 * 60 * 1000,
     inputMode = 'end', authorizedEnvKeys = [], onStdout = () => {}, onStderr = () => {} } = {}) {
+    if (this.stopping) throw Object.assign(new Error('CLI process owner is shutting down'), { code: 'PROVIDER_UNAVAILABLE' });
     const executable = this.executable();
     if (!executable) throw Object.assign(new Error(`${this.name} is not installed`), { code: 'PROVIDER_UNAVAILABLE' });
     const target = this.launchTarget();
@@ -522,11 +558,21 @@ export class CliAgentProcess {
   }
 
   async shutdown() {
-    const active = [...this.sessions.values()];
-    for (const handle of active) handle.shutdown();
-    await Promise.allSettled(active.map((handle) => handle.done));
-    if (this.sessions.size) throw Object.assign(new Error('CLI process-tree exit remains unconfirmed; ownership retained'),
-      { code: 'PROVIDER_CLOSE_UNKNOWN', effectStatus: 'unknown' });
-    return { stopped: active.length };
+    this.stopping = true;
+    try {
+      const probes = [...this.pendingProbes];
+      for (const probe of probes) probe.controller.abort();
+      const active = [...this.sessions.values()];
+      for (const handle of active) handle.shutdown();
+      await Promise.allSettled(active.map((handle) => handle.done));
+      await Promise.all(probes.map(probe => probe.exited));
+      if (this.sessions.size) throw Object.assign(new Error('CLI process-tree exit remains unconfirmed; ownership retained'),
+        { code: 'PROVIDER_CLOSE_UNKNOWN', effectStatus: 'unknown' });
+      return { stopped: active.length };
+    } finally {
+      // The shared CLI owner has always supported another inspection/run after
+      // its prior handles settle. Provider shutdown owns its permanent fence.
+      this.stopping = false;
+    }
   }
 }

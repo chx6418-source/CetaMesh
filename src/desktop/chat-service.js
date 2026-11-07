@@ -1072,7 +1072,7 @@ export function createChatService({
   const pendingUiDeltas = new Map();
 
   function handleChatEvent(record, state, event) {
-    if (state.turn && state.modelTurn?.kind === 'agent' && state.turn.state === 'starting' && !state.turn.agentAcked
+    if (state.turn && ['agent', 'platform-route'].includes(state.modelTurn?.kind) && state.turn.state === 'starting' && !state.turn.agentAcked
       && !state.turn.providerRequestId && !state.turn.providerTurnId) {
       const pending = state.turn.pendingAgentEvents ??= [];
       if (pending.length >= 512) {
@@ -1118,6 +1118,7 @@ export function createChatService({
     const data = event?.data ?? {};
     const activitySource = state.modelTurn?.kind === 'model' ? 'model-runtime' : 'agent-follow';
     if (!state.turn || (data.sessionId && data.sessionId !== record.dshSessionId)) return false;
+    if (state.turn.automaticTaskRunId && (data.phase !== 'user' || data.runId !== state.turn.automaticTaskRunId)) return false;
     if (state.turn.providerRequestId && data.requestId && data.requestId !== state.turn.providerRequestId) return false;
     if (state.turn.providerTurnId && data.turn && data.turn !== state.turn.providerTurnId) return false;
     if (state.turn.providerRequestId && !data.requestId && !data.turn && record.runtimeProvider === 'cetamesh') return false;
@@ -1363,9 +1364,52 @@ export function createChatService({
       saveStore();
     }
     stopFollow(record.id);
+    // Continuity may have committed while this Chat still projected the old
+    // run, so its assignment notification correctly refused TURN_BUSY. The real
+    // old terminal is the safe point to repair that read-only projection.
+    if (!closePromise && turn.state === 'idle-done' && record.taskId && typeof resolveTask === 'function') {
+      Promise.resolve().then(async () => {
+        if (closePromise || state.turn || runtime.get(record.id) !== state) return;
+        const task = await resolveTask(record.taskId);
+        if (closePromise || state.turn || runtime.get(record.id) !== state || !task?.currentAgent
+          || !['dispatching', 'awaiting-result', 'returning', 'verifying', 'needs-review', 'verified'].includes(task.delegationProposal?.state)
+          || (record.runtimeProvider === task.currentAgent.provider && record.dshSessionId === task.currentAgent.sessionId)) return;
+        await synchronizeTaskAssignment({ taskId: task.id, ...task.currentAgent });
+      }).catch(error => {
+        if (!closePromise && error?.code !== 'TURN_BUSY') onEvent?.({ event: 'chat.warning', data: { sessionId: record.id,
+          code: 'ASSIGNMENT_PROJECTION_FAILED', message: '任务交接已经提交，聊天结果订阅需要重新检查。' } });
+      });
+    }
+  }
+
+  async function observeAutomaticTaskTurn(record, state, event, provider, sessionId) {
+    const data = event?.data;
+    if (closePromise || state.turn || event?.type !== 'turn/start' || data?.phase !== 'user' || !data.runId
+      || !record.taskId || typeof resolveTask !== 'function') return;
+    const task = await resolveTask(record.taskId);
+    // Follow is presentation only. A delayed event cannot claim a replacement
+    // Task/Session/run or overwrite a new user turn while Task lookup awaited.
+    if (closePromise || state.turn || record.dshSessionId !== sessionId || record.runtimeProvider !== provider
+      || task?.currentAgent?.provider !== provider || task.currentAgent.sessionId !== sessionId
+      || task.executionObservation?.provider !== provider || task.executionObservation.sessionId !== sessionId
+      || task.executionObservation.runId !== data.runId) return;
+    const proposal = task.delegationProposal;
+    const outbound = proposal?.selectedProvider === provider && proposal.targetSessionId === sessionId
+      && ['dispatching', 'awaiting-result', 'returning'].includes(proposal.state);
+    const verification = provider === 'cetamesh' && proposal?.returnSessionId === sessionId
+      && ['returning', 'verifying', 'needs-review', 'verified'].includes(proposal.state);
+    if (!outbound && !verification) return;
+    state.messageTexts = []; state.chunkBuffer = ''; state.promptChars = 0;
+    state.turn = { id: crypto.randomUUID(), requestId: data.requestId ?? 'task-run:' + data.runId,
+      automaticTaskRunId: data.runId, providerRequestId: data.requestId ?? null, providerTurnId: data.turn ?? null,
+      accountingSessionId: provider === 'cetamesh' ? sessionId : record.id, accountingTaskId: task.id,
+      agentAcked: true, state: 'streaming', displayText: '', toolActivity: [], error: null, usage: null,
+      routing: { resolvedRoute: 'agent', taskId: task.id, provider } };
+    setAgentActivity(record, state, provider);
   }
 
   function ensureFollow(record) {
+    if (closePromise) return;
     const state = runtimeOf(record.id);
     if (state.follow?.active) return;
     const controller = new AbortController();
@@ -1399,6 +1443,9 @@ export function createChatService({
               state.followSessionId = sessionId;
             }
             state.follow.status = 'connected';
+            await observeAutomaticTaskTurn(record, state, event, provider, sessionId);
+            if (controller.signal.aborted || !state.follow?.active || state.follow.controller !== controller
+              || record.dshSessionId !== sessionId) break;
             if (state.turn) state.turn.statusMessage = null;
             handleChatEvent(record, state, event);
           }
@@ -1829,6 +1876,12 @@ export function createChatService({
             state.turn.routing = { ...routing, resolvedRoute: 'agent', taskId: result.taskId ?? null, provider: result.provider };
             state.turn.state = 'streaming';
             state.turn.statusMessage = `${result.provider} accepted the turn; waiting for Agent events.`;
+            const pendingEvents = turn.pendingAgentEvents ?? [];
+            delete turn.pendingAgentEvents;
+            for (const event of pendingEvents) {
+              if (state.turn !== turn) break;
+              handleChatEvent(record, state, event);
+            }
           }
           ensureFollow(record);
           onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'streaming', requestId: operation.requestId,
@@ -2113,8 +2166,10 @@ export function createChatService({
     return source ? prepareTaskContext({ record: source, taskId }) : null;
   }
 
-  async function synchronizeTaskAssignment({ taskId, provider, sessionId } = {}) {
+  async function synchronizeTaskAssignment({ taskId, provider, sessionId, sinceSequence = 0 } = {}) {
+    if (closePromise) return { updated: 0 };
     const task = typeof resolveTask === 'function' ? await resolveTask(taskId) : null;
+    if (closePromise) return { updated: 0 };
     if (!task?.currentAgent || task.currentAgent.provider !== provider || task.currentAgent.sessionId !== sessionId) {
       throw chatError('TASK_SESSION_MISMATCH', 'Only the committed Task assignment may update Chat');
     }
@@ -2141,8 +2196,16 @@ export function createChatService({
         runtimeProvider: old.runtimeProvider, dshSessionId: old.dshSessionId });
       throw error;
     }
-    for (const old of changed) onEvent?.({ event: 'chat.updated', data: {
-      sessionId: old.record.id, taskId, status: 'assignment-changed', provider } });
+    for (const old of changed) {
+      const state = runtimeOf(old.record.id);
+      state.followSessionId = sessionId;
+      state.followSequence = Number.isSafeInteger(sinceSequence) && sinceSequence >= 0 ? sinceSequence : 0;
+      // Handoff completed its bootstrap; formal automatic dispatch may start
+      // afterwards. Observe that actual run through the existing Follow path.
+      ensureFollow(old.record);
+      onEvent?.({ event: 'chat.updated', data: {
+        sessionId: old.record.id, taskId, status: 'assignment-changed', provider } });
+    }
     return { updated: changed.length };
   }
 

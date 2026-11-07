@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import { OWNER_ACTOR, capabilityError } from '../capability/types.js';
-import { rankTaskAgents } from '../router/agent-assignment.js';
+import { rankTaskAgents, subscriptionBillingFingerprint } from '../router/agent-assignment.js';
 import { TASK_LIMITS } from '../task/types.js';
 
 /** One-shot Task-bound coordination. Continuity owns handoff persistence and fencing. */
@@ -62,11 +62,17 @@ export function createAutonomousHandoff({taskRuntime,agentBroker,capabilityServi
       const rank=()=>rankTaskAgents({agentBroker,workspaceId:current.workspaceId,taskKind:proposal.intent.taskKind,
         requiredTools:proposal.intent.requiredTools,difficulty:proposal.intent.difficulty,
         modelProvider:current.modelConfig?.modelProvider??null,model:current.modelConfig?.model??null,
-        allowUnknownCost:policy.allowUnknownCost===true,includePreparation:policy.prepareNative===true,exclude:[provider]});
+        allowUnknownCost:policy.allowUnknownCost===true,allowSubscriptionOnly:policy.allowSubscriptionOnly===true,
+        includePreparation:policy.prepareNative===true,exclude:[provider]});
       const candidates=await rank();
       if(closed)throw capabilityError('DELEGATION_SHUTTING_DOWN','Core is stopping before delegation');
       if(!candidates.length)throw capabilityError('DELEGATION_NO_ELIGIBLE_AGENT','No authorized and verified Agent is available');
       const candidate=candidates[0],selected=candidate.provider;
+      const assertBillingRoute=()=>{
+        if(candidate.billingMode==='chatgpt-subscription'
+          &&subscriptionBillingFingerprint(agentBroker.capabilities(selected)?.security?.billingRoute)!==candidate.billingFingerprint)
+          throw capabilityError('DELEGATION_BILLING_ROUTE_CHANGED','The authorized subscription route changed; no API route is authorized');
+      };
       if(candidate.preparationRequired){
         const scope=agentBroker.describeExecutionSecurity(selected,current.workspaceId);
         if(scope.required&&!scope.authorized){
@@ -96,14 +102,16 @@ export function createAutonomousHandoff({taskRuntime,agentBroker,capabilityServi
       const switched=await continuityRuntime.rollover({taskId:task.id,targetProvider:selected,reason:'provider-switch',automatic:true,
         modelProvider:'',model:'',reasoningEffort:'',requireNativeReadiness:candidate.preparationRequired===true,
         authorizationGuard:({sessionId:targetSession}={})=>{if(closed)throw capabilityError('DELEGATION_SHUTTING_DOWN','Core is stopping');
-          const live=taskRuntime.get({id:task.id}).task;
+          assertBillingRoute();const live=taskRuntime.get({id:task.id}).task;
           taskRuntime.assertDelegationClaim({id:task.id,requestId:proposal.requestId,selectedProvider:selected,
             ...(targetSession&&live.currentAgent?.provider===selected&&live.currentAgent?.sessionId===targetSession?{targetSessionId:targetSession}:{claimedRevision:claim.authorizationRevision})});}});
       if(switched?.to?.provider!==selected||!switched.to.sessionId)throw capabilityError('DELEGATION_HANDOFF_UNCONFIRMED','Handoff did not confirm its target');
       if(!(await rankTaskAgents({agentBroker,workspaceId:current.workspaceId,taskKind:proposal.intent.taskKind,requiredTools:proposal.intent.requiredTools,difficulty:proposal.intent.difficulty,
-        modelProvider:current.modelConfig?.modelProvider??null,model:current.modelConfig?.model??null,allowUnknownCost:policy.allowUnknownCost===true,exclude:[provider]})).some(row=>row.provider===selected))
+        modelProvider:current.modelConfig?.modelProvider??null,model:current.modelConfig?.model??null,allowUnknownCost:policy.allowUnknownCost===true,
+        allowSubscriptionOnly:policy.allowSubscriptionOnly===true,exclude:[provider]})).some(row=>row.provider===selected))
         throw capabilityError('DELEGATION_READINESS_UNVERIFIED','Native tool readiness was not verified before formal task dispatch');
       taskRuntime.assertDelegationClaim({id:task.id,requestId:proposal.requestId,selectedProvider:selected,targetSessionId:switched.to.sessionId});
+      assertBillingRoute();
       taskRuntime.recordDelegationTarget({id:task.id,requestId:proposal.requestId,selectedProvider:selected,sessionId:switched.to.sessionId});
       if(closed)throw capabilityError('DELEGATION_SHUTTING_DOWN','Core stopped before Agent dispatch');
       const requestId='delegation:'+crypto.createHash('sha256').update(JSON.stringify([task.id,proposal.requestId])).digest('hex');

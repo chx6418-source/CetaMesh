@@ -45,7 +45,7 @@ function profileOverrides() {
 }
 
 /** Provider-owned flags are derived from codex --help / exec --help / exec resume --help. */
-export function buildCodexExecArgs({ stageRoot, promptMode = 'fresh', threadId = null, model, reasoningEffort, modelConfiguration, securityMode = 'native', windowsSandboxMode = 'unelevated' } = {}) {
+export function buildCodexExecArgs({ stageRoot, promptMode = 'fresh', threadId = null, model, reasoningEffort, modelConfiguration, securityMode = 'native', windowsSandboxMode = 'unelevated', subscriptionOnly = false } = {}) {
   if (!['native', 'isolated'].includes(securityMode)) throw agentProviderError('INVALID_PARAMS', 'Unknown Agent security mode');
   const args = [
     '--ask-for-approval', 'never',
@@ -54,6 +54,7 @@ export function buildCodexExecArgs({ stageRoot, promptMode = 'fresh', threadId =
   if (model) args.push('--model', String(model));
   if (reasoningEffort) args.push('--config', `model_reasoning_effort=${quoteToml(reasoningEffort)}`);
   args.push(...inheritedProviderArgs(modelConfiguration));
+  if (subscriptionOnly === true) args.push('--config', 'forced_login_method="chatgpt"');
   // Security-sensitive settings follow inherited model configuration so they always win.
   // The staging copy is a working directory, not host-file read isolation. It is already the command's -C workspace. Keep the
   // profile scoped to that root without encoding a Windows path as a config key.
@@ -152,14 +153,14 @@ function nativeRulesIdentity(codexHome) {
  * Inherit only the user's selected model and one explicit model provider. MCP,
  * hooks, plugins, sandbox, approval, and arbitrary user TOML never enter a Task.
  */
-function readCodexModelConfiguration(codexHome) {
+function readCodexModelConfiguration(codexHome, suppliedText) {
   if (!codexHome) return { model: null, modelProvider: null, provider: {} };
   const file = path.join(codexHome, 'config.toml');
-  let text;
-  try {
+  let text = suppliedText;
+  try { if (typeof text !== 'string') {
     const stat = fs.statSync(file);
     if (!stat.isFile() || stat.size > 256 * 1024) return { model: null, modelProvider: null, provider: {} };
-    text = fs.readFileSync(file, 'utf8');
+    text = fs.readFileSync(file, 'utf8'); }
   } catch { return { model: null, modelProvider: null, provider: {} }; }
 
   let section = '';
@@ -232,6 +233,10 @@ function inspectSelectedCodexCli(cli) {
   const top = cli.probe(['--help']);
   const exec = cli.probe(['exec', '--help']);
   const resume = cli.probe(['exec', 'resume', '--help']);
+  return codexInspection(installed, version, top, exec, resume);
+}
+
+function codexInspection(installed, version, top, exec, resume) {
   const topHelp = `${top.stdout}\n${top.stderr}`;
   const execHelp = `${exec.stdout}\n${exec.stderr}`;
   const resumeHelp = `${resume.stdout}\n${resume.stderr}`;
@@ -271,9 +276,80 @@ function inspectCodexCli(cli) {
 
 function loginState(cli) {
   const result = cli.probe(['login', 'status'], { timeoutMs: 5000 });
+  return loginObservation(result);
+}
+
+function authenticatedProbe(result) {
   const text = `${result.stdout}\n${result.stderr}`.toLowerCase();
   if (!result.available) return false;
   return /logged in|authenticated/.test(text) && !/not logged in|not authenticated/.test(text);
+}
+
+function loginObservation(result) {
+  const authenticated = authenticatedProbe(result);
+  const text = `${result.stdout}\n${result.stderr}`;
+  return { authenticated, chatgpt: authenticated && /^\s*logged in (?:using|with) chatgpt\s*$/im.test(text)
+    && !/api[ -]?key/i.test(text) };
+}
+
+// Read only bounded local metadata. Tokens and the account id never leave this
+// function; token renewal must not change the stable account/route identity.
+function subscriptionContext(codexHome, apiEnvironmentAuthorized) {
+  if (apiEnvironmentAuthorized === true) return null;
+  function read(file, optional = false) {
+    let before;
+    try { before = fs.lstatSync(file); }
+    catch (error) { if (optional && error.code === 'ENOENT') return ''; throw error; }
+    if (!before.isFile() || before.isSymbolicLink() || before.size > 256 * 1024) return null;
+    const text = fs.readFileSync(file, 'utf8'), after = fs.lstatSync(file);
+    return [before.dev, before.ino, before.size, before.mtimeMs].every((value, index) => value === [after.dev, after.ino, after.size, after.mtimeMs][index]) ? text : null;
+  }
+  try {
+    const authText = read(path.join(codexHome, 'auth.json'));
+    if (authText === null) return null;
+    const auth = JSON.parse(authText);
+    const account = auth?.tokens?.account_id;
+    if (auth?.auth_mode !== 'chatgpt' || (auth.OPENAI_API_KEY != null && auth.OPENAI_API_KEY !== '')
+      || typeof account !== 'string' || !account || account.length > 512 || /[\x00-\x1f\x7f]/.test(account)) return null;
+    const configText = read(path.join(codexHome, 'config.toml'), true);
+    if (configText === null) return null;
+    const config = readCodexModelConfiguration(codexHome, configText);
+    if ((config.modelProvider && config.modelProvider !== 'openai') || Object.keys(config.provider).length) return null;
+    return crypto.createHash('sha256').update(JSON.stringify({ home: fs.realpathSync(codexHome), account,
+      provider: config.modelProvider || 'openai', model: config.model, apiEnvironmentAuthorized: false })).digest('hex');
+  } catch { return null; /* Missing/keyring-only/ambiguous identity cannot authorize subscription dispatch. */ }
+}
+
+async function inspectCodexCliAsync(cli, readSubscriptionContext = () => null, isClosing = () => false) {
+  const billingBefore = readSubscriptionContext();
+  const environment = typeof cli.environment === 'function' ? { ...cli.environment() } : undefined;
+  const environmentIdentity = JSON.stringify(environment);
+  const executableIdentity = executable => { try { const stat = fs.statSync(executable); return JSON.stringify([stat.dev, stat.ino, stat.size, stat.mtimeMs]); } catch { return null; } };
+  const candidates = typeof cli.candidates === 'function'
+    ? cli.candidates({ preserveSelection: true, whereImpl: () => null, environment }) : [cli.executable()].filter(Boolean);
+  let first = null;
+  for (const executable of candidates.slice(0, 16)) {
+    if (isClosing()) break;
+    const before = executableIdentity(executable);
+    const probe = (args, options) => isClosing() ? Promise.resolve({available:false,code:'PROVIDER_SHUTTING_DOWN'}) : typeof cli.probeAsync === 'function'
+      ? cli.probeAsync(args, { ...options, executable, environment }) : cli.probe(args, { ...options, executable, environment });
+    const version = await probe(['--version']);
+    const result = !version.available
+      ? { installed: true, available: false, reason: 'unsupported_cli', version: null, probePhase: 'version', probeCode: version.code ?? 'PROBE_FAILED' }
+      : codexInspection(true, version, await probe(['--help']), await probe(['exec', '--help']), await probe(['exec', 'resume', '--help']));
+    if (result.available) {
+      const authentication = loginObservation(await probe(['login', 'status'], { timeoutMs: 5000 }));
+      const billingAfter = readSubscriptionContext();
+      const changed = before !== executableIdentity(executable)
+        || (environment !== undefined && environmentIdentity !== JSON.stringify(cli.environment())) || billingBefore !== billingAfter;
+      return { inspection: changed ? { ...result, available: false, reason: 'runtime_changed', probePhase: 'configuration', probeCode: 'AGENT_RUNTIME_CHANGED' } : result,
+        executable, authenticated: !changed && authentication.authenticated, subscriptionObserved: !changed && authentication.chatgpt,
+        billingContext: !changed ? billingAfter : null };
+    }
+    first ??= { inspection: result, executable, authenticated: false };
+  }
+  return first ?? { inspection: { installed: false, available: false, reason: cli.discoveryCode ? 'invalid_cli_path' : 'not_installed', version: null,
+    probePhase: 'discovery', probeCode: cli.discoveryCode ?? 'CLI_NOT_FOUND' }, executable: null, authenticated: false };
 }
 
 function extractText(event) {
@@ -311,7 +387,11 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     envSource: () => ({ ...environment, CODEX_HOME: resolvedCodexHome }), ownedTreeStateDir:stateDir });
   const lifecycle = sessionLifecycle ?? createCodexSessionLifecycle({stateDir, probeHostBoot});
   let inspection = inspectCodexCli(cli);
-  let authenticated = inspection.available ? loginState(cli) : false;
+  const readSubscriptionContext = () => subscriptionContext(resolvedCodexHome, authorizeOpenAiEnvironment() === true);
+  let observedBillingContext = readSubscriptionContext();
+  const initialLogin = inspection.available ? loginState(cli) : { authenticated: false, chatgpt: false };
+  let authenticated = initialLogin.authenticated;
+  let subscriptionObserved = initialLogin.chatgpt && observedBillingContext === readSubscriptionContext();
   let lastProbeAt = Date.now();
   let sandboxCapable = null;
   let toolsAvailable = null;
@@ -319,6 +399,8 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
   let inspectionGeneration = 0;
   let inspectedIdentity = JSON.stringify([cli.executable(), inspection.version]);
   const sessions = new Map();
+  let closing = false;
+  const assertOpen = () => { if (closing) throw agentProviderError('PROVIDER_SHUTTING_DOWN', 'Codex Provider is shutting down'); };
   function legacyScope(task) {
     const last = task?.agentHistory?.at(-1), agent = task?.currentAgent;
     if (!['blocked', 'paused', 'waiting'].includes(task?.status) || agent?.provider !== 'codex'
@@ -343,14 +425,31 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     requested:{model:session.model,reasoningEffort:session.reasoningEffort,modelProvider:session.modelConfiguration?.modelProvider??null},
     lastRequest:session.lastModelRequest?{...session.lastModelRequest}:null});
 
-  function refreshInspection(force = false) {
+  let refreshPending = null;
+  async function refreshInspection(force = false) {
+    if (refreshPending) return refreshPending;
     if (!force && Date.now() - lastProbeAt < HEALTH_TTL_MS) return;
-    inspection = inspectCodexCli(cli);
-    const identity = JSON.stringify([cli.executable(), inspection.version]);
-    if (identity !== inspectedIdentity) { sandboxCapable = null; toolsAvailable = null; inspectionGeneration++; }
-    inspectedIdentity = identity;
-    authenticated = inspection.available ? loginState(cli) : false;
-    lastProbeAt = Date.now();
+    refreshPending = (async () => {
+      const policyIdentity = nativeRulesIdentity(resolvedCodexHome);
+      const next = await inspectCodexCliAsync(cli, readSubscriptionContext, () => closing);
+      if (closing) return;
+      if (policyIdentity !== nativeRulesIdentity(resolvedCodexHome)) {
+        next.inspection = { ...next.inspection, available: false, reason: 'runtime_changed', probePhase: 'configuration', probeCode: 'AGENT_RUNTIME_CHANGED' };
+        next.authenticated = false;
+      }
+      // Publish one complete inspection, never a candidate selected halfway
+      // through its protocol/authentication checks.
+      cli.selectExecutable?.(next.executable);
+      inspection = next.inspection;
+      const identity = JSON.stringify([next.executable, inspection.version]);
+      if (identity !== inspectedIdentity) { sandboxCapable = null; toolsAvailable = null; inspectionGeneration++; }
+      inspectedIdentity = identity;
+      authenticated = next.authenticated;
+      subscriptionObserved = next.subscriptionObserved === true;
+      observedBillingContext = next.billingContext ?? null;
+      lastProbeAt = Date.now();
+    })().finally(() => { refreshPending = null; });
+    return refreshPending;
   }
 
   function executionSecurity() {
@@ -358,7 +457,11 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     try { const stat = fs.statSync(cli.executable()); executableStat = [stat.size, stat.mtimeMs]; }
     catch { executableStat = 'unavailable'; /* Fixtures and failed file probes retain a distinct policy identity. */ }
     const selectedSandbox = selectedWindowsSandbox(resolvedCodexHome);
-    const identity = crypto.createHash('sha256').update(JSON.stringify([inspectedIdentity, executableStat, securityMode, selectedSandbox, nativeRulesIdentity(resolvedCodexHome)])).digest('hex');
+    const billingContext = readSubscriptionContext();
+    const billingRoute = authenticated && subscriptionObserved && billingContext && billingContext === observedBillingContext
+      ? { mode: 'chatgpt-subscription', verified: true, source: 'codex-login-status',
+        fingerprint: crypto.createHash('sha256').update(JSON.stringify([inspectedIdentity, executableStat, billingContext])).digest('hex') } : null;
+    const identity = crypto.createHash('sha256').update(JSON.stringify([inspectedIdentity, executableStat, securityMode, selectedSandbox, nativeRulesIdentity(resolvedCodexHome), billingRoute])).digest('hex');
     if (lastSecurityIdentity !== null && lastSecurityIdentity !== identity) { sandboxCapable = null; toolsAvailable = null; inspectionGeneration++; }
     lastSecurityIdentity = identity;
     return { mode: securityMode, nativeSandboxSupported: inspection.nativeSandboxSupported === true
@@ -367,7 +470,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       nativeApprovalSupported: true, nativeApprovalPolicy: 'never (deny escalation; noninteractive)',
       executionBoundary: 'agent-native', workspaceAccess: 'staging cwd; native OS policy', directFilesystemAccess: true,
       platformToolPermissions: 'capability-broker', strictIsolationVerified: false, requiresConfirmation: true,
-      identity,
+      identity, billingRoute,
       securityLimitations: ['Native Security may read host files outside Staging. Native OS access is not mediated by CetaMesh tools.',
         'Native writes outside the declared workspace are governed by Codex; temporary writable paths follow its policy.',
         'Windows unelevated network isolation is environment-based, not a dedicated firewall boundary.',
@@ -671,9 +774,11 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     },
     methods: {
       async createSession({ taskId, workspaceId, modelProvider, model, reasoningEffort } = {}) {
+        assertOpen();
         const finishCreation = lifecycle.beginCreation({ taskId });
         try {
-        refreshInspection();
+        await refreshInspection();
+        assertOpen();
         if (securityMode !== 'native') throw agentProviderError('ISOLATED_ENVIRONMENT_UNVERIFIED', 'Isolated Workspace has no verified execution environment');
         if (process.platform === 'win32' && selectedWindowsSandbox(resolvedCodexHome) !== 'unelevated') throw agentProviderError('CODEX_NATIVE_POLICY_UNVERIFIED', 'Selected Windows backend requires independent verification; no fallback is allowed');
         if (!inspection.nativeSandboxSupported) throw agentProviderError('CODEX_NATIVE_POLICY_UNSUPPORTED', 'Installed Codex does not advertise workspace-write sandbox support');
@@ -686,11 +791,13 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
         }
         if (typeof resolveTaskWorkspace !== 'function') throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', 'Task Workspace resolver is unavailable');
         const binding = await resolveTaskWorkspace({ taskId: String(taskId), workspaceId: String(workspaceId) });
+        assertOpen();
         if (!binding?.task || binding.task.id !== String(taskId) || binding.task.workspaceId !== String(workspaceId)
           || binding.workspace?.id !== String(workspaceId) || typeof binding.workspace.root !== 'string') {
           throw agentProviderError('TASK_WORKSPACE_MISMATCH', 'Codex Task and Workspace binding is invalid');
         }
         const registeredRoots = await listWorkspaceRoots();
+        assertOpen();
         const stage = await createStage({
           taskId: binding.task.id,
           attemptId: binding.task.attempts?.at(-1)?.provider==='codex'?binding.task.attempts.at(-1).id:null,
@@ -702,8 +809,12 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           excludedRoots
         });
         const id = crypto.randomUUID();
-        if(stage.versionContext)stage.versionContext.executorId='codex:'+id;
-        try { lifecycle.create({sessionId:id,taskId:binding.task.id,workspaceId:binding.workspace.id,transport:'exec',
+        let billingFingerprint;
+        try {
+          assertOpen();
+          billingFingerprint = executionSecurity().billingRoute?.fingerprint ?? null;
+          if(stage.versionContext)stage.versionContext.executorId='codex:'+id;
+          lifecycle.create({sessionId:id,taskId:binding.task.id,workspaceId:binding.workspace.id,transport:'exec',
           snapshotId:stage.versionContext?.snapshotId??path.basename(stage.root),attemptId:stage.versionContext?.attemptId??null}); }
         catch(error) { cleanupStagingWorkspace(stage);throw error; }
         sessions.set(id, {
@@ -715,6 +826,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           reasoningEffort: typeof reasoningEffort === 'string' && reasoningEffort.trim()
             ? reasoningEffort.trim() : providerConfig.reasoningEffort,
           modelConfiguration: inheritedModelConfiguration,
+          billingFingerprint,
           stage,
           threadId: null,
           activeRun: null,
@@ -734,8 +846,11 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       },
 
       async send({ sessionId, content, runId = null, phase = 'user', nativeReadinessToken = null } = {}) {
+        assertOpen();
         const session = requireSession(sessionId);
         if (session.activeRun) throw agentProviderError('TURN_BUSY', 'Codex Task session already has an active turn');
+        if (session.billingFingerprint && executionSecurity().billingRoute?.fingerprint !== session.billingFingerprint)
+          throw agentProviderError('CODEX_BILLING_ROUTE_CHANGED', 'The Session subscription account or route changed; review the current native scope before continuing');
         const turnId = crypto.randomUUID();
         const prompt = [
           `[CetaMesh Task ${session.taskId}]`,
@@ -759,7 +874,8 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           threadId: session.threadId,
           model: session.model,
           reasoningEffort: session.reasoningEffort,
-          modelConfiguration: session.modelConfiguration, securityMode, windowsSandboxMode: selectedWindowsSandbox(resolvedCodexHome)
+          modelConfiguration: session.modelConfiguration, securityMode, windowsSandboxMode: selectedWindowsSandbox(resolvedCodexHome),
+          subscriptionOnly: Boolean(session.billingFingerprint)
         });
         try {
           const authorized = authorizeOpenAiEnvironment() === true;
@@ -908,9 +1024,9 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       },
 
       async health({ refresh = false } = {}) {
-        refreshInspection(refresh === true);
+        if (!closing) await refreshInspection(refresh === true);
         const security = projectedExecutionSecurity();
-        const available = inspection.available && authenticated && !security.verificationError;
+        const available = !closing && inspection.available && authenticated && !security.verificationError;
         return {
           available,
           installed: inspection.installed,
@@ -919,6 +1035,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
           provider: 'codex',
           version: inspection.version,
           authenticated,
+          billingRoute: security.billingRoute ?? null,
           status: security.nativeSandboxSupported !== true ? 'sandbox_unavailable' : sandboxCapable === false ? 'sandbox_unavailable' : authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable',
           reason: security.verificationError ?? inspection.reason ?? (security.nativeSandboxSupported !== true ? 'native_policy_unverified' : !authenticated ? 'needs_auth' : sandboxCapable === false ? 'sandbox_unavailable' : null),
           configured: inspection.available,
@@ -977,7 +1094,7 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
     capabilities() {
       const security = projectedExecutionSecurity();
       return Object.freeze({ ...contract.capabilities(), security, installed: inspection.installed, compatible: inspection.available,
-        available: inspection.available && authenticated && !security.verificationError, version: inspection.version,
+        available: !closing && inspection.available && authenticated && !security.verificationError, version: inspection.version,
         reason: security.verificationError ?? inspection.reason ?? (authenticated ? null : 'needs_auth'),
         ...(security.verificationError ? { sessionCapable: false, taskEligible: false, readyForTask: false } : {}),
         health: security.verificationError ? 'unavailable' : authenticated ? 'ready' : inspection.available ? 'needs_auth' : 'unavailable', supportsResume: inspection.supportsResume === true });
@@ -1102,7 +1219,9 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       return { provider: 'codex', configured: { ...providerConfig } };
     },
     async shutdown() {
+      closing = true;
       await cli.shutdown();
+      await refreshPending?.catch(() => {});
       const results=await Promise.allSettled([...sessions.keys()].map(sessionId=>contract.closeSession({sessionId})));
       if(results.some(result=>result.status==='rejected')) {
         throw agentProviderError('PROVIDER_CLOSE_UNKNOWN','Codex session shutdown is unconfirmed; staging and ownership retained');

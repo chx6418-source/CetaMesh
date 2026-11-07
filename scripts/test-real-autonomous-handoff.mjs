@@ -11,6 +11,7 @@ import {createCetaMeshServices} from '../src/app/service-container.js';
 import {createProviderSecrets} from '../src/providers/secrets.js';
 import {OWNER_ACTOR} from '../src/capability/types.js';
 import {redactText} from '../src/logging/redact.js';
+import {assertExactHandoffEffect} from './helpers/autonomous-handoff-acceptance.mjs';
 
 if(process.env.WHALEBRIDGE_TEST_REAL_MANAGED!=='1'||process.env.WHALEBRIDGE_TEST_REAL_CODEX!=='1'){
  console.log('NOT_RUN_ENVIRONMENT: explicit real Managed Provider and Codex opt-in required');process.exit(77);
@@ -91,13 +92,7 @@ try {
   for(const approval of services.capabilityService.broker.approvals.list()){
    if(approval.status!=='pending'||approval.request?.taskId!==taskId||approved.has(approval.id))continue;
    const request=approval.request;
-   if(request.capability==='workspace.apply'){
-    assert.deepEqual(request.input.changes.map(change=>change.path).sort(),allowedPaths);assert.ok(request.input.changes.every(change=>change.action==='write'));
-    assert.ok(request.input.changes[0].content.length<5000);
-   }else if(request.capability==='test.run'){
-    assert.equal(request.input.tool,'npm');assert.deepEqual(request.input.args,['test']);
-    for(const [file,expected]of Object.entries(protectedHashes))assert.equal(hash(fs.readFileSync(path.join(project,file))),expected,'original test remains unchanged');
-   }else throw Error('Unexpected approval capability '+request.capability);
+   assertExactHandoffEffect(request,{taskId,project,allowedPaths,protectedHashes});
    approved.add(approval.id);evidence.approvals.push(request.capability);
    await services.capabilityService.execute({method:'capability.approval.decide',params:{id:approval.id,approve:true}});
   }

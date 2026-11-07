@@ -87,6 +87,38 @@ assert.equal(explicitBudget[0]?.provider,'unknown','explicit Owner budget may au
 assert.equal(explicitBudget[0].cost,null,'unknown cost is never represented as free');
 console.log('PASS explicit configured native Agent routing, no automatic account assumption, current policy evidence');
 
+// A positively observed subscription route is a billing category, never a
+// zero-dollar price or permission to use an API-key/custom-provider route.
+const subscriptionRoute = { mode: 'chatgpt-subscription', verified: true, source: 'codex-login-status', fingerprint: 'a'.repeat(64) };
+let subscriptionHealth = { ...health.fast, authenticated: true, sandboxCapable: true, billingRoute: subscriptionRoute };
+let subscriptionSecurity = { mode: 'native', billingRoute: subscriptionRoute };
+const subscriptionBroker = { ids: () => ['codex'], health: async () => subscriptionHealth, assertExecutionConsent: () => {},
+  capabilities: () => ({ workspaceBoundary: 'native-staged', security: subscriptionSecurity,
+    assignment: { taskKinds: ['analysis'], tools: [], maxDifficulty: 3 } }) };
+const subscriptionRequest = { agentBroker: subscriptionBroker, workspaceId, taskKind: 'analysis', difficulty: 1,
+  requiredTools: [], modelProvider: 'ordinary-selected-model', model: 'fixture', allowUnknownCost: false };
+assert.deepEqual(await rankTaskAgents(subscriptionRequest), [], 'old policies never acquire subscription dispatch authority');
+const subscription = await rankTaskAgents({ ...subscriptionRequest, allowSubscriptionOnly: true });
+assert.equal(subscription[0]?.provider, 'codex', 'the exact Owner subscription policy can select the verified Codex subscription route');
+assert.equal(subscription[0].cost, null, 'subscription price/usage remains unknown');
+assert.equal(subscription[0].billingMode, 'chatgpt-subscription');
+assert.equal(subscription[0].billingFingerprint, subscriptionRoute.fingerprint);
+for (const [label, changed] of [
+  ['missing route', null], ['unverified route', { ...subscriptionRoute, verified: false }],
+  ['API route', { ...subscriptionRoute, mode: 'api-key' }], ['unbound fingerprint', { ...subscriptionRoute, fingerprint: 'b'.repeat(64) }],
+  ['unsupported source', { ...subscriptionRoute, source: 'fixture-price-guess' }]
+]) {
+  subscriptionHealth = { ...subscriptionHealth, billingRoute: changed };
+  assert.deepEqual(await rankTaskAgents({ ...subscriptionRequest, allowSubscriptionOnly: true }), [], label);
+}
+subscriptionHealth = { ...subscriptionHealth, billingRoute: subscriptionRoute };
+subscriptionSecurity = { mode: 'native', billingRoute: null };
+assert.deepEqual(await rankTaskAgents({ ...subscriptionRequest, allowSubscriptionOnly: true }), [], 'native consent identity must carry the same current route');
+subscriptionSecurity = { mode: 'native', billingRoute: subscriptionRoute };
+assert.deepEqual(await rankTaskAgents({ ...subscriptionRequest, allowSubscriptionOnly: true,
+  agentBroker: { ...subscriptionBroker, ids: () => ['other-native'] } }), [], 'Codex subscription evidence never authorizes a different Provider');
+console.log('PASS bounded Codex subscription-only qualification preserves unknown price and rejects API, stale, missing and foreign routes');
+
 // Negative evidence must veto automatic selection even when generic health is green.
 for (const flag of ['launchable', 'versionCompatible', 'sessionCreatable', 'toolCallingCapable', 'workspaceCapable', 'quotaAvailable']) {
   const healthWithVeto = { ...health.fast, authenticated: true, [flag]: false };

@@ -6,6 +6,10 @@ import { CliAgentProcess, findCliExecutable, createMinimalAgentEnv } from '../sr
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
+import crypto from 'node:crypto';
+import { once } from 'node:events';
+import { createDesktopIpcRuntime } from '../src/app/ipc-runtime.js';
+import { probeNativeIpc } from '../src/app/diagnostic-ipc.js';
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-discovery-'));
 const failures = [];
 async function check(name, run) { try { await run(); console.log('PASS', name); } catch (error) { failures.push(name + ": " + error.message); console.error('FAIL', name, error.message); } }
@@ -262,6 +266,81 @@ try {
   const cli = new CliAgentProcess({ name: 'gemini', executable: path.join(fixture.directory, 'codex.cmd'), envSource: { PATH: '' }, platform: 'win32' });
   fs.writeFileSync(cli.executableOverride, 'untrusted command');
   assert.equal(cli.probe(['--version']).code, 'UNSUPPORTED_WINDOWS_SHIM');
+ });
+ await check('slow CLI refresh keeps authenticated Core IPC responsive and coalesces concurrent checks', async () => {
+  const fixture = path.join(root, 'slow-cli.mjs'), delayed = path.join(root, 'slow-cli.enabled'), calls = path.join(root, 'slow-cli.calls');
+  const failed = path.join(root, 'slow-cli.failed');
+  fs.writeFileSync(fixture, `import fs from 'node:fs';
+const args=process.argv.slice(2);
+if(fs.existsSync(${JSON.stringify(delayed)})){
+ fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify(args)+'\\n');
+ await new Promise(resolve=>setTimeout(resolve,180));
+}
+console.log(args[0]==='--version'?'codex-cli 9.9.9-fixture':args[0]==='login'?'Logged in using ChatGPT':'--config --ask-for-approval --cd --sandbox workspace-write --json --ignore-user-config --ignore-rules --strict-config --skip-git-repo-check [SESSION_ID]');
+if(fs.existsSync(${JSON.stringify(failed)}))process.exitCode=7;
+`);
+  const controlled = new CliAgentProcess({name:'codex',executable:process.execPath,argsPrefix:[fixture]});
+  const slow = createCodexAgentProvider({cliProcess:controlled,resolveTaskWorkspace:()=>null});
+  const token=crypto.randomBytes(32).toString('hex');
+  const pipe=process.platform==='win32'?`\\\\.\\pipe\\codex-refresh-${crypto.randomUUID()}`:path.join(root,'refresh.sock');
+  const runtime=createDesktopIpcRuntime({pipeName:pipe,processRef:{env:{WHALEBRIDGE_UI_AUTH_TOKEN:token},once:()=>{}}});
+  const server=runtime.start();
+  if(!server.listening)await once(server,'listening');
+  let settled=false;const pending=[];
+  try{
+   fs.writeFileSync(delayed,'controlled CLI probes only; no model request');
+   const pingStarted=Date.now();
+   const ping=probeNativeIpc({pipeName:pipe,token,timeoutMs:2000});
+   for(let i=0;i<3;i++)pending.push(slow.health({refresh:true}).then(value=>{settled=true;return value;}));
+   await ping;
+   assert.equal(settled,false,'CLI inspection blocked the Core ready/ping callbacks until every probe had ended');
+   console.log('INFO authenticated IPC responded during CLI inspection in',Date.now()-pingStarted,'ms');
+   const health=await Promise.all(pending);
+   assert.ok(health.every(value=>value.compatible&&value.authenticated));
+   const observed=fs.readFileSync(calls,'utf8').trim().split('\n').map(line=>JSON.parse(line));
+   assert.equal(observed.length,5,'simultaneous health requests must share one version/help/auth inspection');
+   assert.deepEqual(observed,[['--version'],['--help'],['exec','--help'],['exec','resume','--help'],['login','status']]);
+   const timeout=await controlled.probeAsync(['--help'],{timeoutMs:25});
+   assert.equal(timeout.available,false,'a timed out probe cannot advertise the protocol');
+   const changing=slow.health({refresh:true});
+   controlled.envSource={...controlled.environment(),CODEX_HOME:path.join(root,'changed-account-home')};
+   const changed=await changing;
+   assert.equal(changed.compatible,false,'account environment changes during inspection invalidate its result');
+   assert.equal(changed.authenticated,false);
+   assert.equal(changed.probeCode,'AGENT_RUNTIME_CHANGED');
+   assert.equal((await slow.health({refresh:true})).authenticated,true,'a stable fresh inspection can recover');
+   fs.writeFileSync(failed,'valid-looking output with a nonzero process exit');
+   const nonzero=await slow.health({refresh:true});
+   assert.equal(nonzero.compatible,false);assert.equal(nonzero.authenticated,false);
+   fs.unlinkSync(failed);
+   assert.equal((await slow.health({refresh:true})).available,true);
+   controlled.executableOverride=null;
+   let discoveries=0;const originalDiscovery=controlled.candidates.bind(controlled);
+   controlled.candidates=options=>{discoveries++;return originalDiscovery(options);};
+   const absent=await slow.health({refresh:true});
+   assert.equal(absent.installed,false);assert.equal(absent.authenticated,false);
+   assert.equal(slow.capabilities().available,false);
+   await slow.health();
+   assert.equal(discoveries,1,'known absent CLI must not trigger another synchronous discovery from health projections');
+  }finally{await Promise.allSettled(pending);await runtime.stop();}
+ });
+ await check('shutdown cancels and observes its own readonly inspection before returning', async () => {
+  const fixture=path.join(root,'shutdown-probe.mjs'),pidFile=path.join(root,'shutdown-probe.pid');
+  fs.writeFileSync(fixture,`import fs from 'node:fs';fs.writeFileSync(${JSON.stringify(pidFile)},String(process.pid));await new Promise(resolve=>setTimeout(resolve,1200));console.log('readonly controlled probe');`);
+  const controlled=new CliAgentProcess({name:'codex',executable:process.execPath,argsPrefix:[fixture]});
+  const pending=controlled.probeAsync(['--help'],{timeoutMs:3000});
+  try{
+   const deadline=Date.now()+5000;
+   while(!fs.existsSync(pidFile)&&Date.now()<deadline)await new Promise(resolve=>setTimeout(resolve,10));
+   assert.ok(fs.existsSync(pidFile),'the test observes the actual owned inspection process');
+   const pid=Number(fs.readFileSync(pidFile,'utf8'));
+   await controlled.shutdown();
+   const result=await Promise.race([pending,new Promise(resolve=>setTimeout(()=>resolve(null),150))]);
+   assert.ok(result,'shutdown returned while its readonly inspection was still running');
+   assert.equal(result.available,false,'a cancelled inspection cannot publish readiness');
+   assert.throws(()=>process.kill(pid,0),error=>error.code==='ESRCH','the owned probe must actually exit');
+   assert.equal((await controlled.probeAsync(['--help'])).available,true,'settled CLI ownership remains reusable under its original contract');
+  }finally{await pending;await controlled.shutdown();}
  });
 } finally { fs.rmSync(root, { recursive: true, force: true }); }
 assert.equal(failures.length, 0, failures.join(', '));

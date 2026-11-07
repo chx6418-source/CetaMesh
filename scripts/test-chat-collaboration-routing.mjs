@@ -11,10 +11,25 @@ import { createCapabilityService } from '../src/capability/index.js';
 import { createMemoryService } from '../src/memory/index.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { defineAgentProvider } from '../src/agent/agent-provider.js';
+import { explicitCollaborationIntent } from '../src/desktop/explicit-delegation.js';
+import { classifyTask } from '../src/router/smart-router.js';
 
 const parent = fs.realpathSync(os.tmpdir());
 const root = fs.mkdtempSync(path.join(parent, 'cetamesh-chat-collaboration-'));
 const request = '先核实一下文件目录，然后交给其它agent完成项目分析';
+const codingRequest = '先读取本项目sum.js和verify.cjs，安排其它agent协作修复sum.js的加法错误，再独立核对差异和测试。';
+for (const text of [codingRequest, '请安排其它agent开发一个模块', '让其他agent实现搜索功能',
+  '委派给另外一个agent修改代码', '请用多个agent编写测试']) {
+  assert.equal(explicitCollaborationIntent(text), true, text);
+  assert.equal(classifyTask({ text, hasWorkspaceContext: true }).agentIntent, true, text);
+}
+for (const text of ['不要安排其它agent协作修复sum.js', '安排其它agent别修复错误',
+  '请解释“安排其它agent协作修复sum.js”这句话', '下面是需求示例：安排其它agent实现模块',
+  '安排其它agent协作修复是什么意思？', '请讨论安排其它agent修复sum.js的方案，不实际执行。',
+  '只想了解如何安排其它agent编写测试，没有要求执行。']) {
+  assert.equal(explicitCollaborationIntent(text), false, text);
+  assert.equal(classifyTask({ text, hasWorkspaceContext: true }).agentIntent, false, text);
+}
 
 async function waitFor(read, check) {
   const deadline = Date.now() + 15000;
@@ -85,7 +100,7 @@ async function fixture(name, { managedReady = true, disabled = false, now = Date
   };
 }
 
-async function actualCoreCollaboration(name, knownCost) {
+async function actualCoreCollaboration(name, knownCost, requestText = request, taskKind = 'analysis') {
   const base = path.join(root, name), project = path.join(base, 'project');
   fs.mkdirSync(project, { recursive: true });
   const fileContent = 'Actual Core collaboration read evidence.';
@@ -96,7 +111,7 @@ async function actualCoreCollaboration(name, knownCost) {
   // deliberately limited to controlled Providers, never installed native CLIs.
   services.agentBroker.ids = () => ['cetamesh', 'analysis-fixture'];
   let modelCalls = 0, nativeCreates = 0, candidateResult = null, proposalResult = null, modelError = null;
-  const needs = { taskKind: 'analysis', difficulty: 1, requiredTools: [] };
+  const needs = { taskKind, difficulty: 1, requiredTools: [] };
   services.modelRegistry.register({ id: 'collaboration-fixture', label: 'Synthetic collaboration model', supportsTools: true,
     defaultModel: 'fixture', health: async () => ({ available: true, configured: true }), listModels: async () => [{ id: 'fixture' }],
     chat: async () => { throw Error('Unexpected non-streaming model call'); },
@@ -106,7 +121,7 @@ async function actualCoreCollaboration(name, knownCost) {
       const call = (id, capabilityId, args) => ({ type: 'assistant/tool-calls', data: {
         toolCalls: [{ id, capabilityId, arguments: JSON.stringify(args) }] } });
       if (modelCalls++ === 0) {
-        assert.ok(JSON.stringify(input.messages).includes(request), 'the actual Managed model receives the whole request');
+        assert.ok(JSON.stringify(input.messages).includes(requestText), 'the actual Managed model receives the whole request');
         yield call('read-proof', 'filesystem.read', { path: 'proof.txt' });
       } else if (modelCalls === 2) {
         assert.ok(JSON.stringify(results).includes(fileContent), 'the model observes actual file bytes');
@@ -123,7 +138,8 @@ async function actualCoreCollaboration(name, knownCost) {
           assert.equal(candidateResult.result.candidates[0].cost.source, 'controlled-fixture');
         }
         if (knownCost) yield call('propose-analysis', 'agent.delegate.propose', { ...needs,
-          instruction: 'Analyze the project without modifying files, after the verified directory read.' });
+          instruction: taskKind === 'code' ? 'Fix the bounded project module after the verified read; native execution and file import still require Owner approval.'
+            : 'Analyze the project without modifying files, after the verified directory read.' });
         else yield { type: 'assistant/message', data: { message: { content: [{ type: 'text', text: 'No authorized-cost executor is available.' }] } } };
       } else if (knownCost && modelCalls === 4) {
         proposalResult = JSON.stringify(results);
@@ -140,7 +156,7 @@ async function actualCoreCollaboration(name, knownCost) {
     capabilityExtras: { workspaceBoundary: 'native-staged', supportsReadinessCheck: true,
       security: { mode: 'native', verified: true, nativeSandboxSupported: true, nativeSandboxMode: 'read-only',
         nativeApprovalSupported: true, nativeApprovalPolicy: 'on-request' },
-      assignment: { taskKinds: ['analysis'], tools: [], maxDifficulty: 3,
+      assignment: { taskKinds: ['analysis', 'code'], tools: [], maxDifficulty: 3,
         ...(knownCost ? { estimatedCost: { amount: 0, currency: 'USD', source: 'controlled-fixture',
           agentProvider: 'analysis-fixture', modelProvider: 'collaboration-fixture', model: 'fixture' } } : {}) } },
     methods: { async health() { return { available: true, installed: true, compatible: true, authenticated: true, sessionCapable: true }; },
@@ -152,12 +168,13 @@ async function actualCoreCollaboration(name, knownCost) {
     const chat = await services.chatService.execute({ method: 'chat.sessions.create', params: {} });
     await services.chatService.execute({ method: 'chat.config.set', params: { id: chat.id,
       config: { mode: 'chat', workspaceId: workspace.id, modelProvider: 'collaboration-fixture', model: 'fixture', reasoning: 'max' } } });
-    await services.chatService.execute({ method: 'chat.send', params: { id: chat.id, text: request } });
+    await services.chatService.execute({ method: 'chat.send', params: { id: chat.id, text: requestText } });
     const status = await waitFor(() => services.chatService.execute({ method: 'chat.status', params: { id: chat.id } }), value => value.turn === null);
     assert.equal(status.lastErrorCode, null, 'ordinary Core must enter its configured Managed model without an invented price descriptor: ' + JSON.stringify({ modelCalls, modelError, candidateResult, proposalResult }));
     const task = services.taskService.runtime.list().tasks[0];
     assert.ok(task?.delegationPolicy, 'explicit collaboration prepares a bounded Task policy');
     assert.equal(task.delegationPolicy.allowUnknownCost, false);
+    assert.equal(task.delegationPolicy.allowSubscriptionOnly, true, 'new explicit Chat collaboration permits only the verified Codex subscription route without guessing price');
     assert.equal(task.delegationPolicy.prepareNative, true);
     assert.equal(task.delegationPolicy.maxDelegations, 1);
     assert.equal(task.modelConfig.reasoningEffort, 'max', 'policy binds the actual Chat model configuration');
@@ -220,6 +237,8 @@ async function retainExistingPolicy(kind) {
 
 try {
   await actualCoreCollaboration('actual-core-preparation', true);
+  await actualCoreCollaboration('actual-core-coding-preparation', true,
+    '先读取项目proof.txt，安排其它agent协作修复项目模块，再独立核对结果。', 'code');
   await actualCoreCollaboration('actual-core-unknown-cost', false);
   for (const kind of ['valid', 'revoked', 'expired', 'exhausted']) await retainExistingPolicy(kind);
   const f = await fixture('ordinary-chat');

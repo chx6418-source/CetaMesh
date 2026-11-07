@@ -46,5 +46,6 @@ export async function configureTaskCollaboration(services,task,{collaboration,ve
   await services.capabilityService.execute({method:'capability.operation.prepare',params:{taskId:task.id,workspaceId:task.workspaceId,operationId,capability:'test.run',input:{tool:'npm',args:['test'],timeoutMs:120000}}});
   contract={kind:'code-tests',operationId,acceptanceIds:task.acceptance.map(row=>row.id),...verification};
  }
- return (await services.capabilityService.execute({method:'capability.delegation.authorize',params:{taskId:task.id,expectedRev:task.rev,policy:{expiresAt:Date.now()+1800000,maxDelegations:1,allowUnknownCost:collaboration.allowUnknownCost,prepareNative:collaboration.prepareNative,...(contract?{verification:contract}:{})}}})).task;
+ return (await services.capabilityService.execute({method:'capability.delegation.authorize',params:{taskId:task.id,expectedRev:task.rev,policy:{expiresAt:Date.now()+1800000,maxDelegations:1,allowUnknownCost:collaboration.allowUnknownCost,prepareNative:collaboration.prepareNative,
+  ...(collaboration.allowSubscriptionOnly===true?{allowSubscriptionOnly:true}:{}),...(contract?{verification:contract}:{})}}})).task;
 }

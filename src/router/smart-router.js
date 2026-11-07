@@ -96,7 +96,7 @@ export function classifyTask({
   const verbHit = ACTION_VERB.test(text);
   const codeContext = hasWorkspaceContext === true || hasCodeAttachments(attachments);
   const collaborationIntent = explicitCollaborationIntent(text);
-  if (collaborationIntent) reasons.push('用户明确要求协作分析 → 通过现有 Task 执行入口');
+  if (collaborationIntent) reasons.push('用户明确要求协作任务 → 通过现有 Task 执行入口');
   if (projectHits.length) reasons.push(`工程信号：${projectHits.join('、')}`);
   if (nounHits.length) reasons.push(`工程对象：${nounHits.join('、')}${verbHit ? '（含动作动词）' : ''}`);
   if (codeContext) reasons.push('工程上下文：代码附件/工作区');

@@ -86,6 +86,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       &&Number.isSafeInteger(policy.expiresAt)&&policy.expiresAt>now()&&Number.isSafeInteger(policy.maxDelegations)
       &&policy.maxDelegations>=1&&policy.maxDelegations<=3&&Number.isSafeInteger(policy.used)&&policy.used>=0
       &&(consumed?policy.used>=1&&policy.used<=policy.maxDelegations:policy.used<policy.maxDelegations)&&typeof policy.allowUnknownCost==='boolean'
+      &&(policy.allowSubscriptionOnly===undefined||typeof policy.allowSubscriptionOnly==='boolean')
       &&policy.revokedAt==null
       &&(policy.boundSessionId===null||typeof policy.boundSessionId==='string')&&policy.taskBinding===delegationBinding(task));
   }
@@ -95,7 +96,8 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     if(task.parentTaskId||!task.workspaceId||!['queued','running'].includes(task.status))throw taskError('DELEGATION_POLICY_DENIED','Task cannot accept delegation policy');
     if(!policy||typeof policy!=='object'||Array.isArray(policy)||!Number.isSafeInteger(policy.expiresAt)
       ||policy.expiresAt<now()+1000||policy.expiresAt>now()+86400000||!Number.isSafeInteger(policy.maxDelegations)
-      ||policy.maxDelegations<1||policy.maxDelegations>3||typeof policy.allowUnknownCost!=='boolean')
+      ||policy.maxDelegations<1||policy.maxDelegations>3||typeof policy.allowUnknownCost!=='boolean'
+      ||(policy.allowSubscriptionOnly!==undefined&&typeof policy.allowSubscriptionOnly!=='boolean'))
       throw taskError('INVALID_DELEGATION_POLICY','A bounded Owner policy is required');
     if(task.delegationProposal&&['proposed','dispatching','awaiting-result','returning','verifying','unknown'].includes(task.delegationProposal.state))
       throw taskError('DELEGATION_IN_PROGRESS','Reconcile the existing delegation before changing its policy');
@@ -103,6 +105,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     return mutate(id,expectedRev,draft=>{
       draft.delegationPolicy={id:crypto.randomUUID(),issuedBy:String(actor.id).slice(0,160),expiresAt:policy.expiresAt,
         maxDelegations:policy.maxDelegations,used:0,allowUnknownCost:policy.allowUnknownCost,prepareNative:policy.prepareNative===true,
+        ...(policy.allowSubscriptionOnly===true?{allowSubscriptionOnly:true}:{}),
         taskBinding:delegationBinding(draft),boundSessionId:null,...(verification?{verification}:{} )};
       return draft;
     });

@@ -14,6 +14,12 @@ function costEstimate(value, provider, modelProvider, model) {
     ? { amount: value.amount, currency: value.currency, source: value.source } : null;
 }
 
+/** Trusted Adapter observation; it describes the route, never a monetary price. */
+export function subscriptionBillingFingerprint(route) {
+  return route?.mode === 'chatgpt-subscription' && route.verified === true && route.source === 'codex-login-status'
+    && typeof route.fingerprint === 'string' && /^[a-f0-9]{64}$/.test(route.fingerprint) ? route.fingerprint : null;
+}
+
 /** A deterministic projection of the existing Broker's trusted Provider registry.
  * Unknown cost never authorizes an automatic paid dispatch. An explicit Owner
  * selection still passes through fresh health, boundary and consent checks.
@@ -21,7 +27,7 @@ function costEstimate(value, provider, modelProvider, model) {
 export async function rankTaskAgents({ agentBroker, workspaceId, explicitProvider = null,
   agentEnabled = true, taskKind = 'code', requiredTools = [], difficulty = 1, maxCost = null, allowUnknownCost = false,
   modelProvider = null, model = null,
-  exclude = [], includePreparation = false } = {}) {
+  exclude = [], includePreparation = false, allowSubscriptionOnly = false } = {}) {
   if (agentEnabled === false || explicitProvider === 'none') return [];
   const ids = explicitProvider ? [explicitProvider] : agentBroker.ids();
   const ranked = [];
@@ -59,14 +65,18 @@ export async function rankTaskAgents({ agentBroker, workspaceId, explicitProvide
       }
       // An Agent-wide price is not evidence for the actual selected model.
       const cost = costEstimate(assignment?.estimatedCost, provider, modelProvider, model);
+      const observedBilling = subscriptionBillingFingerprint(health?.billingRoute);
+      const subscription = allowSubscriptionOnly === true && provider === 'codex' && health.authenticated === true
+        && observedBilling && subscriptionBillingFingerprint(capabilities?.security?.billingRoute) === observedBilling;
       if (!explicitProvider) {
-        if (!cost && allowUnknownCost !== true) continue;
+        if (!cost && allowUnknownCost !== true && !subscription) continue;
         if (cost && cost.amount > 0 && (!Number.isFinite(maxCost?.amount)
           || maxCost.amount < cost.amount || maxCost.currency !== cost.currency)) continue;
       }
       const latencyMs = Number.isFinite(assignment?.estimatedLatencyMs) && assignment.estimatedLatencyMs >= 0
         ? assignment.estimatedLatencyMs : null;
-      ranked.push({ provider, cost, latencyMs, ...(preparationRequired?{taskEligible:false,preparationRequired:true,consentRequired}:{}) });
+      ranked.push({ provider, cost, latencyMs, ...(!cost && subscription ? {billingMode:'chatgpt-subscription',billingFingerprint:observedBilling} : {}),
+        ...(preparationRequired?{taskEligible:false,preparationRequired:true,consentRequired}:{}) });
     } catch (error) {
       if (explicitProvider) throw error;
       // A failed probe, revoked consent or malformed descriptor never qualifies

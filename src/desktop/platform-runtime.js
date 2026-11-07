@@ -345,7 +345,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
           capabilityService.grantTask(task.id, { capabilities: ['filesystem.read', 'filesystem.search',
             'git.status', 'git.diff', 'memory.read', 'operation.read', ...(attachedText ? ['attachment.read'] : [])] });
           task = await configureTaskCollaboration({ taskService: { runtime: taskRuntime }, capabilityService }, task, {
-            collaboration: { enabled: true, allowUnknownCost: false, prepareNative: true },
+            collaboration: { enabled: true, allowUnknownCost: false, prepareNative: true, allowSubscriptionOnly: true },
             modelProvider: record.config.modelProvider, model: record.config.model,
             reasoningEffort: record.config.reasoning
           });
