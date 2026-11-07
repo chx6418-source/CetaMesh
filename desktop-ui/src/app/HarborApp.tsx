@@ -9,6 +9,7 @@ export { taskListTitle, WorkTaskList, TaskCollaborationCard, TaskCollaborationSt
 import { AboutPage } from './AboutPage';
 import { PluginsPage } from './PluginsPage';
 import { ApprovalCard } from './ApprovalCard';
+import { ApprovalOperationSummary } from './StatusPresentation';
 export { PluginsPage } from './PluginsPage';
 export { ApprovalCard } from './ApprovalCard';
 export { OneBotConnectionForm } from './OneBotConnectionForm';
@@ -36,7 +37,7 @@ import { useSearchParams } from 'react-router';
 import { createPortal } from 'react-dom';
 import { mergeChatHistorySnapshot, mergeLatestChatMessages, prependOlderChatMessages, recoverForwardHistory } from './chat-history';
 import { applyChatStreamUpdates, ChatRequestEpoch, ChatStreamRevision, pendingReplyVisible, type ChatStreamUpdate } from './chat-async-state';
-import { productToolsClient, type Attachment, approvalClient, bridge, chatClient, hostClient, memoryClient, onboardingClient, settingsClient, taskClient, workspaceClient, type Agent, type Approval, type ChatMessage as ChatMessageDto, type ChatSession, type Memory, type ProviderSettingField, type SettingField, type Settings, type Task } from '../bridge/typed-client';
+import { productToolsClient, type Attachment, approvalClient, bridge, chatClient, hostClient, memoryClient, onboardingClient, settingsClient, taskClient, workspaceClient, type Agent, type Approval, type ApprovalDecisionResult, type ChatMessage as ChatMessageDto, type ChatSession, type Memory, type ProviderSettingField, type SettingField, type Settings, type Task } from '../bridge/typed-client';
 import { Icon } from '../components/icons';
 import { ArtifactCard } from '../components/product/cards';
 import { Button, IconButton, Input, normalizeSelectOptionLabel, SearchInput, Select, Tabs } from '../components/primitives/inputs';
@@ -309,7 +310,8 @@ type ChatTimelineItem =
   | { id: 'streaming'; kind: 'streaming'; message: ChatMessageDto }
   | { id: 'preparing'; kind: 'preparing' }
   | { id: 'turn-error'; kind: 'turn-error'; failure: ChatFailure }
-  | { id: string; kind: 'approval'; approval: Approval };
+  | { id: string; kind: 'approval'; approval: Approval }
+  | { id: 'approval-operations'; kind: 'approval-operations'; operations: ApprovalDecisionResult[] };
 const chatTimelineKey = (item: ChatTimelineItem) => item.id;
 const isChatMessageAnchor = (item: ChatTimelineItem) => item.kind === 'message';
 
@@ -330,6 +332,9 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
   const [linkedTask, setLinkedTask] = useState<Task | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
   const [approvals, setApprovals] = useState<Approval[]>([]);
+  const [approvalOperations, setApprovalOperations] = useState<ApprovalDecisionResult[]>([]);
+  const [approvalSubmissions, setApprovalSubmissions] = useState<Record<string, { pending: boolean; decision: boolean; error: string | null }>>({});
+  const submittingApprovalIdsRef = useRef(new Set<string>());
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [hasNewMessages, setHasNewMessages] = useState(false);
@@ -387,6 +392,8 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       setLinkedTask(null);
       setMemories([]);
       setApprovals([]);
+      setApprovalOperations([]);
+      setApprovalSubmissions({});
       return;
     }
     if (historySessionIdRef.current !== session.id) setLoading(true);
@@ -466,6 +473,22 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     olderPageRequestRef.current = false;
     setLoadingOlder(false);
   }, [session?.id]);
+  const refreshApprovals = useCallback(async () => {
+    if (!session) return;
+    const request = requestEpochRef.current.begin('approvals', session.id);
+    try {
+      const data = await approvalClient.list();
+      if (!requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) return;
+      const pending = data.approvals.filter(item => item.status === 'pending');
+      setApprovals(pending);
+      setApprovalOperations(data.operations ?? []);
+      const retainedIds = new Set(pending.map(item => item.id));
+      setApprovalSubmissions(current => Object.fromEntries(Object.entries(current)
+        .filter(([id, submission]) => submission.pending || retainedIds.has(id))));
+    } catch (cause) {
+      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setError(messageOf(cause));
+    }
+  }, [session?.id]);
   const refreshContext = useCallback(async () => {
     if (!session) return;
     const request = requestEpochRef.current.begin('context', session.id);
@@ -487,12 +510,8 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     }).catch(cause => {
       if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setError(messageOf(cause));
     });
-    void approvalClient.list().then(approvalData => {
-      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setApprovals(approvalData.approvals.filter(item => item.status === 'pending'));
-    }).catch(cause => {
-      if (requestEpochRef.current.isCurrent(request, activeSessionIdRef.current)) setError(messageOf(cause));
-    });
-  }, [session?.id, session?.title]);
+    void refreshApprovals();
+  }, [session?.id, session?.title, refreshApprovals]);
   useEffect(() => { void refreshContext(); }, [refreshContext]);
   useEffect(() => {
     if (!session) return;
@@ -520,6 +539,7 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     });
     const offApproval = bridge.subscribe('approval.pending', () => { void refreshContext(); });
     const offResolved = bridge.subscribe('approval.resolved', refreshContext);
+    const offOperation = bridge.subscribe('approval.operation', () => { void refreshApprovals(); });
     const offWarning = bridge.subscribe('chat.warning', data => {
       if (!data.sessionId || data.sessionId === session.id) setError(String(data.message ?? '旧 Agent 会话清理失败。'));
     });
@@ -533,9 +553,9 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         streamStatusFrameRef.current = null;
       }
       streamUpdateRef.current = [];
-      offUpdated(); offStreaming(); offApproval(); offResolved(); offWarning(); offTasks(); offMemory(); offRestart();
+      offUpdated(); offStreaming(); offApproval(); offResolved(); offOperation(); offWarning(); offTasks(); offMemory(); offRestart();
     };
-  }, [session?.id, refreshHistory, load, refreshContext]);
+  }, [session?.id, refreshHistory, load, refreshContext, refreshApprovals]);
   const loadOlderHistory = useCallback(async () => {
     if (!session || !hasMoreHistory || loadingOlder || olderPageRequestRef.current || !messages.length) return;
     const request = requestEpochRef.current.begin('older', session.id);
@@ -603,8 +623,9 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
         activityTimeline: settlingReply.activityTimeline, activityOmitted: settlingReply.activityOmitted, activityState: 'settling', error: null, cancelled: false } });
     if (status.error && !streaming && !chatFailureInHistory(status, messages)) rows.push({ id: 'turn-error', kind: 'turn-error', failure: status });
     rows.push(...approvals.map(approval => ({ id: `approval:${approval.id}`, kind: 'approval' as const, approval })));
+    if (approvalOperations.length) rows.push({ id: 'approval-operations', kind: 'approval-operations', operations: approvalOperations });
     return rows;
-  }, [hasMoreHistory, messages, loading, error, streaming, keepSettlingReply, settlingReply, status, approvals]);
+  }, [hasMoreHistory, messages, loading, error, streaming, keepSettlingReply, settlingReply, status, approvals, approvalOperations]);
 
   useLayoutEffect(() => {
     const hasNewConversationContent =
@@ -637,7 +658,12 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
       case 'streaming': return <MessageBubble message={item.message} streaming activityState={status.state} taskId={linkedTask?.id??session?.taskId} onOpenTask={onReviewTask} />;
       case 'preparing': return <div className="chat-request-pending" role="status">正在准备请求，等待运行时处理…</div>;
       case 'turn-error': return <ChatFailureCard failure={item.failure} taskId={linkedTask?.id ?? session?.taskId} onOpenTask={onReviewTask} onNewChat={() => void onNewChat()} />;
-      case 'approval': return <ApprovalCard approval={item.approval} onDecide={decideApproval} />;
+      case 'approval': return <ApprovalCard approval={item.approval} onDecide={decideApproval}
+        submitting={approvalSubmissions[item.approval.id]?.pending}
+        decisionAccepted={approvalOperations.some(operation => operation.approvalId === item.approval.id)}
+        submissionError={approvalSubmissions[item.approval.id]?.error}
+        retryDecision={approvalSubmissions[item.approval.id]?.error ? approvalSubmissions[item.approval.id].decision : null} />;
+      case 'approval-operations': return <ApprovalOperationSummary operations={item.operations} onCancel={id => { void cancelApprovalOperation(id); }} />;
     }
   };
 
@@ -724,12 +750,37 @@ function ChatPage({ session, workspaces, activeWorkspaceId, onSessionUpdate, onN
     } catch (cause) { setError(messageOf(cause)); }
   }
   async function decideApproval(id: string, approve: boolean) {
+    if (!session || submittingApprovalIdsRef.current.has(id)
+      || approvalOperations.some(operation => operation.approvalId === id)
+      || (approvalSubmissions[id]?.error && approvalSubmissions[id].decision !== approve)) return;
+    const originSession = session.id;
+    submittingApprovalIdsRef.current.add(id);
+    requestEpochRef.current.invalidate('approvals');
+    setApprovalSubmissions(current => ({...current, [id]: {pending: true, decision: approve, error: null}}));
     try {
       const result = await approvalClient.decide(id, approve);
-      await load();
-      if (result.resumeError) setError(`审批已记录，但聊天回合继续失败（${result.resumeError}）。`);
+      if (result.operationId) setApprovalOperations(current => [...current.filter(operation => operation.operationId !== result.operationId), result]);
+      if (activeSessionIdRef.current !== originSession) return;
+      await Promise.all([load(), refreshApprovals()]);
     }
-    catch (cause) { setError(messageOf(cause)); }
+    catch (cause) {
+      // The Owner approval inbox is global. Keep the exact request's uncertainty
+      // across Chat selection changes without injecting it into another turn.
+      setApprovalSubmissions(current => current[id]?.decision === approve
+        ? {...current, [id]: {pending: false, decision: approve, error: messageOf(cause)}} : current);
+    } finally {
+      submittingApprovalIdsRef.current.delete(id);
+      setApprovalSubmissions(current => current[id] ? {...current, [id]: {...current[id], pending: false}} : current);
+    }
+  }
+  async function cancelApprovalOperation(id: string) {
+    const originSession = session?.id;
+    try {
+      await approvalClient.cancel(id);
+      if (activeSessionIdRef.current === originSession) await refreshApprovals();
+    } catch (cause) {
+      if (activeSessionIdRef.current === originSession) setError(messageOf(cause));
+    }
   }
 
   if (!session) return <div className="content-page chat-empty-page"><EmptyNotice icon="chat" title="开始一段新会话" detail="会话记录保存在本机 Core 中。发送消息后，当前配置的模型与 Agent 将处理请求。" action={<Button variant="primary" icon="add" onClick={() => void onNew()}>新建会话</Button>} /></div>;

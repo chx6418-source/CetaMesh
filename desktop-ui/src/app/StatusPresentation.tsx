@@ -10,7 +10,7 @@ export function ApprovalOperationSummary({ operations, onCancel }: { operations:
   const attention = operations.filter(operation => !historical(operation));
   const history = operations.filter(historical);
   const rows = (items: ApprovalDecisionResult[]) => items.map((operation, index) => <div className="approval-operation-row" key={operation.operationId ?? operation.approvalId ?? index}>
-    <span className="approval-operation-copy"><strong>{operation.decision === 'rejected' ? '拒绝审批' : '批准操作'}</strong><small>{operation.operationId || operation.approvalId || '审批操作'}{operation.code ? ` · ${operation.code}` : ''}</small></span>
+    <span className="approval-operation-copy"><strong>{operation.decision === 'rejected' ? '拒绝审批' : '批准操作'}</strong><small>{operation.operationId || operation.approvalId || '审批操作'}{operation.code || operation.resumeError ? ` · ${operation.code || operation.resumeError}` : ''}</small></span>
     <span className={`approval-operation-status status-${operation.status}`}>{operationLabels[operation.status]}</span>
     {['accepted', 'running'].includes(operation.status) && operation.operationId && <Button compact onClick={() => onCancel(operation.operationId!)}>请求停止</Button>}
   </div>);

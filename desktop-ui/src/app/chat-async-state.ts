@@ -1,5 +1,5 @@
 import type {ChatActivityObservation,ChatContextObservation,ModelUsage} from '../bridge/typed-client';
-export type ChatRequestKind = 'load' | 'context' | 'older';
+export type ChatRequestKind = 'load' | 'context' | 'older' | 'approvals';
 export type ChatRequestToken = { kind: ChatRequestKind; sessionId: string | null; generation: number };
 
 /** Prevents a server status snapshot from replacing deltas received after that read began. */
@@ -31,7 +31,7 @@ export function shouldApplyChatStatusSnapshot(snapshotRevision: number, currentR
 /** Invalidates late Chat reads when the selected session changes or a newer read starts. */
 export class ChatRequestEpoch {
   private activeSessionId: string | null = null;
-  private generations: Record<ChatRequestKind, number> = { load: 0, context: 0, older: 0 };
+  private generations: Record<ChatRequestKind, number> = { load: 0, context: 0, older: 0, approvals: 0 };
 
   activate(sessionId: string | null) {
     if (this.activeSessionId === sessionId) return;
