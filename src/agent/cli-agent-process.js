@@ -77,6 +77,14 @@ export function createMinimalAgentEnv(source = process.env, overrides = {}, { au
     const safe = safeOpenAiValue(name, actual[1]);
     if (safe) result[name] = safe;
   }
+  // DSH task processes only receive their owned profile and explicit scoped key.
+  // Neither value is ever inherited from the caller's DSH login environment.
+  for (const name of ['DSH_HOME', 'CETAMESH_DSH_TASK_API_KEY']) {
+    if (!authorized.has(envKey(name))) continue;
+    const value = Object.entries(overrides ?? {}).find(([key]) => envKey(key) === envKey(name))?.[1];
+    if (typeof value !== 'string' || !value || value.length > 4096 || /[\r\n\0]/.test(value)) continue;
+    if (name === 'DSH_HOME' ? path.isAbsolute(value) : value.length >= 8) result[name] = value;
+  }
   return result;
 }
 

@@ -36,6 +36,18 @@ const server=http.createServer(async(request,response)=>{
 });
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const baseUrl='http://127.0.0.1:'+server.address().port;
+// A rejected creation must surface immediately instead of leaving a rendezvous
+// pending forever when admission correctly refuses an obsolete fixture.
+const awaitCreationBoundary=(creation,boundary)=>Promise.race([boundary,creation.then(()=>assert.fail('Synthetic creation completed before the expected boundary'))]);
+// These controlled leaves exercise staging lifecycle only. The injected policy
+// descriptor is synthetic, supplies no real tool/SDK proof, and is never used by
+// the unwrapped HTTP preset admission assertions below.
+function stagingLifecyclePeer(leaf){
+ return {...leaf,id:'synthetic-staging-lifecycle',label:'Synthetic staging lifecycle peer',capabilities:()=>({
+  ...leaf.capabilities(),taskTransport:'sdk',security:{mode:'native-permissions',verified:true,nativeSandboxSupported:false,
+   strictIsolationVerified:false,nativeApprovalSupported:true,nativePermissionPolicyVerified:true,allToolsRequireApproval:true,nativeSandboxMode:'none'}
+ })};
+}
 try{
  let scopeCase=0;
  async function rejectsDifferentHome(pinned,candidate){
@@ -91,13 +103,13 @@ try{
  const closeNative=createDshAgentProvider({api:closeApi,presetPolicy:createDshPresetPolicy({coding:'local-coding',dshHome:home,nativePresets:{async inspect(){
   enterValidation();await validationGate;return {...inspectDshPresetContent(persona,'native-persona-only'),loaded:true};
  }}})});
- const closingStaged=createStagedDshAgentProvider({provider:closeNative,stagingRoot:path.join(root,'close-stages'),
+ const closingStaged=createStagedDshAgentProvider({provider:stagingLifecyclePeer(closeNative),stagingRoot:path.join(root,'close-stages'),
   createStage:async options=>{const stage=await createStagingWorkspace(options);stages.push(stage);return stage;},
   resolveTaskWorkspace:()=>({task:{id:'close-task',workspaceId:'close-workspace'},workspace:{id:'close-workspace',root:project}}),
   applyChanges:async()=>({status:'completed'})});
  const lateCreation=closingStaged.createSession({taskId:'close-task',workspaceId:'close-workspace'});
  lateCreation.catch(()=>{});
- await validationEntered;
+ await awaitCreationBoundary(lateCreation,validationEntered);
  const closing=closingStaged.shutdown();closing.catch(()=>{});
  releaseValidation();await closing;
  await assert.rejects(lateCreation,{code:'PROVIDER_SHUTTING_DOWN'},'close fences a pending verified-preset read before any remote creation');
@@ -116,11 +128,11 @@ try{
    return {};
   }};
   const remoteNative=createDshAgentProvider({api:remoteApi});
-  const remoteStaged=createStagedDshAgentProvider({provider:remoteNative,stagingRoot:path.join(root,`remote-close-${uncertain}`),
+  const remoteStaged=createStagedDshAgentProvider({provider:stagingLifecyclePeer(remoteNative),stagingRoot:path.join(root,`remote-close-${uncertain}`),
    createStage:async options=>{const stage=await createStagingWorkspace(options);remoteStages.push(stage);return stage;},
    resolveTaskWorkspace:()=>({task:{id:'close-task',workspaceId:'close-workspace'},workspace:{id:'close-workspace',root:project}}),applyChanges:async()=>({status:'completed'})});
   const pending=remoteStaged.createSession({taskId:'close-task',workspaceId:'close-workspace'});pending.catch(()=>{});
-  await createEntered;const stopped=remoteStaged.shutdown();stopped.catch(()=>{});releaseCreate();
+  await awaitCreationBoundary(pending,createEntered);const stopped=remoteStaged.shutdown();stopped.catch(()=>{});releaseCreate();
   await assert.rejects(pending,{code:'PROVIDER_SHUTTING_DOWN'},'an already-dispatched remote creation can never return Ready after close');
   assert.equal(remoteCalls.some(row=>row.endpoint==='session/modelCatalog'),false);
   if(uncertain){
@@ -138,18 +150,18 @@ try{
  const boundedStages=[],boundedCalls=[];
  const boundedNative=createDshAgentProvider({shutdownTimeoutMs:40,api:{async *openRemoteStream(){},async callEndpoint(endpoint){boundedCalls.push(endpoint);return {};}},
   presetPolicy:{inspect:()=>({compatible:true,id:'local-coding'}),async requireVerified(){enterBounded();await boundedGate;return 'local-coding';}}});
- const boundedStaged=createStagedDshAgentProvider({provider:boundedNative,shutdownTimeoutMs:40,stagingRoot:path.join(root,'bounded-close'),
+ const boundedStaged=createStagedDshAgentProvider({provider:stagingLifecyclePeer(boundedNative),shutdownTimeoutMs:40,stagingRoot:path.join(root,'bounded-close'),
   createStage:async options=>{const stage=await createStagingWorkspace(options);boundedStages.push(stage);return stage;},
   resolveTaskWorkspace:()=>({task:{id:'close-task',workspaceId:'close-workspace'},workspace:{id:'close-workspace',root:project}}),applyChanges:async()=>({status:'completed'})});
  const boundedCreation=boundedStaged.createSession({taskId:'close-task',workspaceId:'close-workspace'});boundedCreation.catch(()=>{});
- await boundedEntered;await assert.rejects(boundedStaged.shutdown(),{code:'PROVIDER_CLOSE_UNKNOWN'});
+ await awaitCreationBoundary(boundedCreation,boundedEntered);await assert.rejects(boundedStaged.shutdown(),{code:'PROVIDER_CLOSE_UNKNOWN'});
  assert.equal(boundedStaged._pendingCreations.size,1);assert.ok(boundedStages.every(stage=>fs.existsSync(stage.root)));
  releaseBounded();await assert.rejects(boundedCreation,{code:'PROVIDER_SHUTTING_DOWN'});
  await new Promise(setImmediate);await boundedStaged.shutdown();
  assert.equal(boundedCalls.length,0);assert.ok(boundedStages.every(stage=>!fs.existsSync(stage.root)));
  let ackStopped=false;
  const ackStages=[];
- const ackOnly=createStagedDshAgentProvider({provider:{id:'owned-ack-leaf',label:'Owned zero-model leaf',capabilities:()=>({}),async *follow(){},async createSession(){return {sessionId:'owned-ack'};},async closeSession(){return {closed:true,stopped:ackStopped};}},
+ const ackOnly=createStagedDshAgentProvider({provider:stagingLifecyclePeer({id:'owned-ack-leaf',label:'Owned zero-model leaf',capabilities:()=>({}),async *follow(){},async createSession(){return {sessionId:'owned-ack'};},async closeSession(){return {closed:true,stopped:ackStopped};}}),
   stagingRoot:path.join(root,'ack-only-close'),createStage:async options=>{const stage=await createStagingWorkspace(options);ackStages.push(stage);return stage;},
   resolveTaskWorkspace:()=>({task:{id:'close-task',workspaceId:'close-workspace'},workspace:{id:'close-workspace',root:project}}),applyChanges:async()=>({status:'completed'})});
  const ackSession=await ackOnly.createSession({taskId:'close-task',workspaceId:'close-workspace'});
@@ -178,9 +190,9 @@ try{
  await assert.rejects(idNative.shutdown(),{code:'PROVIDER_CLOSE_UNKNOWN'});
  assert.equal(idCalls.some(row=>['session/cancel','workspace/archiveSession'].includes(row.endpoint)),false,'shutdown of the unidentified conflict does not cancel A');
  const duplicateStages=[],duplicateCalls=[];let duplicateCreateCount=0;
- const duplicateStaged=createStagedDshAgentProvider({provider:{id:'owned-duplicate-leaf',label:'Owned zero-model duplicate fixture',capabilities:()=>({}),async *follow(){},
+ const duplicateStaged=createStagedDshAgentProvider({provider:stagingLifecyclePeer({id:'owned-duplicate-leaf',label:'Owned zero-model duplicate fixture',capabilities:()=>({}),async *follow(){},
   async createSession(){duplicateCalls.push('create');return {sessionId:++duplicateCreateCount<=2?'staged-existing-A':'staged-unique-B'};},
-  async closeSession({sessionId}){duplicateCalls.push(`close:${sessionId}`);return {closed:true,stopped:true};}},
+  async closeSession({sessionId}){duplicateCalls.push(`close:${sessionId}`);return {closed:true,stopped:true};}}),
   stagingRoot:path.join(root,'duplicate-id-stages'),createStage:async options=>{const stage=await createStagingWorkspace(options);duplicateStages.push(stage);return stage;},
   resolveTaskWorkspace:({taskId})=>({task:{id:taskId,workspaceId:'close-workspace'},workspace:{id:'close-workspace',root:project}}),applyChanges:async()=>({status:'completed'})});
  const stagedA=await duplicateStaged.createSession({taskId:'task-A',workspaceId:'close-workspace'});
@@ -196,7 +208,7 @@ try{
  assert.equal(stagedUnique.sessionId,'staged-unique-B');assert.equal(duplicateStaged._sessions.get(stagedUnique.sessionId).taskId,'task-B-unique');
  await assert.rejects(duplicateStaged.shutdown(),{code:'PROVIDER_CLOSE_UNKNOWN'});
  assert.ok(fs.existsSync(duplicateStages[1].root),'unknown B stage survives shutdown even after other owned Sessions stop');
- console.log('PASS DSH close fences, owned late remote creation, unconfirmed-stop retention, bounded shutdown/retry and first-create positive loop');
+ console.log('PASS synthetic staging lifecycle: close fences, owned late creation, unconfirmed-stop retention, bounded shutdown/retry and first-create positive loop (no native SDK evidence)');
  for(const legacy of [true,false]){
   legacyRoster=legacy;readMode='valid';
   const stateDir=path.join(root,legacy?'legacy':'current');
@@ -239,7 +251,7 @@ try{
   const stagedHealth=await staged.health();
   assert.equal(stagedHealth.taskEligible,false,'native persona/schema compatibility does not verify the Shell/tool boundary');
   assert.equal(stagedHealth.reason,'native-tool-policy-unverified');
-  await assert.rejects(staged.createSession({taskId:'fixture-task',workspaceId:'fixture-workspace'}),{code:'AGENT_BOUNDARY_UNSUPPORTED'});
+  await assert.rejects(staged.createSession({taskId:'fixture-task',workspaceId:'fixture-workspace'}),{code:'DSH_TOOL_APPROVAL_UNAVAILABLE'});
   await staged.shutdown();
   const revision=restored.configuration.describe().revision;
   for(const mode of ['mismatch','invalid','empty']){
@@ -269,12 +281,13 @@ try{
   await assert.rejects(localProvider.createSession({purpose:'coding',requireLocalPreset:true}),{code:'DSH_PRESET_INCOMPATIBLE'});
   assert.equal(calls.filter(row=>row.endpoint==='session/create').length,beforeShadow,'the final create boundary rechecks the backend document without creating a Session');
   readMode='valid';
-  assert.equal((await localStaged.health()).taskEligible,true,'matching local/backend documents retain the existing local preset loop');
+  assert.equal((await localStaged.health()).taskEligible,false,'matching local/backend documents do not establish mandatory Core tool approval');
+  await assert.rejects(localStaged.createSession({taskId:'fixture-task',workspaceId:'fixture-workspace'}),{code:'DSH_TOOL_APPROVAL_UNAVAILABLE'});
   await localProvider.createSession({purpose:'coding'});
   assert.equal(calls.filter(row=>row.endpoint==='session/create').at(-1).args.request.agentPreset,'local-coding','the existing explicitly selected local preset loop stays usable');
   await localProvider.shutdown();
  }
  assert.equal(calls.filter(row=>row.endpoint==='session/create').length,2,'native schema discovery and configuration never create a native Session');
  assert.ok(calls.every(row=>['settings/describe','session/list','session/modelCatalog','agentPresets/list','agentPresets/read','session/create'].includes(row.endpoint)));
- console.log('PASS legacy/current native preset discovery, exact document identity, Owner selection persistence, native tool refusal and existing local preset loop');
-}finally{await new Promise(resolve=>server.close(resolve));fs.rmSync(root,{recursive:true,force:true});}
+ console.log('PASS legacy/current HTTP preset discovery, exact document identity, Owner selection persistence and native/local Task tool refusal');
+}finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));fs.rmSync(root,{recursive:true,force:true});}

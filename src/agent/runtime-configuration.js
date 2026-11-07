@@ -4,6 +4,7 @@ import crypto from 'node:crypto';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 
 const DEFAULT_ENDPOINTS = Object.freeze({
+  dsh: 'https://api.deepseek.com',
   gemini: 'https://generativelanguage.googleapis.com',
   opencode: 'https://api.openai.com/v1',
   qwen: 'https://api.openai.com/v1',
@@ -58,7 +59,7 @@ export function createAgentRuntimeConfiguration({ stateDir, providerSecrets, all
     if (Object.hasOwn(input, 'model')) next.model = text(input.model, 'model', 256);
     if (Object.hasOwn(input, 'baseUrl')) next.baseUrl = endpoint(input.baseUrl, provider);
     if (Object.hasOwn(input, 'authMode')) {
-      if (!['api-key','provider-login',...(provider==='claude'?['native-cli']:[])].includes(input.authMode) || (provider === 'qwen' && input.authMode !== 'api-key')) invalid('Unsupported Agent authentication mode');
+      if (!['api-key','provider-login',...(provider==='claude'?['native-cli']:[])].includes(input.authMode) || (['qwen','dsh'].includes(provider) && input.authMode !== 'api-key')) invalid('Unsupported Agent authentication mode');
       next.authMode=input.authMode;
     }
     if (Object.hasOwn(input,'servicePreset')) {

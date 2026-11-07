@@ -341,7 +341,7 @@ function projectDshConfiguration(value) {
     homeSource: string(row.homeSource, 80), active: selection(row.active), pending: row.pending ? selection(row.pending) : null };
 }
 
-const AGENT_RUNTIME_IDS = ['gemini', 'opencode', 'qwen', 'claude'];
+const AGENT_RUNTIME_IDS = ['gemini', 'opencode', 'qwen', 'claude', 'dsh'];
 const AGENT_RUNTIME_INPUT_KEYS = new Set(['enabled', 'runtimePath', 'nodePath', 'model', 'baseUrl', 'apiKey', 'executionMode', 'authMode', 'servicePreset', 'providerId', 'methodId']);
 function projectAgentRuntimeConfiguration(value) {
   if (!value) return null;
@@ -376,6 +376,17 @@ function projectAgentConnection(value) {
     servicePresets:(Array.isArray(row.servicePresets)?row.servicePresets:[]).slice(0,8).map(p=>({id:string(p.id,80),label:string(p.label,100),baseUrl:string(p.baseUrl,2048)||null})),
     providerSelections:(Array.isArray(row.providerSelections)?row.providerSelections:[]).slice(0,4).map(p=>({providerId:string(p.providerId,80),methodId:string(p.methodId,80),label:string(p.label,100)})),
     accountReason:string(row.accountReason,100)||null,methods:(Array.isArray(row.methods)?row.methods:[]).slice(0,4).map(value=>{const method=record(value);return {id:string(method.id,80),label:string(method.label,100),supported:method.supported===true,reason:string(method.reason,100)||null};})};
+}
+
+function projectDshExecution(value) {
+  if (!value) return null;
+  const row = record(value), legacy = record(row.legacyConnection);
+  return {transport: 'sdk', bridgeState: row.bridgeState === 'verified' ? 'verified' : 'unavailable',
+    gateVersion: string(row.gateVersion, 100) || null,
+    supportedTools: (Array.isArray(row.supportedTools) ? row.supportedTools : []).filter(value => ['read', 'write', 'edit'].includes(value)),
+    allToolsRequireApproval: row.allToolsRequireApproval === true, osSandbox: false, reason: string(row.reason, 160) || null,
+    legacyConnection: {available: typeof legacy.available === 'boolean' ? legacy.available : null,
+      ready: typeof legacy.ready === 'boolean' ? legacy.ready : null, reason: string(legacy.reason, 160) || null}};
 }
 
 function projectAgent(value) {
@@ -441,6 +452,7 @@ function projectAgent(value) {
     probeCode: string(health.probeCode, 80) || null, checkedAt: string(health.checkedAt, 80) || null,
     requiresStandaloneNode: health.requiresStandaloneNode === true,
     preset: projectDshPreset(health.preset),
+    dshExecution: id === 'dsh' ? projectDshExecution(health.dshExecution) : null,
     diagnostic: projectDshDiagnostic(health.diagnostic),
     configuration: id === 'dsh' ? projectDshConfiguration(row.configuration ?? health.configuration) : null,
     connection: AGENT_RUNTIME_IDS.includes(id) ? projectAgentConnection(health.connection) : null,
@@ -832,12 +844,15 @@ export function createDesktopUiService({ services = {}, system = services.system
     if (!services.workspaceService.describeWorkspace(workspaceId)) {
       throw uiError('WORKSPACE_NOT_FOUND', '任务工作区不存在或不可访问');
     }
+    // The owned DSH SDK advertises a verified boundary only after its no-prompt
+    // startup probe. A cold Core must obtain that fact before reading the scope.
+    const dshHealth = provider === 'dsh' ? await services.agentBroker.health(provider) : null;
     const capabilities = services.agentBroker.capabilities(provider);
     const boundary = capabilities?.workspaceBoundary;
     if (!['capability-broker', 'staged-capability-broker', 'native-staged'].includes(boundary)) {
       throw uiError('AGENT_BOUNDARY_UNSUPPORTED', '所选 Agent 没有经过验证的工作区权限边界');
     }
-    const health = await services.agentBroker.health(provider);
+    const health = dshHealth ?? await services.agentBroker.health(provider);
     if (health?.authenticated === false || health?.sessionCapable === false) {
       throw uiError('PROVIDER_UNAVAILABLE', `所选 Agent ${provider} 未安装、未认证或无法建立会话`);
     }
@@ -1526,6 +1541,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.agent.security': async p => {
       const workspaceId = string(p.workspaceId, 160);
       if (!services.workspaceService.describeWorkspace(workspaceId)) throw uiError('WORKSPACE_NOT_FOUND', 'Registered Workspace required');
+      if (p.provider === 'dsh') await services.agentBroker.health('dsh');
       return services.agentBroker.describeExecutionSecurity(string(p.provider, 80), workspaceId);
     },
     'ui.agent.authorize': async p => {
@@ -1554,9 +1570,10 @@ export function createDesktopUiService({ services = {}, system = services.system
       const provider = string(p.agentId ?? p.provider, 80);
       if (provider !== 'dsh' && !AGENT_RUNTIME_IDS.includes(provider)) throw uiError('INVALID_PARAMS', 'Unsupported connector');
       if (!p.config || typeof p.config !== 'object' || Array.isArray(p.config)) throw uiError('INVALID_PARAMS', 'Agent configuration must be an object');
-      if (provider !== 'dsh' && Object.keys(p.config).some(key => !AGENT_RUNTIME_INPUT_KEYS.has(key))) throw uiError('INVALID_PARAMS', 'Unsupported Agent runtime configuration fields');
+      const dshSdk = provider === 'dsh' && p.config.taskTransport === 'sdk';
+      if ((provider !== 'dsh' || dshSdk) && Object.keys(p.config).some(key => !AGENT_RUNTIME_INPUT_KEYS.has(key) && !(dshSdk && key === 'taskTransport'))) throw uiError('INVALID_PARAMS', 'Unsupported Agent runtime configuration fields');
       const result = await agent('agent.configure', { provider, settings: p.config });
-      if (provider === 'dsh') return { provider: 'dsh', supported: result.supported === true, applied: false, restartRequired: result.restartRequired === true, configuration: projectDshConfiguration(result.configuration) };
+      if (provider === 'dsh' && !dshSdk) return { provider: 'dsh', supported: result.supported === true, applied: false, restartRequired: result.restartRequired === true, configuration: projectDshConfiguration(result.configuration) };
       return { provider, supported: result.supported === true, applied: result.applied === true, configuration: projectAgentRuntimeConfiguration(result.configuration) };
     },
     'ui.extensions.settings.describe': async p => {

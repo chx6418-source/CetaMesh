@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import path from 'node:path';
 import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
-import { agentProviderError as fault } from './agent-provider.js';
+import { agentProviderError } from './agent-provider.js';
 import { probeCodexHostBoot } from './codex-process-supervisor.js';
 
 const MAX_SESSIONS = 4096;
@@ -23,7 +23,7 @@ const validWitness = row => row && ['id', 'taskId', 'workspaceId', 'sessionId'].
 
 function validRow(row) {
   return row && ['sessionId','taskId','workspaceId','snapshotId'].every(key => text(row[key]))
-    && ['exec','app-server'].includes(row.transport) && nullableText(row.attemptId)
+    && ['exec','app-server','dsh-sdk'].includes(row.transport) && nullableText(row.attemptId)
     && Number.isSafeInteger(row.generation) && row.generation >= 0 && nullableText(row.runId)
     && nullableText(row.turnId) && STATES.has(row.state) && ['retained','clean'].includes(row.staging)
     && Number.isSafeInteger(row.updatedAt) && row.updatedAt >= 0
@@ -35,8 +35,14 @@ function validRow(row) {
 }
 
 /** Core-only lifecycle evidence. Neither Task prose nor a missing process is a receipt. */
-export function createCodexSessionLifecycle({ stateDir, now = Date.now, probeHostBoot = probeCodexHostBoot } = {}) {
-  const file = stateDir ? path.join(stateDir, 'agent', 'codex-session-lifecycle.json') : null;
+export function createCodexSessionLifecycle({ stateDir, now = Date.now, probeHostBoot = probeCodexHostBoot, provider = 'codex' } = {}) {
+  const fault = (code, message) => agentProviderError(provider === 'dsh' ? code.replace(/^CODEX_/, 'DSH_') : code,
+    provider === 'dsh' ? message.replace(/Codex/g, 'DSH') : message);
+  // The owned DSH SDK adapter reuses these transitions and receipts in its own
+  // namespace. Codex's file, row schema, defaults and transport checks are stable.
+  if (!['codex', 'dsh'].includes(provider)) throw fault('AGENT_LIFECYCLE_PROVIDER_INVALID', 'Unsupported native lifecycle owner');
+  const validOwnedRow = row => validRow(row) && (provider === 'dsh' ? row.transport === 'dsh-sdk' : row.transport !== 'dsh-sdk');
+  const file = stateDir ? path.join(stateDir, 'agent', provider + '-session-lifecycle.json') : null;
   const creating = new Map();
   const stateIdentity = stateDir ? path.resolve(stateDir) : null;
   const scopeHash = binding => hash([stateIdentity, binding.taskId, binding.workspaceId, binding.sessionId, binding.attachedAt]);
@@ -58,7 +64,7 @@ export function createCodexSessionLifecycle({ stateDir, now = Date.now, probeHos
     try { data = file ? readJsonFile(file,{missing:{version:1,sessions:[]},maxBytes:8*1024*1024}) : memory; }
     catch { throw fault('CODEX_LIFECYCLE_STORE_INVALID','Codex lifecycle evidence is unavailable; execution remains blocked'); }
     if (!data || data.version !== 1 || !Array.isArray(data.sessions) || data.sessions.length > MAX_SESSIONS
-      || !data.sessions.every(validRow) || new Set(data.sessions.map(row=>row.sessionId)).size !== data.sessions.length) {
+      || !data.sessions.every(validOwnedRow) || new Set(data.sessions.map(row=>row.sessionId)).size !== data.sessions.length) {
       throw fault('CODEX_LIFECYCLE_STORE_INVALID','Codex lifecycle evidence is invalid; original records retained');
     }
     if (data.legacyBootWitnesses !== undefined && (!Array.isArray(data.legacyBootWitnesses)
@@ -82,7 +88,7 @@ export function createCodexSessionLifecycle({ stateDir, now = Date.now, probeHos
     if ((binding.generation !== undefined && binding.generation !== row.generation)
       || (binding.runId !== undefined && binding.runId !== row.runId)) throw fault('CODEX_LIFECYCLE_CONFLICT','Codex execution generation changed');
     update(row); row.updatedAt=now();
-    if (!validRow(row)) throw fault('CODEX_LIFECYCLE_CONFLICT','Codex lifecycle transition is invalid');
+    if (!validOwnedRow(row)) throw fault('CODEX_LIFECYCLE_CONFLICT','Native lifecycle transition is invalid');
     save(data); return structuredClone(row);
   }
   return Object.freeze({
@@ -136,7 +142,7 @@ export function createCodexSessionLifecycle({ stateDir, now = Date.now, probeHos
       } else if (boot.bootedAt < row.afterBoot.bootedAt || boot.eventRecordId < row.afterBoot.eventRecordId) {
         return unknown('CODEX_HOST_RESTART_UNVERIFIED');
       }
-      return { stopped: true, provider: 'codex', taskId: row.taskId, workspaceId: row.workspaceId,
+      return { stopped: true, provider, taskId: row.taskId, workspaceId: row.workspaceId,
         sessionId: row.sessionId, evidence: 'process-tree-exit', source: 'windows-restart-witness',
         legacyExecutionIdentity: 'unknown', receiptId: row.id,
         // v1 reader compatibility only; this is NOT a native generation claim.
@@ -160,7 +166,7 @@ export function createCodexSessionLifecycle({ stateDir, now = Date.now, probeHos
         transport:binding.transport,snapshotId:binding.snapshotId,attemptId:binding.attemptId??null,
         generation:0,runId:null,turnId:null,state:'idle',staging:'retained',receipt:null,updatedAt:now()};
       if(row.transport==='exec')row.receipt=receipt(row,'never-started');
-      if(!validRow(row))throw fault('CODEX_LIFECYCLE_CONFLICT','Invalid Codex lifecycle binding');
+      if(!validOwnedRow(row))throw fault('CODEX_LIFECYCLE_CONFLICT','Invalid native lifecycle binding');
       data.sessions.push(row);save(data);return structuredClone(row);
     },
     read(sessionId) { return load().sessions.find(row=>row.sessionId===sessionId)??null; },

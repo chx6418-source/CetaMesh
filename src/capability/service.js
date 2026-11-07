@@ -1526,6 +1526,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   const environment = registerEnvironmentCapabilities({broker,taskRuntime,principalForTask,stateDir,ownedArtifactRoot,client:environmentClient,onChanged:onEnvironmentChanged});
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
     requestAgentNativeApproval: (request, options) => nativeApproval.request(request, options),
+    settleAgentNativeEffect: request => nativeApproval.settleEffect(request),
     cancelTaskOperations: scope => { environment.cancel(scope); return operations.cancelScope(scope); },
     verifyTaskImportReceipts(taskId, runId) {
       const task = taskFor(taskId), latest = new Map();

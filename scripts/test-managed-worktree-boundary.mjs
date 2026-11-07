@@ -61,7 +61,13 @@ try {
     fs.writeFileSync(path.join(f.stateDir, 'owner-private.txt'), 'outside secret');
     fs.writeFileSync(path.join(target.root, '.env'), 'sensitive secret');
     fs.mkdirSync(path.join(target.root, 'private-output')); fs.writeFileSync(path.join(target.root, 'private-output', 'secret.txt'), 'nested secret');
-    const external = defineAgentProvider({ id: 'dsh-fixture', label: 'Fixture transport', methods: {
+    // This fixture verifies staging only; it supplies the trusted SDK contract.
+    // Uncontrolled HTTP/persona rejection is tested separately, not bypassed here.
+    const external = defineAgentProvider({ id: 'dsh-fixture', label: 'Fixture transport', capabilityExtras: {
+      taskTransport: 'sdk', security: {mode: 'native-permissions', verified: true, nativeSandboxSupported: false,
+        strictIsolationVerified: false, nativeApprovalSupported: true, nativePermissionPolicyVerified: true,
+        allToolsRequireApproval: true, nativeSandboxMode: 'none'}
+    }, methods: {
       async createSession({ cwd }) { assert.equal(fs.readFileSync(path.join(cwd, 'a.txt'), 'utf8'), 'project bytes'); return { sessionId: 'fixture-session' }; },
       async closeSession() { return { closed: true, stopped: true }; },
       async *follow() {}

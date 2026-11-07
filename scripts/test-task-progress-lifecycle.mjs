@@ -24,9 +24,11 @@ const api={async callEndpoint(endpoint,args){
 },async *openRemoteStream(){await prompted;yield{type:'snapshot',cursor:0,records:[],hasMore:false};
  for(const [i,e] of [{type:'turn/start'},{type:'assistant/message',data:{message:{content:[{type:'text',text:'A legitimate no-tool report.'}]}}},{type:'turn/end',data:{reason:{kind:'completed'}}}].entries())yield{type:'event',event:{seq:i+1,...e,data:{...e.data,requestId,turn:'native-t'}}};
 }};
-const native=createDshAgentProvider({api});const provider=createStagedDshAgentProvider({provider:native,stagingRoot:path.join(root,'stage'),resolveTaskWorkspace:()=>({task:rt.get({id:t.id}).task,workspace:{id:'w',root:source}}),applyChanges:()=>{throw new Error('no changes expected');}});
+// This protocol fixture exercises the early durable projection, not HTTP tool authority.
+const native=createDshAgentProvider({api});const transport={...native,capabilities:()=>({...native.capabilities(),taskTransport:'sdk',security:{mode:'native-permissions',verified:true,nativeSandboxSupported:false,strictIsolationVerified:false,nativeApprovalSupported:true,nativePermissionPolicyVerified:true,allToolsRequireApproval:true,nativeSandboxMode:'none'}})};
+const provider=createStagedDshAgentProvider({provider:transport,stagingRoot:path.join(root,'stage'),resolveTaskWorkspace:()=>({task:rt.get({id:t.id}).task,workspace:{id:'w',root:source}}),applyChanges:()=>{throw new Error('no changes expected');}});
 const registry=createAgentProviderRegistry({providers:[provider]});const broker=createAgentBroker({registry});const cap=createCapabilityService({taskRuntime:rt,agentBroker:broker});
-try{const s=await broker.createSession('dsh',{taskId:t.id,workspaceId:'w'});t=rt.start({id:t.id,expectedRev:t.rev,provider:'dsh',sessionId:s.sessionId}).task;
+try{const scope=broker.describeExecutionSecurity('dsh','w');broker.authorizeExecution('dsh','w',scope.fingerprint);const s=await broker.createSession('dsh',{taskId:t.id,workspaceId:'w'});t=rt.start({id:t.id,expectedRev:t.rev,provider:'dsh',sessionId:s.sessionId}).task;
  await broker.send({provider:'dsh',sessionId:s.sessionId,runId:'core-r',content:'analyze'});await new Promise(r=>setTimeout(r,50));t=rt.get({id:t.id}).task;
  assert.equal(t.executionObservation.state,'awaiting-review');assert.equal(t.agentReports[0].runId,'core-r');assert.equal(t.agentReports[0].phase,'user');assert.equal(cap.completionBlocker(t.id),null);
 }finally{await cap.close();await provider.shutdown();fs.rmSync(root,{recursive:true,force:true});}

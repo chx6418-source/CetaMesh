@@ -1,7 +1,8 @@
 import crypto from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
-import { agentProviderError, defineAgentProvider, isAgentCreationPreflightFailure } from './agent-provider.js';
+import { agentProviderError, defineAgentProvider, isAgentCreationPreflightFailure, agentCreationPreflightFailure } from './agent-provider.js';
+import { isNativePermissionSecurity } from './execution-security.js';
 import { cleanupStagingWorkspace, collectStagedChanges, createStagingWorkspace, refreshStagingBaseline } from '../workspace/staging.js';
 
 const APPROVAL_TIMEOUT_MS = 10 * 60 * 1000;
@@ -29,6 +30,10 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
   let closing = false, shutdownWork = null;
   const assertOpen = () => { if (closing) throw agentProviderError('PROVIDER_SHUTTING_DOWN', 'DSH Task Provider is shutting down'); };
   const baseCapabilities = provider.capabilities();
+  const hasToolApproval = () => {
+    const caps = provider.capabilities();
+    return caps.taskTransport === 'sdk' && caps.security?.verified === true && isNativePermissionSecurity(caps.security);
+  };
 
   function requireSession(sessionId) {
     assertOpen();
@@ -55,9 +60,14 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
       if (session.waitingForApproval) await cancelApproval(session.waitingForApproval);
       const result = await provider.closeSession({ sessionId: session.id });
       if (result?.stopped !== true) throw agentProviderError('PROVIDER_CLOSE_UNKNOWN', 'DSH Session stop is unconfirmed; staging and ownership retained');
-      cleanupStagingWorkspace(session.stage);
+      let stagingRetained = true;
+      try {
+        // A confirmed process stop does not approve import or discard a declined
+        // result. Keep all unimported/corrupt staging for protected inspection.
+        if (!collectStagedChanges(session.stage).changes.length) stagingRetained = cleanupStagingWorkspace(session.stage)?.removed !== true;
+      } catch { /* Evidence that cannot be inspected is retained. */ }
       sessions.delete(session.id);
-      return { closed: true, stopped: true, provider: provider.id, sessionId: session.id };
+      return { closed: true, stopped: true, provider: provider.id, sessionId: session.id, stagingRetained };
     })();
     session.closePromise = work;
     try { return await work; } finally { session.closePromise = null; }
@@ -81,6 +91,10 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
       return { ok: false, error: 'Workspace changed during DSH execution; reconcile before importing', code: error?.code ?? 'WORKSPACE_RECONCILIATION_REQUIRED' };
     }
     if (!changeSet.changes.length) return { ok: true };
+    const execution = session.runs?.get(String(turn?.turnId ?? turn?.id ?? turn ?? ''));
+    if (!execution?.runId || execution.phase !== 'user') {
+      return {ok: false, error: 'Only the current Core user run can import DSH staging changes', code: 'DSH_IMPORT_RUN_UNCONFIRMED'};
+    }
     let result;
     try {
       result = await applyChanges({
@@ -88,7 +102,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         workspaceId: session.workspaceId,
         sessionId: session.id,
         provider: provider.id,
-        ...(session.runs?.get(String(turn?.turnId ?? turn?.id ?? turn ?? '')) ?? {}),
+        ...execution,
         requestId: `dsh-import-${crypto.randomUUID()}`,
         changes: changeSet.changes,
         summary: changeSet.summary
@@ -153,14 +167,14 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         supportsResume: baseCapabilities.supportsResume === true
       },
       methods: {
-        async createSession({ taskId, workspaceId, model, reasoningEffort, modelProvider } = {}) {
+        async createSession(invocation = {}) {
+          const { taskId, workspaceId, model, reasoningEffort, modelProvider } = invocation;
+          if (!hasToolApproval()) throw agentCreationPreflightFailure(invocation,
+            agentProviderError('DSH_TOOL_APPROVAL_UNAVAILABLE', 'DSH tasks require the verified Core tool approval bridge; an HTTP preset does not provide it'));
           assertOpen();
           const creation = { stage: null, binding: null, invocation: null, remoteAttempted: false, sessionId: null, promise: null };
           const work = (async () => {
           try {
-          if (provider.capabilities()?.nativePresetRequiresPolicy === true) {
-            throw agentProviderError('AGENT_BOUNDARY_UNSUPPORTED', 'DSH native preset tool policy is not verified; select a verified Core tool preset');
-          }
           if (!taskId || !workspaceId) throw agentProviderError('TASK_REQUIRED', 'DSH Task sessions require a Task and Workspace');
           const binding = await resolveTaskWorkspace({ taskId: String(taskId), workspaceId: String(workspaceId) });
           assertOpen();
@@ -183,7 +197,8 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
           });
           creation.stage = stage;
           assertOpen();
-            creation.invocation = { cwd: stage.root, model, reasoningEffort, modelProvider, purpose: 'coding', requireLocalPreset: true };
+            creation.invocation = { cwd: stage.root, taskId: binding.task.id, workspaceId: binding.workspace.id,
+              model, reasoningEffort, modelProvider, purpose: 'coding', requireLocalPreset: true };
             creation.remoteAttempted = true;
             const created = await provider.createSession(creation.invocation);
             if (!created?.sessionId) throw agentProviderError('PROVIDER_ERROR', 'DSH did not return a sessionId');
@@ -212,6 +227,7 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         },
         async send({ sessionId, content, mode, runId, phase, onRequestId } = {}) {
           const session = requireSession(sessionId);
+          if (session.waitingForApproval) throw agentProviderError('TURN_BUSY', 'DSH staging import is awaiting its Owner decision');
           session.cancelRequested = false;
           session.runs ??= new Map();
           const remember = value => {
@@ -219,7 +235,8 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
             session.runs.set(String(value), {runId,phase});
             while (session.runs.size > 256) session.runs.delete(session.runs.keys().next().value);
           };
-          const result = await provider.send({ sessionId, content, mode, onRequestId: requestId => {
+          if (runId) remember('core:' + runId);
+          const result = await provider.send({ sessionId, content, mode, runId, phase, onRequestId: requestId => {
             remember(requestId); onRequestId?.(requestId);
           } });
           for (const value of [result?.requestId, result?.turnId]) remember(value);
@@ -238,8 +255,10 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         },
         async status({ sessionId } = {}) {
           const session = requireSession(sessionId);
-          return { ...(await provider.status({ sessionId })), taskId: session.taskId, workspaceId: session.workspaceId,
-            waitingForApproval: Boolean(session.waitingForApproval), approvalId: session.waitingForApproval };
+          const native = await provider.status({ sessionId });
+          return { ...native, taskId: session.taskId, workspaceId: session.workspaceId,
+            waitingForApproval: native.waitingForApproval === true || Boolean(session.waitingForApproval),
+            approvalId: session.waitingForApproval ?? native.approvalId ?? null };
         },
         async contextUsage({ sessionId } = {}) {
           requireSession(sessionId);
@@ -260,15 +279,23 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
         },
         async health(options = {}) {
           const health = await provider.health(options);
-          const nativePolicyRequired = provider.capabilities()?.nativePresetRequiresPolicy === true;
-          return { ...health, provider: provider.id, taskEligible: !nativePolicyRequired && health.ready === true && health.sessionCapable === true,
-            ...(nativePolicyRequired && health.ready === true ? { reason: 'native-tool-policy-unverified' } : {}),
-            workspaceBoundary: nativePolicyRequired ? 'unverified' : 'capability-broker' };
+          const approvedBridge = hasToolApproval();
+          return { ...health, provider: provider.id, taskEligible: approvedBridge && health.taskEligible === true && health.ready === true && health.sessionCapable === true,
+            ...(!approvedBridge && health.ready === true ? { reason: 'native-tool-policy-unverified' } : {}),
+            workspaceBoundary: approvedBridge ? 'native-staged' : 'unverified' };
         },
         async *follow({ sessionId, signal, sinceSequence } = {}) {
           const session = requireSession(sessionId);
           for await (const item of provider.follow({ sessionId, signal, sinceSequence })) {
             const event = item?.type === 'event' ? item.event : item;
+            // SDK projection adds the trusted Core run before the native prompt
+            // ACK. The native integer turn need not match that early ACK id.
+            const execution = session.runs?.get('core:' + event?.data?.runId);
+            const nativeTurn = event?.data?.requestId ?? event?.data?.turn;
+            if (hasToolApproval() && execution && execution.phase === event?.data?.phase && nativeTurn != null) {
+              session.runs.set(String(nativeTurn), execution);
+              while (session.runs.size > 256) session.runs.delete(session.runs.keys().next().value);
+            }
             if (event?.type === 'turn/end' && event.data?.reason?.kind === 'completed') {
               const outcome = await reconcileTurnOnce(session, event.data?.requestId ?? event.data?.turn, signal);
               if (!outcome.ok) {
@@ -283,9 +310,11 @@ export function createStagedDshAgentProvider({ provider, resolveTaskWorkspace, l
     }),
     capabilities() {
       const source = provider.capabilities();
-      return { ...source, displayName: 'DSH', workspaceBoundary: source.nativePresetRequiresPolicy === true ? 'unverified' : 'capability-broker',
+      return { ...source, displayName: 'DSH', workspaceBoundary: hasToolApproval() ? 'native-staged' : 'unverified',
         requiresSessionCleanup: true, supportsFreshSession: true };
     },
+    ...(typeof provider.verifyStoppedTask === 'function' ? {verifyStoppedTask: input => provider.verifyStoppedTask(input)} : {}),
+    ...(typeof provider.verifyTaskQuiescence === 'function' ? {verifyTaskQuiescence: input => provider.verifyTaskQuiescence(input)} : {}),
     async shutdown() {
       closing = true;
       if (!shutdownWork) {

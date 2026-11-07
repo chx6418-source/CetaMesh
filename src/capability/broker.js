@@ -1,4 +1,5 @@
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {readJsonFile,writeJsonAtomic} from '../storage/json-file.js';
 import {operationIdentity,retainedOperationResult} from './operation-identity.js';
 import {safeContinuationInput} from './operation-context.js';
@@ -122,6 +123,73 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   const aborted=new Promise((_,reject)=>{onAbort=()=>reject(abortError(signal,true));signal.addEventListener('abort',onAbort,{once:true});});
   return Promise.race([promise,aborted]).finally(()=>signal.removeEventListener('abort',onAbort));
  }
+ const nativeIdentityFields=['provider','sessionId','taskId','workspaceId','runId','phase','toolCallId'];
+ const nativeScopeFields=[...nativeIdentityFields,'inputFingerprint','callFingerprint'];
+ const nativeIdentifier=value=>typeof value==='string'&&value.length>0&&value.length<=256&&!/[\x00-\x1f\x7f]/.test(value);
+ function nativeScope(value){
+  if(!value||nativeIdentityFields.some(key=>!nativeIdentifier(value[key]))||value.provider!=='dsh'||value.phase!=='user'
+   ||['inputFingerprint','callFingerprint'].some(key=>!/^[a-f0-9]{64}$/.test(value[key]??'')))
+   throw capabilityError('AGENT_NATIVE_EFFECT_MISMATCH','A complete trusted native effect binding is required');
+  return Object.fromEntries(nativeScopeFields.map(key=>[key,value[key]]));
+ }
+ function nativeEffectKey(scope){return 'native-effect:'+requestFingerprint(Object.fromEntries(nativeIdentityFields.map(key=>[key,scope[key]])));}
+ function assertAgentNativeEffectAvailable(binding){
+  const scope=nativeScope(binding);
+  if(dispatches[nativeEffectKey(scope)])throw capabilityError('AGENT_NATIVE_EFFECT_ALREADY_RECORDED','This native call already received its one execution permit');
+  return scope;
+ }
+ function beginAgentNativeEffect(request,binding){
+  if(!dispatchFile)throw capabilityError('AGENT_NATIVE_EFFECT_PERSISTENCE_REQUIRED','Native execution requires the durable Core dispatch journal');
+  const scope=assertAgentNativeEffectAvailable(binding),row=approval.get(request.approvalId);
+  if(request.capability!=='agent.native.approve'||request.actor?.kind!=='owner'||request.actor.id!=='desktop'
+   ||row.status!=='consumed'||row.fingerprint!==requestFingerprint(request)
+   ||request.taskId!==scope.taskId||request.workspaceId!==scope.workspaceId
+   ||requestFingerprint(request.input?.nativeBinding)!==requestFingerprint(scope))
+   throw capabilityError('PERMISSION_DENIED','Native effects require their exact consumed Owner approval');
+  if(Object.keys(dispatches).length>=50000)throw capabilityError('DISPATCH_JOURNAL_FULL','Capability dispatch journal needs Owner review');
+  const key=nativeEffectKey(scope),nativeEffectId=crypto.randomUUID();
+  dispatches[key]={kind:'agent-native-effect',nativeEffectId,nativeBinding:scope,fingerprint:requestFingerprint(scope),
+   capability:'agent.native.approve',requestId:'native-effect:'+nativeEffectId,taskId:scope.taskId,workspaceId:scope.workspaceId,
+   executorId:scope.provider+':'+scope.sessionId,status:'started',at:Date.now(),
+   authorization:{kind:'approval',id:request.approvalId,fingerprint:row.fingerprint}};
+  try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}catch(error){delete dispatches[key];throw error;}
+  activeDispatches.add(key);
+  return {nativeEffectId,inputFingerprint:scope.inputFingerprint};
+ }
+ function settleAgentNativeEffect(input={}){
+  const pair=Object.entries(dispatches).find(([,row])=>row?.kind==='agent-native-effect'&&row.nativeEffectId===input.nativeEffectId);
+  const [key,row]=pair??[],scope=row?.nativeBinding;
+  if(!scope||['provider','sessionId','taskId','workspaceId','runId','toolCallId','inputFingerprint'].some(field=>input[field]!==scope[field]))
+   throw capabilityError('AGENT_NATIVE_EFFECT_MISMATCH','Native result does not match its original call binding');
+  const permitted=approval.get(row.authorization.id);
+  if(permitted.status!=='consumed'||permitted.fingerprint!==row.authorization.fingerprint
+   ||requestFingerprint(permitted.request)!==permitted.fingerprint
+   ||requestFingerprint(permitted.request.input?.nativeBinding)!==requestFingerprint(scope))
+   throw capabilityError('PERMISSION_DENIED','Native result has no exact consumed Owner approval');
+  const terminal=['completed','failed'].includes(input.outcome);
+  if(!terminal&&!['unknown','cancelled','disconnected'].includes(input.outcome))
+   throw capabilityError('AGENT_NATIVE_EFFECT_EVIDENCE_REQUIRED','A supported native result outcome is required');
+  let evidence;
+  if(terminal){
+   if(input.evidence?.source!=='native-result'||!/^[a-f0-9]{64}$/.test(input.evidence.resultSha256??'')||!nativeIdentifier(input.evidence.eventId))
+    throw capabilityError('AGENT_NATIVE_EFFECT_EVIDENCE_REQUIRED','Actual terminal native output is required; activity and permit completion are not results');
+   evidence={source:'native-result',resultSha256:input.evidence.resultSha256,eventId:input.evidence.eventId,outcome:input.outcome};
+  }
+  // A native error can leave partial writes or external effects. A result is
+  // observed, but its effects require the existing Owner reconciliation path.
+  const status=input.outcome==='completed'?'completed':'outcome-unknown';
+  if(terminal&&row.nativeEvidence&&requestFingerprint(row.nativeEvidence)!==requestFingerprint(evidence))
+   throw capabilityError('AGENT_NATIVE_EFFECT_ALREADY_SETTLED','A contradictory native terminal result cannot replace retained execution evidence');
+  if(!['started','outcome-unknown'].includes(row.status)){
+   if(row.status===status&&requestFingerprint({evidence:row.nativeEvidence??null})===requestFingerprint({evidence:evidence??null}))return {nativeEffectId:row.nativeEffectId,status:row.status};
+   throw capabilityError('AGENT_NATIVE_EFFECT_ALREADY_SETTLED','A native result cannot rewrite a settled or reviewed effect');
+  }
+  dispatches[key]={...row,status,...(evidence?{nativeEvidence:evidence}:{}),settledAt:Date.now()};
+  activeDispatches.delete(key);
+  try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}
+  catch(error){dispatches[key]={...row,status:'outcome-unknown'};const failure=capabilityError('DISPATCH_RESULT_PERSIST_FAILED','Native effect result was not durably recorded');failure.effectStatus='unknown';throw failure;}
+  return {nativeEffectId:row.nativeEffectId,status};
+ }
  async function validatePluginParent(request){
   if(!request.pluginParent)return null;
   const ref=request.pluginParent,row=approval.get(ref.approvalId),parent=row.request;
@@ -209,6 +277,8 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    status:error.code==='INVOKE_CANCEL_UNCONFIRMED'?'cancel-requested':error.effectStatus==='unknown'?'outcome-unknown':'denied',code:error.code??'PROVIDER_ERROR'});throw error;}
  }
  return {execute,register:registry.register,list:registry.list,registry,approvals:approval,
+  // Trusted adapter receipts use the existing effect journal; neither method is an IPC capability.
+  assertAgentNativeEffectAvailable,beginAgentNativeEffect,settleAgentNativeEffect,
   setExecutionGuard(guard){if(typeof guard!=='function')throw TypeError('Execution guard required');executionGuard=guard;},
   async prepareOperation(raw){
    const request=normalizeRequest(raw);

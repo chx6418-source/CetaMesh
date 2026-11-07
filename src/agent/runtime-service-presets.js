@@ -1,11 +1,12 @@
 // Public endpoint metadata only: no inferred model, key or account compatibility.
 export const RUNTIME_SERVICE_PRESETS = Object.freeze([
+  {id:'deepseek-official',label:'DeepSeek API',baseUrl:'https://api.deepseek.com',providers:['dsh']},
   {id:'gemini-official',label:'Google Gemini API',baseUrl:'https://generativelanguage.googleapis.com',providers:['gemini']},
   {id:'anthropic-official',label:'Anthropic API',baseUrl:'https://api.anthropic.com',providers:['claude']},
   {id:'openai',label:'OpenAI-compatible API · OpenAI',baseUrl:'https://api.openai.com/v1',providers:['opencode','qwen']},
   {id:'dashscope-cn',label:'阿里云百炼（中国）',baseUrl:'https://dashscope.aliyuncs.com/compatible-mode/v1',providers:['opencode','qwen']},
   {id:'dashscope-intl',label:'Alibaba Cloud Model Studio（国际）',baseUrl:'https://dashscope-intl.aliyuncs.com/compatible-mode/v1',providers:['opencode','qwen']},
-  {id:'custom',label:'自定义 API 服务',baseUrl:null,providers:['gemini','opencode','qwen','claude']}
+  {id:'custom',label:'自定义 API 服务',baseUrl:null,providers:['gemini','opencode','qwen','claude','dsh']}
 ].map(row=>Object.freeze({...row,providers:Object.freeze(row.providers)})));
 export const runtimeServicePresets = provider => RUNTIME_SERVICE_PRESETS.filter(row=>row.providers.includes(provider));
 export const presetForEndpoint = (provider,baseUrl) => runtimeServicePresets(provider).find(row=>row.baseUrl===baseUrl)?.id ?? 'custom';

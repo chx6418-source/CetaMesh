@@ -59,6 +59,7 @@ function nativeDetails(snapshot) {
 export function createNativeApprovalAdapter({ broker, resolveTask, resolveWorkspace, agentBroker, now = () => Date.now() } = {}) {
   const pending = new Map();
   const seen = new Map();
+  const ownedEffects = new Map();
   let closed = false;
   // A persisted approval is unusable without its process-local native request.
   for (const row of broker.approvals.list()) {
@@ -97,6 +98,11 @@ export function createNativeApprovalAdapter({ broker, resolveTask, resolveWorksp
       || task.currentAgent?.provider !== input.provider || task.currentAgent?.sessionId !== input.sessionId
       || (task.authorizationRevision ?? task.rev) !== entry.authorizationRevision)
       throw capabilityError('TASK_NOT_AUTHORIZED', 'Native permission Task assignment changed');
+    if (input.runId !== undefined && (input.phase !== 'user'
+      || task.executionObservation?.provider !== input.provider || task.executionObservation?.sessionId !== input.sessionId
+      || task.executionObservation?.runId !== input.runId
+      || !['running','waiting-approval'].includes(task.executionObservation?.state)))
+      throw capabilityError('AGENT_ASSIGNMENT_EXPIRED', 'Native permission belongs to a different Core run');
     const workspace = resolveWorkspace?.(input.workspaceId);
     if (!workspace || permissionFingerprint(workspace) !== entry.workspaceFingerprint)
       throw capabilityError('WORKSPACE_RECONCILIATION_REQUIRED', 'Native permission Workspace changed');
@@ -143,7 +149,9 @@ export function createNativeApprovalAdapter({ broker, resolveTask, resolveWorksp
         const approval = broker.approvals.get(request.approvalId);
         if (approval.status !== 'consumed' || approval.fingerprint !== requestFingerprint(request))
           throw capabilityError('PERMISSION_DENIED', 'A consumed Owner approval is required for native execution');
-        const result = { outcome: 'approved', optionId: entry.optionId };
+        const receipt = entry.effectBinding ? broker.beginAgentNativeEffect(request, entry.effectBinding) : null;
+        if (receipt) ownedEffects.set(receipt.nativeEffectId, {nativeEffectId: receipt.nativeEffectId, ...entry.effectBinding});
+        const result = { outcome: 'approved', optionId: entry.optionId, ...(receipt ?? {}) };
         finish(entry, result);
         return result;
       } catch (error) { denyChanged(entry); throw error; }
@@ -164,27 +172,42 @@ export function createNativeApprovalAdapter({ broker, resolveTask, resolveWorksp
         || input.options.some(option => !identifier(option?.optionId) || !['allow_once', 'reject_once'].includes(option.kind))
         || !input.options.some(option => option.kind === 'allow_once')) return Promise.resolve(cancelled());
       if (JSON.stringify(input).length > 262144) return Promise.resolve(cancelled());
+      if ((Object.hasOwn(input, 'runId') || Object.hasOwn(input, 'phase'))
+        && (!identifier(input.runId) || input.phase !== 'user')) return Promise.resolve(cancelled());
+      if (Object.hasOwn(input, 'trackEffect') && typeof input.trackEffect !== 'boolean') return Promise.resolve(cancelled());
+      if (input.trackEffect === true && (input.provider !== 'dsh' || !identifier(input.runId) || input.phase !== 'user')) return Promise.resolve(cancelled());
       snapshot = immutable(structuredClone(input));
       const hash = permissionFingerprint({ provider: snapshot.provider, sessionId: snapshot.sessionId,
-        workspaceId: snapshot.workspaceId, taskId: snapshot.taskId, toolCall: snapshot.target, options: snapshot.options });
+        workspaceId: snapshot.workspaceId, taskId: snapshot.taskId, toolCall: snapshot.target, options: snapshot.options,
+        ...(Object.hasOwn(snapshot, 'runId') ? {runId: snapshot.runId, phase: snapshot.phase} : {}),
+        ...(Object.hasOwn(snapshot, 'trackEffect') ? {trackEffect: snapshot.trackEffect} : {}) });
       if (hash !== snapshot.fingerprint) return Promise.resolve(cancelled());
+      const effectBinding = snapshot.trackEffect === true ? { provider:snapshot.provider, sessionId:snapshot.sessionId,
+        taskId:snapshot.taskId, workspaceId:snapshot.workspaceId, runId:snapshot.runId, phase:snapshot.phase,
+        toolCallId:snapshot.target.toolCallId, inputFingerprint:permissionFingerprint(snapshot.target.rawInput),
+        callFingerprint:permissionFingerprint(snapshot.target) } : null;
+      if (effectBinding) broker.assertAgentNativeEffectAvailable(effectBinding);
       for (const [id, expiry] of seen) if (expiry <= now()) seen.delete(id);
-      if (pending.size >= MAX_PENDING || seen.size >= 4096 || seen.has(snapshot.requestId)) return Promise.resolve(cancelled());
+      const requestKey=JSON.stringify(['request',snapshot.requestId]);
+      const callKey=effectBinding ? JSON.stringify(['call',effectBinding.provider,effectBinding.sessionId,effectBinding.taskId,
+        effectBinding.workspaceId,effectBinding.runId,effectBinding.phase,effectBinding.toolCallId]) : null;
+      if (pending.size >= MAX_PENDING || seen.size >= 4096 || seen.has(requestKey) || (callKey && seen.has(callKey))) return Promise.resolve(cancelled());
       const workspace = resolveWorkspace?.(snapshot.workspaceId);
       const task = resolveTask?.(snapshot.taskId);
       const scope = agentBroker?.assertExecutionConsent?.(snapshot.provider, { workspaceId: snapshot.workspaceId });
       if (!workspace || !task || !scope?.authorized || !isNativePermissionSecurity(scope.security)) return Promise.resolve(cancelled());
-      const entry = { snapshot, signal, settled: false, approvalId: null, expiresAt: now() + TTL_MS,
+      const entry = { snapshot, signal, effectBinding, settled: false, approvalId: null, expiresAt: now() + TTL_MS,
         workspaceFingerprint: permissionFingerprint(workspace), securityFingerprint: scope.fingerprint,
         authorizationRevision: task.authorizationRevision ?? task.rev,
         optionId: snapshot.options.find(option => option.kind === 'allow_once').optionId };
-      const review = { nativeMarker: crypto.randomUUID(), nativeDetails: nativeDetails(snapshot) };
+      const review = { nativeMarker: crypto.randomUUID(), nativeDetails: nativeDetails(snapshot), ...(effectBinding ? {nativeBinding:effectBinding} : {}) };
       entry.reason = 'Owner approval for one native Agent tool: ' + reviewText(snapshot.target.title || snapshot.action, 800)
         + '. No OS sandbox; the approved tool may access host files and network.';
       entry.inputFingerprint = permissionFingerprint(review);
       const result = new Promise(resolve => { entry.resolve = resolve; });
       pending.set(snapshot.requestId, entry);
-      seen.set(snapshot.requestId, entry.expiresAt);
+      seen.set(requestKey, entry.expiresAt);
+      if (callKey) seen.set(callKey, entry.expiresAt);
       entry.onAbort = () => finish(entry, cancelled());
       signal?.addEventListener('abort', entry.onAbort, { once: true });
       entry.timeout = setTimeout(() => finish(entry, { outcome: 'expired' }), TTL_MS);
@@ -217,5 +240,16 @@ export function createNativeApprovalAdapter({ broker, resolveTask, resolveWorksp
       return result;
     } catch { return Promise.resolve(cancelled()); }
   }
-  return { request, close() { closed = true; for (const entry of [...pending.values()]) finish(entry, cancelled()); } };
+  return { request,
+    settleEffect(input) { const result=broker.settleAgentNativeEffect(input); ownedEffects.delete(input.nativeEffectId); return result; },
+    close() {
+      closed = true;
+      for (const entry of [...pending.values()]) finish(entry, cancelled());
+      for (const binding of ownedEffects.values()) {
+        try { broker.settleAgentNativeEffect({...binding,outcome:'unknown'}); }
+        catch { /* A failed durable close leaves the original started/unknown effect fenced. */ }
+      }
+      ownedEffects.clear();
+    }
+  };
 }

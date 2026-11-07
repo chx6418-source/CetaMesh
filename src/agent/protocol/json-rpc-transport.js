@@ -5,15 +5,15 @@ const validId = id => typeof id === 'string' || (Number.isSafeInteger(id));
 /** Bounded JSONL connection. Cancellation affects this RPC only, never an Agent turn. */
 export function createJsonRpcTransport({ readable, writable, framing, maxFrameBytes = 1048576,
   maxPending = 256, controlTimeoutMs = 30000, onNotification, onRequest, onClose }) {
-  if (!['acp-v1-jsonl', 'codex-app-server-jsonl'].includes(framing)) throw new TypeError('Explicit supported framing required');
+  if (!['acp-v1-jsonl', 'codex-app-server-jsonl', 'dsh-sdk-jsonl'].includes(framing)) throw new TypeError('Explicit supported framing required');
   for (const value of [maxFrameBytes, maxPending, controlTimeoutMs]) {
     if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError('Limits must be positive integers');
   }
-  const acp = framing === 'acp-v1-jsonl';
+  const jsonRpc2 = framing !== 'codex-app-server-jsonl';
   const pending = new Map();
   const incoming = new Set();
   let nextId = 1, closed = null, parts = [], bytes = 0, first = true, notifications = 0;
-  const envelope = value => acp ? { jsonrpc: '2.0', ...value } : value;
+  const envelope = value => jsonRpc2 ? { jsonrpc: '2.0', ...value } : value;
   function finish(id, error, result) {
     const entry = pending.get(id);
     if (!entry) return;
@@ -50,12 +50,19 @@ export function createJsonRpcTransport({ readable, writable, framing, maxFrameBy
       message = JSON.parse(text);
     } catch { throw fault('RPC_PROTOCOL_ERROR', 'Malformed UTF-8 JSON frame'); }
     if (!message || typeof message !== 'object' || Array.isArray(message)
-      || (acp ? message.jsonrpc !== '2.0' : own(message, 'jsonrpc')))
+      || (jsonRpc2 ? message.jsonrpc !== '2.0' : own(message, 'jsonrpc')))
       throw fault('RPC_PROTOCOL_ERROR', 'Invalid RPC envelope');
     if (own(message, 'method')) {
       if (typeof message.method !== 'string' || !message.method || own(message, 'result') || own(message, 'error')
         || (own(message, 'id') && !validId(message.id))) throw fault('RPC_PROTOCOL_ERROR', 'Invalid RPC method frame');
       if (!own(message, 'id')) {
+        // DSH approvals refer to earlier Session records. Commit their bounded
+        // evidence synchronously before a following reverse request can run.
+        if (framing === 'dsh-sdk-jsonl') {
+          const result = onNotification?.(message.method, message.params);
+          if (result?.then) throw fault('RPC_HANDLER_ERROR', 'DSH notification observer must be synchronous');
+          return;
+        }
         if (notifications >= maxPending) throw fault('RPC_PROTOCOL_ERROR', 'Notification handler limit reached');
         notifications++;
         Promise.resolve().then(() => !closed && onNotification?.(message.method, message.params)).catch(() => {

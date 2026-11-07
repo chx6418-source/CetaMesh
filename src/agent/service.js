@@ -12,6 +12,9 @@ import { createAgentBroker } from './broker.js';
 import { createDshAgentProvider } from './dsh-agent-provider.js';
 import { createDshPresetPolicy } from './dsh-preset-policy.js';
 import { createStagedDshAgentProvider } from './staged-dsh-agent-provider.js';
+import { createDshSdkTaskTransport } from './dsh-sdk-transport.js';
+import { createDshSdkRuntimeResolver } from './dsh-sdk-runtime.js';
+import { DSH_GATE_POLICY_VERSION } from './dsh-sdk-tool-gate.js';
 import { createCodexAgentProvider } from './codex-agent-provider.js';
 import { createAcpProviders } from './acp-provider-descriptors.js';
 import { createClaudeAgentProvider, createConfiguredClaudeAgentProvider } from './claude-agent-provider.js';
@@ -77,13 +80,37 @@ function summarizeProvider(provider, health = null) {
  * NodeApiClient when the legacy runtime is present; Core may omit DSH entirely.
  * The returned .broker supports process-local turn-end wiring for Chat and Continuity.
  */
-export function createDefaultAgentService({ api, defaults, log, dshOptions = {}, dshPresetConfig = null, codexOptions = {}, codexExecutable,
+export function createDefaultAgentService({ api, defaults, log, dshOptions = {}, dshSdkOptions = {}, dshPresetConfig = null, codexOptions = {}, codexExecutable,
   zcodeOptions = {}, zcodeExecutable, acpOptions = {}, claudeOptions = {}, workbuddyOptions = {}, codexRouterOptions = {}, desktopStatus = null, installationStatus, dshConfiguration = null, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight, runtimeAuthService, connectionLeases } = {}) {
   const dshProvider = api ? createDshAgentProvider({ api, defaults, log,
     presetPolicy: dshPresetConfig ? createDshPresetPolicy(dshPresetConfig) : null }) : createUnavailableDshProvider();
-  const taskBoundDsh = api && typeof dshOptions.resolveTaskWorkspace === 'function' && typeof dshOptions.applyChanges === 'function'
-    ? createStagedDshAgentProvider({ ...dshOptions, provider: dshProvider, log })
-    : dshProvider;
+  const dshRuntime = dshSdkOptions.runtimeResolver ?? (dshSdkOptions.runtimeConfiguration
+    ? createDshSdkRuntimeResolver({runtimeConfiguration: dshSdkOptions.runtimeConfiguration,
+      allowLoopbackHttpForTests: dshSdkOptions.allowLoopbackHttpForTests === true}) : null);
+  const dshExecution = dshRuntime ? createDshSdkTaskTransport({...dshSdkOptions, runtimeResolver: dshRuntime, log}) : dshProvider;
+  const stagedDsh = typeof dshOptions.resolveTaskWorkspace === 'function' && typeof dshOptions.applyChanges === 'function'
+    ? createStagedDshAgentProvider({ ...dshOptions, provider: dshExecution, log }) : dshExecution;
+  // One registered DSH provider owns new SDK Tasks. The old HTTP connector is
+  // still an independent connection/preset observation, never an execution fallback.
+  const taskBoundDsh = !dshRuntime ? stagedDsh : Object.freeze({...stagedDsh,
+    async health(options = {}) {
+      const [execution, legacy] = await Promise.allSettled([stagedDsh.health(options), dshProvider.health(options)]);
+      const health = execution.status === 'fulfilled' ? execution.value : {available: false, ready: false, taskEligible: false, reason: 'DSH_SDK_UNAVAILABLE'};
+      const http = legacy.status === 'fulfilled' ? legacy.value : {available: false, ready: false, reason: 'not_connected'};
+      const security = stagedDsh.capabilities().security;
+      return {...health, runtimeConfiguration: dshRuntime.configuration?.() ?? dshSdkOptions.runtimeConfiguration?.get('dsh') ?? null,
+        preset: http.preset ?? null, diagnostic: health.diagnostic ?? http.diagnostic ?? null,
+        dshExecution: {transport: 'sdk', bridgeState: health.taskEligible === true && security?.verified === true ? 'verified' : 'unavailable',
+          gateVersion: DSH_GATE_POLICY_VERSION, supportedTools: ['read', 'write', 'edit'], allToolsRequireApproval: security?.allToolsRequireApproval === true,
+          osSandbox: false, reason: health.reason ?? null,
+          legacyConnection: {available: typeof http.available === 'boolean' ? http.available : null,
+            ready: typeof http.ready === 'boolean' ? http.ready : null, reason: http.reason ?? null}}};
+    },
+    configure: settings => {
+      if (typeof dshRuntime.configure !== 'function') throw agentProviderError('CONFIGURATION_UNSUPPORTED', 'DSH task runtime configuration is unavailable');
+      return dshRuntime.configure(settings);
+    }
+  });
   const legacyCodex = createCodexAgentProvider({ ...codexOptions, ...(codexOptions.executable === undefined && codexExecutable !== undefined ? { executable: codexExecutable } : {}), log });
   codexRouterOptions.appServerProvider?.bindSessionLifecycle?.(legacyCodex._sessionLifecycle);
   const codex = createCodexProviderRouter({ ...codexRouterOptions, legacyProvider: legacyCodex,
@@ -215,6 +242,11 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
     },
     'agent.configure': (params) => {
       const provider = broker.require(params?.provider);
+      if (provider.id === 'dsh' && params?.settings?.taskTransport === 'sdk') {
+        const {taskTransport, ...settings} = params.settings;
+        if (typeof provider.configure !== 'function') return {provider: 'dsh', supported: false, reason: 'CONFIGURATION_UNSUPPORTED'};
+        return provider.configure(settings);
+      }
       if (provider.id === 'dsh' && dshConfiguration) return dshConfiguration.configure(params?.settings ?? {});
       if (typeof provider.configure !== 'function') {
         return { provider: provider.id, supported: false, reason: 'CONFIGURATION_UNSUPPORTED' };

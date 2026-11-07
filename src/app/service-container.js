@@ -132,6 +132,8 @@ export function createCetaMeshServices(options = {}) {
     resolveExecutionTask: taskId => taskService.runtime.get({ id: taskId }).task,
     isTaskHandoffInFlight: taskId => continuityService?.runtime.isInFlight(taskId) === true,
     dshOptions: agentTaskOptions, dshPresetConfig: options.dshPresetConfig, dshConfiguration: options.dshConfiguration,
+    dshSdkOptions: {stateDir, runtimeConfiguration: agentRuntimeConfiguration, requestNativeApproval: nativeApprovalBridge,
+      settleNativeEffect: input => capabilityService.settleAgentNativeEffect(input), ...options.agentDshSdkOptions},
     codexOptions: { ...agentTaskOptions, stateDir,
       legacyRecoveryTasks: () => {
         const tasks = [];

@@ -2,11 +2,12 @@ import crypto from 'node:crypto';
 import {agentProviderError as fault} from './agent-provider.js';
 import {describeRuntimeAuth} from './runtime-auth-capabilities.js';
 const providers=new Set(['gemini','opencode','qwen','claude']);
+const connectionProviders=new Set([...providers,'dsh']);
 function providerId(provider){if(!providers.has(provider))throw fault('INVALID_PARAMS','Unsupported Agent authentication provider');return provider;}
 /** Synchronous reservations precede every asynchronous task/auth/config launch. */
 export function createConnectionLeases() {
  const rows=new Map();
- const row=provider=>{providerId(provider);if(!rows.has(provider))rows.set(provider,{epoch:0,owners:new Set()});return rows.get(provider);};
+ const row=provider=>{if(!connectionProviders.has(provider))throw fault('INVALID_PARAMS','Unsupported Agent connection');if(!rows.has(provider))rows.set(provider,{epoch:0,owners:new Set()});return rows.get(provider);};
  return Object.freeze({epoch:provider=>row(provider).epoch,reserve({provider,kind,expectedEpoch}) {
   if(!['auth','task','configure'].includes(kind))throw fault('INVALID_PARAMS','Invalid connection lease');
   const state=row(provider);
@@ -143,7 +144,8 @@ export function createAgentRuntimeAuthService({configuration,adapters={},profile
 
 /** Add connection ownership without changing any Broker or native tool approval. */
 export function withConnectionLeases(provider,connectionLeases) {
- if(!connectionLeases||!providers.has(provider.id))return provider;
+ if(!connectionLeases||!connectionProviders.has(provider.id))return provider;
+ if(provider.id==='dsh'&&provider.capabilities()?.taskTransport!=='sdk')return provider;
  const sessions=new Map(),pending=new Set(),orphans=new Set();
  return Object.freeze({...provider,
   async createSession(params) {
