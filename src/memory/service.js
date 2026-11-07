@@ -12,7 +12,7 @@ import { memoryError } from './types.js';
 
 export const DESKTOP_USER_PRINCIPAL = Object.freeze({ kind: 'user', id: 'desktop' });
 
-export function createMemoryService({ stateDir, socialV2File, now, audit } = {}) {
+export function createMemoryService({ stateDir, socialV2File, now, audit, resolveExperienceContext = null } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createMemoryService 需要 stateDir');
   const runtime = createMemoryRuntime({ stateDir, now, audit });
   const adapter = createQqMemoryAdapter({
@@ -20,6 +20,13 @@ export function createMemoryService({ stateDir, socialV2File, now, audit } = {})
     now
   });
   const user = DESKTOP_USER_PRINCIPAL;
+  async function experienceContext(id) {
+    const memory = runtime.get({ principal: user, id }).memory;
+    if (!memory.experience) throw memoryError('INVALID_EXPERIENCE', 'Memory is not governed experience advice');
+    // Context is observed by Core, never accepted from renderer parameters.
+    return resolveExperienceContext ? resolveExperienceContext({ workspaceId: memory.experience.conditions.workspaceId })
+      : { workspaceId: memory.experience.conditions.workspaceId, platform: process.platform };
+  }
   let recovery = { recovered: [], failed: [] };
   try { recovery = runtime.recoverConfirmations({ principal: user }); }
   catch (error) {
@@ -46,6 +53,12 @@ export function createMemoryService({ stateDir, socialV2File, now, audit } = {})
     'memory.pin': (p) => runtime.update({
       principal: user, id: p.id, expectedRev: p.expectedRev, pinned: p.pinned !== false
     }),
+    'memory.experience.transition': async (p) => runtime.transitionExperience({ principal: user, id: p.id, expectedRev: p.expectedRev,
+      state: p.state, ...(p.state !== 'retired' ? { experienceContext: await experienceContext(p.id) } : {}) }),
+    'memory.experience.revise': async (p) => runtime.reviseExperience({ principal: user, id: p.id, expectedRev: p.expectedRev,
+      content: p.content, conditions: p.conditions, experienceContext: await experienceContext(p.id) }),
+    'memory.experience.rollback': async (p) => runtime.rollbackExperience({ principal: user, id: p.id, expectedRev: p.expectedRev,
+      revision: p.revision, experienceContext: await experienceContext(p.id) }),
     // 页面级聚合查询：一次 IPC 往返拿到列表 + 候选（UI 只挂一个 Area，避免并发 issue 互斥）。
     'memory.overview': (p) => {
       const list = runtime.list({

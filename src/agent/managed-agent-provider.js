@@ -24,6 +24,17 @@ function safeFailure(error) {
 }
 function abortError() { return Object.assign(new Error('Agent turn cancelled'), { name: 'AbortError', code: 'ABORT_ERR' }); }
 function assertNotAborted(signal) { if (signal.aborted) throw abortError(); }
+function rememberExperienceReferences(turn, context, principal) {
+  if (context?.scope?.taskId !== principal?.taskId || context?.scope?.workspaceId !== principal?.workspaceId
+    || !Array.isArray(context?.experienceMemoryIds)) return;
+  const retained = turn.experienceMemoryIds ?? [];
+  for (const id of context.experienceMemoryIds.slice(0, 3)) {
+    if (typeof id === 'string' && id.length > 0 && id.length <= 128 && !/[\x00-\x1f\x7f]/.test(id)
+      && !retained.includes(id) && retained.length < 3) retained.push(id);
+  }
+  turn.experienceMemoryIds = retained;
+}
+const experienceTurnData = turn => turn.experienceMemoryIds?.length ? { experienceMemoryIds: [...turn.experienceMemoryIds] } : {};
 function abortable(promise, signal) {
   if (signal.aborted) return Promise.reject(abortError());
   return new Promise((resolve, reject) => {
@@ -180,6 +191,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           fail('PRODUCT_CONTEXT_UNAVAILABLE', 'CetaMesh Product Context could not be built for the managed Agent');
         }
         const contextText = productTurn?.context ?? productTurn?.serialized ?? '';
+        rememberExperienceReferences(turn, productTurn, stepPrincipal);
         const canDelegate = ['agent.delegate.candidates','agent.delegate.propose'].every(id=>productTurn?.manifest?.some(row=>row.id===id&&row.available!==false));
         const delegationGuidance = canDelegate ? ' Delegation is an available workflow under the current Task policy. When the Owner asks an external executor to do the development, inspect only the minimum context needed, then call agent.delegate.candidates with the actual requirements. If canPropose is true, call agent.delegate.propose using the same requirements and a complete bounded technical brief, then end your turn so Core can dispatch. Do not consume the tool budget writing the delegated implementation or repeatedly planning. Respect the requested executor; report an unavailable, unauthorized or conflicting executor instead of silently doing its work yourself. These instructions grant no permission and do not override the candidate checks, Owner approvals, operation identity or unknown-effect recovery. Without canPropose, explain the concrete blocker.' : '';
         const messages = [
@@ -396,7 +408,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
     } finally {
       await recordUsage(s, turn, usage);
       s.lastUsage = usage; s.lastReason = reason; s.running = false; s.controller = null;
-      emit(s, 'turn/end', { requestId: turn.id, reason: { ...reason, usage }, usage, promptChars: turn.content.length, outputChars });
+      emit(s, 'turn/end', { requestId: turn.id, reason: { ...reason, usage }, usage, promptChars: turn.content.length, outputChars, ...experienceTurnData(turn) });
       s.currentTurn = null;
       if (typeof onTurnEnd === 'function') {
         try { await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, runId: turn.runId, phase: turn.phase, usage, promptChars: turn.content.length,
@@ -546,9 +558,11 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           refreshContext: async () => {
             if (typeof buildProductTurnContext !== 'function') return null;
             const principal = await principalFor(s);
-            return buildProductTurnContext({ sessionId: s.id, provider: 'cetamesh', principal,
+            const context = await buildProductTurnContext({ sessionId: s.id, provider: 'cetamesh', principal,
               modelProvider: s.modelProvider || null, model: s.model || undefined,
               toolCalling: modelRuntime.supportsToolCalling?.(s.modelProvider || null, s.model || null) ? 'supported' : 'unsupported' });
+            rememberExperienceReferences(turn, context, principal);
+            return context;
           }
         });
         if (Array.isArray(result.messages)) s.messages = result.messages.filter((message) => message?.role !== 'system');
@@ -579,7 +593,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           toolCalling: result.toolCalling, resolvedModel: result.resolvedModel ?? null, usage: s.lastUsage };
         await recordUsage(s, turn, s.lastUsage);
         emit(s, 'turn/end', { requestId: turn.id, reason: s.lastReason, usage: s.lastUsage,
-          promptChars: turn.content.length, outputChars: text.length });
+          promptChars: turn.content.length, outputChars: text.length, ...experienceTurnData(turn) });
         if (typeof onTurnEnd === 'function') await onTurnEnd({ provider: 'cetamesh', sessionId: s.id, runId: turn.runId, phase: turn.phase, usage: s.lastUsage,
           promptChars: turn.content.length, outputChars: text.length, source: 'managed-model-runtime', outcome: s.lastReason.kind });
         return { resumed: true, pending: false };

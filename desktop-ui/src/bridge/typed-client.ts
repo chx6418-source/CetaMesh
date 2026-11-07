@@ -192,8 +192,17 @@ export interface TaskRecoverySubmission {
 export type TaskRecoveryRequest = { expectedRev: number; action: 'resume' | 'release'; provider?: string; nextInstruction?: string; requestId?: string } & (
   { automatic: true } | { automatic?: false; reviewToken: string; reviewedOperationIds: string[]; reviewSummary: string }
 );
+export type ExperienceState = 'trial' | 'active' | 'retired';
+export type ExperienceConditions = { workspaceId: string; platform: string; tool: 'npm' | 'cargo' | null; configDigest: string | null; sourceDigest: string | null };
+export type ExperienceReceipt = { eventId: string; taskId: string; workspaceId: string; provider: string; sessionId: string; runId: string; operationId: string; status: 'pass' | 'fail'; resultSha256: string; at: number };
+export type ExperienceSnapshot = { revision: number; content: string; state: ExperienceState; conditions: ExperienceConditions; at: number; by: string };
+export type MemoryExperience = { schemaVersion: 1; state: ExperienceState; meaning: 'conditional-reference';
+  trigger: { id: string; kind: string; taskId: string; workspaceId: string; turnId: string; provider: string; sessionId: string; runId: string; ownerMessageId: string | null };
+  conditions: ExperienceConditions; evidence: ExperienceReceipt[]; outcomes: ExperienceReceipt[]; history: ExperienceSnapshot[]; omittedHistory: number; omittedOutcomes: number };
 export interface Memory {
-  provenance?: {status:'user-confirmed'|'agent-inference'|'historical-unverified';actor:string|null;at:string|number|null};
+  provenance?: {status:'user-confirmed'|'agent-inference'|'historical-unverified'|'conditional-reference';actor:string|null;at:string|number|null};
+  experienceSummary?: { state: ExperienceState; meaning: 'conditional-reference'; historyCount: number; observedOutcomes: number };
+  experience?: MemoryExperience;
   validUntil?: number|null;
   id: string; type: string; scope: string; title: string; content: string; summary: string;
   tags: string[]; pinned: boolean; rev: number | null; createdAt: string | number | null; updatedAt: string | number | null;
@@ -351,6 +360,7 @@ type UiMethod =
   | 'ui.workshop.proposals' | 'ui.workshop.proposal' | 'ui.workshop.review' | 'ui.workshop.retry' | 'ui.workshop.task.status' | 'ui.workshop.deliver'
   | 'ui.workspace.version' | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
+  | 'ui.memory.experience.transition' | 'ui.memory.experience.revise' | 'ui.memory.experience.rollback'
   | 'ui.memory.candidates.confirm' | 'ui.memory.candidates.confirmBatch'
   | 'ui.agent.auth.describe' | 'ui.agent.auth.start' | 'ui.agent.auth.status' | 'ui.agent.auth.cancel'
   | 'ui.agent.security' | 'ui.agent.authorize' | 'ui.agent.list' | 'ui.agent.health' | 'ui.agent.configure' | 'ui.agent.presets'
@@ -661,6 +671,9 @@ export const memoryClient = {
   create: (input: { type: string; scope: string; content: string; tags?: string[]; pinned?: boolean }) => uiCall<Memory>('ui.memory.create', input),
   update: (input: { id: string; expectedRev?: number; content: string; tags?: string[]; pinned?: boolean;validUntil?:number|null }) => uiCall<Memory>('ui.memory.update', input),
   pin: (id: string, pinned: boolean, expectedRev?: number) => uiCall<Memory>('ui.memory.pin', { id, pinned, expectedRev }),
+  transitionExperience: (command: { id: string; expectedRev: number; state: ExperienceState }) => uiCall<Memory>('ui.memory.experience.transition', command),
+  reviseExperience: (command: { id: string; expectedRev: number; content: string }) => uiCall<Memory>('ui.memory.experience.revise', command),
+  rollbackExperience: (command: { id: string; expectedRev: number; revision: number }) => uiCall<Memory>('ui.memory.experience.rollback', command),
   remove: (id: string, expectedRev?: number) => uiCall<{ id: string; deleted: boolean }>('ui.memory.delete', { id, expectedRev })
 };
 export const agentClient = {

@@ -96,6 +96,15 @@ export function createCetaMeshServices(options = {}) {
     audit: event => log('Workspace ' + event.action + '（' + (event.workspaceId ?? 'none') + '）')
   });
   let memoryService = null;
+  async function observeExperienceContext({ workspaceId, signal } = {}) {
+    const workspace = workspaceService.describeWorkspace(workspaceId);
+    if (!workspace) return null;
+    const config = await workspaceService.resolvePostWriteVerification({ workspaceId, signal });
+    return { workspaceId: workspace.id, platform: process.platform,
+      tool: config?.enabled === true && config.maxRunsPerTurn > 0 ? config.tool : null,
+      configDigest: config?.enabled === true && config.maxRunsPerTurn > 0 ? config.configDigest : null,
+      sourceDigest: config?.enabled === true && config.maxRunsPerTurn > 0 ? config.sourceDigest : null };
+  }
   const taskService = createTaskService({
     stateDir,
     ownedArtifactRoot: path.join(dataRoot, 'artifacts'),
@@ -252,7 +261,7 @@ export function createCetaMeshServices(options = {}) {
         autonomousHandoff?.schedule(payload);
       if (payload.outcome === 'completed' && settingsService.store.get().settings.memory.enabled === true) {
         const task = taskService.runtime.findByAgent({ provider: 'cetamesh', sessionId: payload.sessionId });
-        const proposal = explicitMemoryCandidate(task?.goal);
+        const proposal = task?.ownerContext?.entries?.length ? null : explicitMemoryCandidate(task?.goal);
         if (proposal) {
           try {
             const result = memoryService.runtime.proposeCandidate({
@@ -314,8 +323,11 @@ export function createCetaMeshServices(options = {}) {
     defaults: dshDefaults,
     defaultModelConfig: () => settingsService.store.get().settings.models,
     defaultAgentProvider: () => settingsService.store.get().settings.agents.defaultAgentProvider,
-    proposeMemoryCandidate: ({ text }) => {
+    proposeMemoryCandidate: ({ text, taskId }) => {
       if (settingsService.store.get().settings.memory.enabled !== true) return null;
+      // Task-linked statements are recorded once by the trusted settled-Run
+      // observer below, including their actual Chat message identity.
+      if (taskId) return null;
       const proposal = explicitMemoryCandidate(text);
       return proposal ? memoryService.runtime.proposeCandidate({
         principal: { kind: 'agent', id: 'chat', grants: { scopes: ['user:desktop'] } }, ...proposal
@@ -330,6 +342,7 @@ export function createCetaMeshServices(options = {}) {
 
   memoryService = createMemoryService({
     stateDir,
+    resolveExperienceContext: observeExperienceContext,
     ...(socialV2File ? { socialV2File } : {}),
     audit: decision => {
       if (decision.action !== 'read') {
@@ -339,7 +352,8 @@ export function createCetaMeshServices(options = {}) {
   });
   const workingMemory = createTaskWorkingMemoryRecorder({ memoryRuntime: memoryService.runtime,
     taskRuntime: taskService.runtime, resolveWorkspace:id=>workspaceService.describeWorkspace(id), enabled: () => settingsService.store.get().settings.memory.enabled === true,
-    onChanged: data => uiEventBus.publish('memory.updated', { ...data, status: 'working-updated' }) });
+    resolveExperienceConditions: request => workspaceService.resolvePostWriteVerification(request),
+    onChanged: data => uiEventBus.publish('memory.updated', { ...data, status: data.status ?? 'working-updated' }) });
   capabilityService = createCapabilityService({
     stateDir,
     networkCredentialResolver: createNetworkCredentialResolver(providerSecrets),
@@ -353,7 +367,19 @@ export function createCetaMeshServices(options = {}) {
     agentBroker,
     bindAgentSession: managedAgent.bindSession,
     onTaskObservation: ({ taskId }) => workingMemory.record(taskId),
-    onAgentTurnSettled: payload => autonomousHandoff?.scheduleSettled(payload),
+    onAgentTurnSettled: payload => {
+      void Promise.resolve().then(() => {
+        const task = taskService.runtime.get({ id: payload.taskId }).task;
+        const ownerSource = chatService.ownerSourceForTaskRun({ chatId: task.ownerContext?.sessionId,
+          taskId: task.id, workspaceId: task.workspaceId, provider: payload.provider, sessionId: payload.sessionId, runId: payload.runId });
+        const trigger = { turnId: payload.runId, provider: payload.provider, sessionId: payload.sessionId, runId: payload.runId, ...(ownerSource ?? {}) };
+        return workingMemory.recordExperienceOutcomes({ taskId: payload.taskId, trigger, memoryIds: payload.experienceMemoryIds ?? [] })
+          .then(() => workingMemory.recordExperienceCandidate({ taskId: payload.taskId, trigger }));
+      })
+        .catch(error => log('Task experience candidate not saved: ' + String(error?.code ?? 'MEMORY_EXPERIENCE_FAILED')))
+        .finally(() => autonomousHandoff?.scheduleSettled(payload))
+        .catch(error => log('Automatic handoff scheduling failed: ' + String(error?.code ?? 'HANDOFF_SCHEDULE_FAILED')));
+    },
     onOperation: data => uiEventBus.publish('approval.operation', data),
     resumeAgentApproval: managedAgent.resumeLegacyApproval,
     searchImpl: searchWeb,
@@ -457,7 +483,15 @@ export function createCetaMeshServices(options = {}) {
       && !capabilityService.recoveryForTask(taskId)
       && !toolExecutionCoordinator.recoveryForTask(taskId),
     prepareHandoff: async ({ taskId }) => { await chatService.prepareTaskHandoff({ taskId }); workingMemory.record(taskId); },
-    readWorkingMemory: taskId => workingMemory.references(taskId),
+    readWorkingMemory: (taskId, { workspaceFacts } = {}) => {
+      const task = taskService.runtime.get({ id: taskId }).task;
+      const config = workspaceService.readPostWriteVerificationConfig({ workspaceId: task.workspaceId });
+      const sourceDigest = workspaceFacts?.workspaceId === task.workspaceId ? workspaceFacts.contentProof?.sha256 : null;
+      return workingMemory.references(taskId, { experienceContext: { workspaceId: task.workspaceId, platform: process.platform,
+        tool: config?.enabled === true && config.maxRunsPerTurn > 0 ? config.tool : null,
+        configDigest: config?.enabled === true && config.maxRunsPerTurn > 0 ? config.configDigest : null,
+        sourceDigest: config?.enabled === true && config.maxRunsPerTurn > 0 ? sourceDigest : null } });
+    },
     readOperations: scope => capabilityService.broker.operationsForTask(scope),
     onHandoffComplete: async assignment => {
       capabilityService.trackTaskAgent(assignment);
@@ -562,6 +596,7 @@ export function createCetaMeshServices(options = {}) {
     skillPrincipalForContext: ({ kind, taskId }) => kind === 'owner'
       ? skillSourceAuthorizer.ownerPrincipal({ taskId }) : skillSourceAuthorizer.principalForTask(taskId),
     memorySettings: () => settingsService.store.get().settings.memory,
+    experienceContextForWorkspace: observeExperienceContext,
     onMemoryError: error => uiEventBus.publish('memory.updated', { status: 'unavailable',
       code: error?.code ?? 'MEMORY_UNAVAILABLE' })
   });

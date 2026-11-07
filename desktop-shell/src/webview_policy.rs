@@ -54,6 +54,7 @@ const UI_METHODS: &[&str] = &[
     "ui.workspace.version", "ui.workspace.list", "ui.workspace.open", "ui.workspace.create",
     "ui.memory.overview", "ui.memory.get", "ui.memory.create", "ui.memory.update", "ui.memory.pin", "ui.memory.delete",
     "ui.memory.candidates.confirm", "ui.memory.candidates.confirmBatch",
+    "ui.memory.experience.transition", "ui.memory.experience.revise", "ui.memory.experience.rollback",
     "ui.agent.auth.describe", "ui.agent.auth.start", "ui.agent.auth.status", "ui.agent.auth.cancel",
     "ui.agent.security", "ui.agent.authorize", "ui.agent.list", "ui.agent.health", "ui.agent.configure", "ui.agent.presets",
     "ui.devices.overview",

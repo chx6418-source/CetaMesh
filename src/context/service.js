@@ -2,6 +2,7 @@ import { DESKTOP_USER_PRINCIPAL } from '../memory/service.js';
 import { buildCapabilityContext } from './capability-context.js';
 import { projectProductContext } from './product-context.js';
 import { OWNER_ACTOR } from '../capability/types.js';
+import { experienceReferenceMetadata } from '../memory/experience.js';
 
 function taskFromRuntime(taskRuntime, taskId) {
   if (typeof taskId !== 'string' || !taskId.trim()) return null;
@@ -19,7 +20,7 @@ function taskWithChildren(taskRuntime, task) {
   return { ...task, children: taskRuntime.listChildren({ parentTaskId: task.id }).children };
 }
 
-function resolveMemoryReferences(memoryService, task, principal, onMemoryError = null) {
+function resolveMemoryReferences(memoryService, task, principal, onMemoryError = null, experienceContext = null) {
   if (!task || !Array.isArray(task.memoryRefs) || !memoryService?.runtime?.get) return [];
   const sourceScope = `task:${task.id}`;
   const resolved = [];
@@ -31,7 +32,7 @@ function resolveMemoryReferences(memoryService, task, principal, onMemoryError =
       const expectedScope = reference.scope || sourceScope;
       if (item.scope !== expectedScope) continue;
       if (expectedScope !== sourceScope && reference.authorizedBy !== 'user:desktop') continue;
-      if (memoryService.runtime.assess && memoryService.runtime.assess({principal,id:memoryId}).status !== 'current') continue;
+      if (memoryService.runtime.assess && memoryService.runtime.assess({principal,id:memoryId,experienceContext}).status !== 'current') continue;
       resolved.push({ memoryId, title: reference.note || item.type || 'Task Memory reference', excerpt: item.content, ...memoryReferenceMetadata(item) });
     } catch (error) {
       onMemoryError?.(error);
@@ -41,13 +42,13 @@ function resolveMemoryReferences(memoryService, task, principal, onMemoryError =
   return resolved;
 }
 
-function automaticMemoryReferences(memoryService, settings, principal, scopes, query = '', onMemoryError = null) {
+function automaticMemoryReferences(memoryService, settings, principal, scopes, query = '', onMemoryError = null, experienceContext = null) {
   if (settings?.enabled === false || !memoryService?.runtime) return [];
   const limit = Math.max(1, Math.min(200, Number(settings?.retrievalLimit) || 50));
   const rows = [];
   for (const scope of scopes) {
     try {
-      const page = memoryService.runtime.retrieve({ principal, scope, query: String(query).slice(0, 200), limit });
+      const page = memoryService.runtime.retrieve({ principal, scope, query: String(query).slice(0, 200), limit, experienceContext });
       if(page.meta?.conflicted)onMemoryError?.({code:'MEMORY_FACT_REVIEW_REQUIRED',message:'Authorized memory contains conflicting fact identities'});
       rows.push(...page.memories);
     } catch (error) {
@@ -66,7 +67,8 @@ function automaticMemoryReferences(memoryService, settings, principal, scopes, q
   const ranked = rows.map(row => ({ row, score: grams.reduce((sum, gram) =>
     sum + ((row.content + ' ' + (row.tags ?? []).join(' ')).toLowerCase().includes(gram) ? gram.length : 0), 0) }))
     .filter(({ score }) => grams.length === 0 || score > 0)
-    .sort((a, b) => b.score - a.score || Number(b.row.pinned) - Number(a.row.pinned)
+    .sort((a, b) => Number(a.row.type === 'working' && a.row.source === 'system') - Number(b.row.type === 'working' && b.row.source === 'system')
+      || b.score - a.score || Number(b.row.pinned) - Number(a.row.pinned)
       || b.row.updatedAt - a.row.updatedAt || a.row.id.localeCompare(b.row.id));
   const output = [];
   // Charge one token per UTF-8 byte plus record overhead: a conservative bound without
@@ -92,8 +94,9 @@ function automaticMemoryReferences(memoryService, settings, principal, scopes, q
 }
 
 function memoryReferenceMetadata(row) {
-  return { scope: row.scope, revision: row.rev, source: row.source,
+  return { scope: row.scope, type: row.type, revision: row.rev, source: row.source,
     provenance: row.provenance, createdAt: row.createdAt, updatedAt: row.updatedAt,
+    ...(row.experience ? { experience: experienceReferenceMetadata(row.experience) } : {}),
     sourceRefs: (row.sourceRefs ?? []).slice(0, 4) };
 }
 
@@ -102,7 +105,11 @@ function boundMemoryReferences(references, settings) {
   let remaining = 1200;
   const result = [];
   const seen = new Set();
-  for (const item of references) {
+  // Core's working-memory row repeats Task facts already present in this same
+  // context. It must not crowd every reviewed reference out of the shared budget.
+  // Explicit Owner content keeps its ordering and all normal scope checks.
+  const ordered = [...references].sort((a, b) => Number(a.type === 'working' && a.source === 'system') - Number(b.type === 'working' && b.source === 'system'));
+  for (const item of ordered) {
     if (seen.has(item.memoryId)) continue;
     seen.add(item.memoryId);
     if (result.length >= limit) break;
@@ -237,6 +244,10 @@ function serializeContext({
     context: projection.serialized,
     serialized: projection.serialized,
     manifest: projection.manifest,
+    // This list is derived from the final bounded JSON that the model receives.
+    // It is trusted callback data, never an ID list supplied by model text.
+    experienceMemoryIds: (JSON.parse(projection.serialized).memoryReferences ?? [])
+      .filter(row => row.experience?.meaning === 'conditional-reference').slice(0, 3).map(row => row.memoryId),
     truncated: projection.truncated,
     workspaceReconciliation,
     scope: { taskId: task?.id ?? null, workspaceId: workspace?.id ?? null }
@@ -255,6 +266,7 @@ export function createProductContextService({
   skillContentService = null,
   skillPrincipalForContext = null,
   memorySettings = () => ({ enabled: true, retrievalLimit: 50 }),
+  experienceContextForWorkspace = null,
   onMemoryError = null
 } = {}) {
   async function buildForChatTurn({ record, routing, modelProvider, model, requestedModel, resolvedModel, toolCalling, memoryQuery, skillRefs, signal } = {}) {
@@ -271,25 +283,33 @@ export function createProductContextService({
         code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
       : task ? { required: false, status: 'resolved', expectedWorkspaceId, observedWorkspaceId }
         : null;
-    const settings = memorySettings();
-    const memoryReferences = settings.enabled === false ? [] : boundMemoryReferences([
-      ...(task ? resolveMemoryReferences(memoryService, task, DESKTOP_USER_PRINCIPAL, onMemoryError) : []),
-      ...automaticMemoryReferences(memoryService, settings, DESKTOP_USER_PRINCIPAL,
-        ['user:desktop', 'global'], memoryQuery, onMemoryError)
-    ], settings);
-
     const skillPrincipal = skillContentService && typeof skillPrincipalForContext === 'function'
       ? skillPrincipalForContext({ kind: 'owner', taskId: task?.id ?? null, workspaceId: workspace?.id ?? null }) : OWNER_ACTOR;
     const skills = skillContentService ? await skillContentService.buildContext({ principal: skillPrincipal,
       taskId: task?.id ?? null, workspaceId: workspaceReconciliation?.required ? null : workspace?.id ?? null,
       selectedRefs: skillRefs ?? source.skillRefs ?? [], signal }) : null;
 
+    const experienceContext = memorySettings().enabled !== false && workspace && !workspaceReconciliation?.required
+      ? typeof experienceContextForWorkspace === 'function' ? await experienceContextForWorkspace({ workspaceId: workspace.id, signal })
+        : { workspaceId: workspace.id, platform: process.platform } : null;
+    // This is the final synchronous admission point. Workspace/Skill reads can
+    // await Owner changes; old prepared references cannot survive a disable,
+    // unlink, deletion or retirement that happened while those reads awaited.
+    const settings = memorySettings(), currentTask = taskFromRuntime(taskRuntime, source.taskId);
+    if (task && (!currentTask || currentTask.workspaceId !== task.workspaceId))
+      throw Object.assign(new Error('Chat Task binding changed while preparing reference context'), { code: 'CONTEXT_SCOPE_CHANGED' });
+    const memoryReferences = settings.enabled === false ? [] : boundMemoryReferences([
+      ...(currentTask ? resolveMemoryReferences(memoryService, currentTask, DESKTOP_USER_PRINCIPAL, onMemoryError, experienceContext) : []),
+      ...automaticMemoryReferences(memoryService, settings, DESKTOP_USER_PRINCIPAL,
+        ['user:desktop', 'global'], memoryQuery, onMemoryError, experienceContext)
+    ], settings);
+
     return serializeContext({
       mode: source.config?.mode ?? 'chat',
       executionPath: 'chat',
       record: source,
       routing,
-      task: taskWithChildren(taskRuntime, task),
+      task: taskWithChildren(taskRuntime, currentTask),
       workspace,
       memoryReferences,
       skills,
@@ -326,30 +346,39 @@ export function createProductContextService({
       ? { required: true, status: 'required', expectedWorkspaceId: task.workspaceId, observedWorkspaceId,
         code: 'WORKSPACE_RECONCILIATION_REQUIRED' }
       : { required: false, status: 'resolved', expectedWorkspaceId: task.workspaceId, observedWorkspaceId };
-    const memoryPrincipal = capabilityService.memoryPrincipal(liveActor);
+    const skillPrincipal = skillContentService && typeof skillPrincipalForContext === 'function'
+      ? skillPrincipalForContext({ kind: 'agent', taskId: task.id, workspaceId: workspace?.id ?? null }) : { ...principal, actor: liveActor };
+    const skills = skillContentService ? await skillContentService.buildContext({ principal: skillPrincipal,
+      taskId: task.id, workspaceId: workspaceReconciliation.required ? null : workspace?.id ?? null,
+      selectedRefs: skillRefs ?? [], signal }) : null;
+    const experienceContext = memorySettings().enabled !== false && workspace && !workspaceReconciliation.required
+      ? typeof experienceContextForWorkspace === 'function' ? await experienceContextForWorkspace({ workspaceId: workspace.id, signal })
+        : { workspaceId: workspace.id, platform: process.platform } : null;
+    const currentTask = taskRuntime?.findByAgent?.({ provider, sessionId });
+    if (!currentTask || currentTask.id !== task.id || currentTask.workspaceId !== task.workspaceId)
+      throw Object.assign(new Error('Managed Agent Task binding changed while observing reference conditions'), { code: 'AGENT_ASSIGNMENT_REQUIRED' });
+    const currentActor = capabilityService.principalForTask(task.id);
+    if (currentActor.id !== principal.actor.id)
+      throw Object.assign(new Error('Managed Agent authority changed while preparing reference context'), { code: 'AGENT_ASSIGNMENT_REQUIRED' });
+    const memoryPrincipal = capabilityService.memoryPrincipal(currentActor);
     const settings = memorySettings();
-    const readOnlyChild = Boolean(task.parentTaskId && task.childContract?.mode === 'read-only');
+    const readOnlyChild = Boolean(currentTask.parentTaskId && currentTask.childContract?.mode === 'read-only');
     const agentMemoryScopes = readOnlyChild ? [`task:${task.id}`]
       : [`task:${task.id}`, `workspace:${task.workspaceId}`];
     // A Task may link individual global records. The Memory policy still limits
     // this partition to those exact Owner-authorized IDs; no default global grant.
     if (memoryPrincipal.grants?.scopes?.includes('global')) agentMemoryScopes.push('global');
     const memoryReferences = settings.enabled === false ? [] : boundMemoryReferences([
-      ...resolveMemoryReferences(memoryService, task, memoryPrincipal, onMemoryError),
+      ...resolveMemoryReferences(memoryService, currentTask, memoryPrincipal, onMemoryError, experienceContext),
        ...(readOnlyChild ? [] : automaticMemoryReferences(memoryService, settings, memoryPrincipal,
-         agentMemoryScopes, task.goal, onMemoryError))
+         agentMemoryScopes, currentTask.goal, onMemoryError, experienceContext))
     ], settings);
-    const grantedIds = Array.isArray(liveActor.grants?.capabilities) ? liveActor.grants.capabilities : [];
-    const skillPrincipal = skillContentService && typeof skillPrincipalForContext === 'function'
-      ? skillPrincipalForContext({ kind: 'agent', taskId: task.id, workspaceId: workspace?.id ?? null }) : { ...principal, actor: liveActor };
-    const skills = skillContentService ? await skillContentService.buildContext({ principal: skillPrincipal,
-      taskId: task.id, workspaceId: workspaceReconciliation.required ? null : workspace?.id ?? null,
-      selectedRefs: skillRefs ?? [], signal }) : null;
+    const grantedIds = Array.isArray(currentActor.grants?.capabilities) ? currentActor.grants.capabilities : [];
     return serializeContext({
       mode: 'managed-agent',
       executionPath: 'managed-agent',
       record: { id: sessionId },
-      task: taskWithChildren(taskRuntime, task),
+      task: taskWithChildren(taskRuntime, currentTask),
       workspace,
       memoryReferences,
       skills,

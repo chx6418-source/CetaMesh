@@ -274,7 +274,7 @@ export function createContinuityRuntime({
       operations,
       goal: task.goal,
       ownerContext: task.ownerContext ?? null,
-      workingMemory: typeof readWorkingMemory === 'function' ? readWorkingMemory(task.id) : [],
+      workingMemory: typeof readWorkingMemory === 'function' ? readWorkingMemory(task.id, { workspaceFacts }) : [],
       requirements: task.requirements,
       currentPhase: task.currentPhase,
       completedWork: task.completedWork.map((item) => item.text ?? item),

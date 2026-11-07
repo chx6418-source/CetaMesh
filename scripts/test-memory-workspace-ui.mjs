@@ -6,6 +6,7 @@ import http from 'node:http';
 import {createRequire} from 'node:module';
 import {pathToFileURL} from 'node:url';
 import {spawn} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import WebSocket from 'ws';
 import {createMemoryService} from '../src/memory/service.js';
@@ -49,7 +50,7 @@ try{
  const portFile=path.join(profile,'DevToolsActivePort');for(let index=0;!fs.existsSync(portFile)&&index<100;index++)await delay(100);assert.ok(fs.existsSync(portFile));const[port,browserPath]=fs.readFileSync(portFile,'utf8').trim().split(/\r?\n/);socket=new WebSocket('ws://127.0.0.1:'+port+browserPath);await new Promise((resolve,reject)=>{socket.once('open',resolve);socket.once('error',reject);});let sequence=0;const pendingRpc=new Map();socket.on('message',bytes=>{const value=JSON.parse(String(bytes)),entry=pendingRpc.get(value.id);if(!entry)return;pendingRpc.delete(value.id);clearTimeout(entry.timer);value.error?entry.reject(Error(value.error.message)):entry.resolve(value.result);});
  const rpc=(method,params={},sessionId)=>new Promise((resolve,reject)=>{const id=++sequence,timer=setTimeout(()=>{pendingRpc.delete(id);reject(Error('CDP timeout '+method));},20000);pendingRpc.set(id,{resolve,reject,timer});socket.send(JSON.stringify({id,method,params,sessionId}));});closeBrowser=()=>rpc('Browser.close');const target=await rpc('Target.createTarget',{url:'about:blank'}),{sessionId}=await rpc('Target.attachToTarget',{targetId:target.targetId,flatten:true});await rpc('Runtime.enable',{},sessionId);await rpc('Page.enable',{},sessionId);await rpc('Page.navigate',{url:'http://127.0.0.1:'+server.address().port},sessionId);
  const evaluate=async expression=>{const value=await rpc('Runtime.evaluate',{expression,returnByValue:true,awaitPromise:true},sessionId);if(value.exceptionDetails)throw Error(value.exceptionDetails.exception?.description||value.exceptionDetails.text);return value.result?.value;};async function until(expression,label){for(let index=0;index<250;index++){if(await evaluate(expression))return;await delay(40);}throw Error('Timed out '+label+' '+await evaluate('document.body.innerText'));}
- const field=async(label,value)=>{await evaluate('window.setField('+JSON.stringify(label)+','+JSON.stringify(value)+')');await delay(40);};const click=async text=>{await evaluate('window.click('+JSON.stringify(text)+')');await delay(50);};
+ const field=async(label,value)=>{await evaluate('window.setField('+JSON.stringify(label)+','+JSON.stringify(value)+')');await delay(40);};const click=async text=>{await until('Array.from(document.querySelectorAll("button")).some(row=>row.textContent.trim()==='+JSON.stringify(text)+'&&!row.disabled)','ready action '+text);await evaluate('window.click('+JSON.stringify(text)+')');await delay(50);};
  await until('document.querySelectorAll(".memory-workspace-list>.memory-review-card").length===50','50 actual memory rows');
  assert.equal(await evaluate('document.querySelector(".memory-candidate-panel").open'),false,'pending candidates are collapsed');assert.equal(await evaluate('document.querySelectorAll(".memory-candidate-list>.memory-review-card").length'),50);
  assert.ok(calls.some(row=>row.method==='ui.memory.overview'&&row.params.limit===50&&row.params.offset===0));
@@ -73,6 +74,39 @@ try{
  assert.equal(await evaluate('document.querySelector("textarea[aria-label=\\"新建记忆内容\\"]").value'),'Draft that must survive failed save and query changes','Scope navigation preserves original draft');assert.ok(await evaluate('document.querySelector(".memory-create-fields").textContent.includes("global")'),'draft target remains original explicit Scope');
  assert.ok(calls.every(row=>!Object.hasOwn(row.params,'principal')&&!Object.hasOwn(row.params,'approved')));
  console.log('PASS real Chromium+Memory Core:50-row server paging, collapsed/paged candidates, failed-create draft retention, stale-query fence, frozen-rev correction, expiry, duplicate-click pin, confirmed deletion and exact Scope filtering');
+ const experienceCandidate=memoryService.runtime.proposeExperienceCandidate({type:'skill',scope:'workspace:'+workspace.id,content:'项目经验：修改项目测试文件后，使用现有 Node 校验并保留独立回执。',experience:{schemaVersion:1,
+   trigger:{id:createHash('sha256').update('owned-experience-ui-source').digest('hex'),kind:'owner-remember',taskId:'task-experience-ui',workspaceId:workspace.id,turnId:'experience-ui-turn',provider:'cetamesh',sessionId:'experience-ui-session',runId:'experience-ui-run',ownerMessageId:'experience-ui-owner'},
+   conditions:{workspaceId:workspace.id,platform:process.platform,tool:null,configDigest:null,sourceDigest:null},evidence:[]}}).candidate;
+ const confirmedExperience=await ui.execute({method:'ui.memory.candidates.confirm',params:{id:experienceCandidate.id,decision:'accept'}});
+ const experienceId=confirmedExperience.memory.id,initialExperience=await ui.execute({method:'ui.memory.get',params:{id:experienceId}});
+ assert.equal(initialExperience.experience?.state,'trial','actual Core detail projects governed experience metadata');
+ await click('刷新记忆');await until('!!document.querySelector(".memory-experience-panel")','experience reference summary');
+ assert.equal(await evaluate('document.querySelector(".memory-experience-panel").open'),false,'bounded history is loaded only when opened');
+ const detailReads=calls.filter(row=>row.method==='ui.memory.get'&&row.params.id===experienceId).length;
+ await evaluate('document.querySelector(".memory-experience-panel>summary").click()');await until('!!document.querySelector(".memory-experience-details")','actual experience detail');
+ assert.equal(calls.filter(row=>row.method==='ui.memory.get'&&row.params.id===experienceId).length,detailReads+1);
+ assert.match(await evaluate('document.querySelector(".memory-workspace-list").textContent'),/条件参考/);
+ const beforeAdopt=calls.filter(row=>row.method==='ui.memory.experience.transition').length;
+ await click('审核采用');assert.equal(calls.filter(row=>row.method==='ui.memory.experience.transition').length,beforeAdopt,'review alone never adopts experience');
+ await evaluate('window.click("确认经验操作");window.click("确认经验操作")');await until('document.querySelector(".memory-experience-details .memory-metadata")?.textContent.includes("采用中")&&!document.querySelector("[aria-label=\\"经验操作预览\\"]")','Owner adoption acknowledged');
+ assert.equal(calls.filter(row=>row.method==='ui.memory.experience.transition').length,beforeAdopt+1);
+ assert.equal(calls.filter(row=>row.method==='ui.memory.experience.transition').at(-1).params.expectedRev,initialExperience.rev);
+ await click('退役经验');const staleVersion=(await ui.execute({method:'ui.memory.get',params:{id:experienceId}})).rev;
+ await ui.execute({method:'ui.memory.pin',params:{id:experienceId,expectedRev:staleVersion,pinned:true}});
+ await click('刷新记忆');await until('document.querySelector(".memory-experience-details")?.textContent.includes("记录已更新")','stale experience review refused');
+ assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).find(row=>row.textContent.trim()==="确认经验操作").disabled'),true);
+ await click('取消经验操作');await click('退役经验');await click('确认经验操作');await until('document.querySelector(".memory-experience-details .memory-metadata")?.textContent.includes("已退役")&&!document.querySelector("[aria-label=\\"经验操作预览\\"]")','retired reference retained');
+ await click('重新试用');await click('确认经验操作');await until('document.querySelector(".memory-experience-details .memory-metadata")?.textContent.includes("试用")&&!document.querySelector("[aria-label=\\"经验操作预览\\"]")','retired reference safely returned to trial');
+ await click('更正经验内容');await field('更正经验内容','项目经验：受控测试失败后先修复，再通过独立回执核验当前结果。');await click('预览经验更正');
+ const beforeRevise=calls.filter(row=>row.method==='ui.memory.experience.revise').length;await click('确认经验操作');await until('document.querySelector(".memory-content-preview")?.textContent.includes("先修复")&&!document.querySelector("[aria-label=\\"经验操作预览\\"]")','revised reference acknowledged');assert.equal(calls.filter(row=>row.method==='ui.memory.experience.revise').length,beforeRevise+1);
+ const retained=(await ui.execute({method:'ui.memory.get',params:{id:experienceId}})).experience.history[0];
+ await evaluate('Array.from(document.querySelectorAll(".memory-experience-details details>summary")).find(row=>row.textContent.includes("修订历史")).click()');
+ await click('预览回滚到版本 '+retained.revision);const beforeRollback=calls.filter(row=>row.method==='ui.memory.experience.rollback').length;assert.equal(calls.filter(row=>row.method==='ui.memory.experience.rollback').length,beforeRollback);await click('确认经验操作');
+ await until('!document.querySelector("[aria-label=\\"经验操作预览\\"]")','exact revision rollback settled');
+ const afterRollback=await ui.execute({method:'ui.memory.get',params:{id:experienceId}});assert.equal(afterRollback.content,retained.content);assert.equal(afterRollback.experience.state,retained.state);assert.equal(afterRollback.experience.history.length,4);
+ assert.equal(calls.filter(row=>row.method==='ui.memory.experience.rollback').at(-1).params.revision,retained.revision);
+ assert.ok(calls.every(row=>!Object.hasOwn(row.params,'principal')&&!Object.hasOwn(row.params,'approved')&&!Object.hasOwn(row.params,'experienceContext')));
+ console.log('PASS actual Memory Core+Chromium conditional detail loading, frozen-revision adoption, stale review refusal, retirement, trial restoration, correction and bounded exact rollback');
  await closeBrowser();await delay(700);
  failed=false;
 }catch(error){console.error(error.stack);throw error;}finally{if(socket?.readyState===WebSocket.OPEN){try{await closeBrowser();}catch{}socket.terminate();await delay(500);}if(child?.pid&&child.exitCode===null&&child.signalCode===null){try{await terminateSuiteProcessTree(child);}catch(error){let alive=false;try{process.kill(child.pid,0);alive=true;}catch{}if(alive)throw error;}}if(server)await new Promise(resolve=>server.close(resolve));await vite.close();delete globalThis.window;finalizeSuiteSandbox({sandbox,failed,keepFailed:failed});}

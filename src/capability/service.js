@@ -310,6 +310,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               if (!staleRun && observation && event.data?.phase === 'user' && event.data?.runId === observation.runId
                 && typeof onAgentTurnSettled === 'function') {
                 try { onAgentTurnSettled({taskId,provider,sessionId,runId:event.data.runId,phase:'user',
+                  ...(provider === 'cetamesh' && Array.isArray(event.data.experienceMemoryIds)
+                    ? { experienceMemoryIds: event.data.experienceMemoryIds.slice(0, 3) } : {}),
                   outcome:event.data?.reason?.kind,code:event.data?.reason?.error?.code}); }
                 catch(error) { audit({capability:'agent.run',status:'turn-listener-failed',code:error?.code??'PROVIDER_ERROR'}); }
               }

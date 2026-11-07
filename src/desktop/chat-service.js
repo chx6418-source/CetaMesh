@@ -1634,6 +1634,7 @@ export function createChatService({
         at: now(),
         turnId: turn.id,
         requestId: turn.requestId,
+        ...(turn.ownerMessageId ? { ownerMessageId: turn.ownerMessageId } : {}),
         usage: turn.usage ?? null,
         configurationRevision: turn.configurationRevision ?? record.configurationRevision,
         ...chatConfigurationObservations(turn),
@@ -1662,7 +1663,7 @@ export function createChatService({
       const userMessage = readHistory(record.id).filter(message => message.role === 'user').at(-1);
       if (userMessage?.text) {
         try {
-          Promise.resolve(proposeMemoryCandidate({ sessionId: record.id, text: userMessage.text }))
+          Promise.resolve(proposeMemoryCandidate({ sessionId: record.id, taskId: record.taskId ?? null, text: userMessage.text }))
             .then(result => { if (result?.candidate) onEvent?.({ event: 'memory.updated', data: { status: 'proposed' } }); })
             .catch(error => onEvent?.({ event: 'chat.warning', data: { sessionId: record.id,
               code: error?.code ?? 'MEMORY_PROPOSAL_FAILED', message: '记忆候选未能保存。' } }));
@@ -2695,6 +2696,7 @@ export function createChatService({
     onEvent?.({ event: 'chat.streaming', data: { sessionId: record.id, status: 'starting', requestId, reset: true, toolActivity: [], agentActivity } });
     try {
       const current=readHistory(record.id).find(m=>m.id===retryMessageId)??readHistory(record.id).findLast(m=>m.role==='user');
+      if (current?.role === 'user' && sourceText === current.text) state.turn.ownerMessageId = current.id;
       if(current?.attachmentRefs?.some(r=>r.kind==='image')) {
         validateImageRoute(record,current.attachmentRefs);
         await startModelOrDshTurn(record,state,promptText,{attachments,sourceText,retryMessageId,skipPlatformRoute:true,routingOverride:{class:'image-analysis',route:'model',agentIntent:false,capabilityIntent:false}});
@@ -3014,6 +3016,17 @@ export function createChatService({
   };
 
   return {
+    ownerSourceForTaskRun({ chatId, taskId, workspaceId, provider, sessionId, runId } = {}) {
+      const record = sessions.get(chatId);
+      if (!record || record.archived || record.taskId !== taskId || record.config.workspaceId !== workspaceId
+        || record.runtimeProvider !== provider || record.dshSessionId !== sessionId || !runId) return null;
+      const turn = runtime.get(record.id)?.turn;
+      const history = readHistory(record.id);
+      const messageId = turn?.activityTimeline?.runId === runId ? turn.ownerMessageId
+        : history.findLast(row => row.role === 'assistant' && row.activityTimeline?.runId === runId)?.ownerMessageId;
+      const message = history.find(row => row.role === 'user' && row.id === messageId);
+      return message ? { ownerContextSessionId: record.id, ownerMessageId: message.id } : null;
+    },
     skillReferenceScope({ id }) {
       const record = sessionOrThrow(id);
       return { taskId: record.taskId ?? null, workspaceId: record.config.workspaceId ?? null };

@@ -1,4 +1,5 @@
 import { safeContinuationInput } from '../capability/operation-context.js';
+import { projectExperienceReferenceMetadata } from '../memory/experience.js';
 // CetaMesh Continuity Runtime —— 领域契约（阶段 09）。
 //
 // 职责：Context 阈值词表（对齐 docs/architecture/CETAMESH_CONTINUITY_RUNTIME_v1.0.md 第 5 节）、
@@ -181,7 +182,8 @@ export function normalizePacket(packet) {
       .map(row => ({ memoryId: text(row.memoryId, 128), scope: text(row.scope, 160),
         type: text(row.type, 40), revision: Number.isSafeInteger(row.revision) ? row.revision : null,
         source: text(row.source, 80), content: text(row.content, 4000),
-        ...(['user-confirmed', 'agent-inference', 'historical-unverified'].includes(row.provenance?.status)
+        ...(projectExperienceReferenceMetadata(row.experience) ? {experience:projectExperienceReferenceMetadata(row.experience)} : {}),
+        ...(['user-confirmed', 'agent-inference', 'historical-unverified', 'conditional-reference'].includes(row.provenance?.status)
           ? {provenance: {status:row.provenance.status, actor:text(row.provenance.actor,160) || null,
             at:Number.isFinite(row.provenance.at)?row.provenance.at:null}} : {}),
         createdAt:Number.isFinite(row.createdAt)?row.createdAt:null, updatedAt:Number.isFinite(row.updatedAt)?row.updatedAt:null,

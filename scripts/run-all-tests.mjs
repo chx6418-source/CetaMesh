@@ -39,6 +39,10 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-context-memory-admission.mjs': { category: 'security', timeoutMs: 120000, note: 'Actual Core Chat and Managed contexts re-admit current Memory after asynchronous Workspace and Skill reads' },
+  'test-memory-experience-core.mjs': { category: 'integration', timeoutMs: 180000, note: 'Composed Core settled Task learning, current conditional model context, recall provenance and failure-safe restart; local synthetic model only' },
+  'test-memory-experience-signals.mjs': { category: 'security', timeoutMs: 120000, note: 'Finite trusted local experience signals and bounded durable candidate deduplication without model requests' },
+  'test-memory-experience-lifecycle.mjs': { category: 'security', timeoutMs: 120000, note: 'Owner trial review, conditional recall, scoped revision, retirement and bounded rollback through existing Memory' },
   'test-task-child-result-projection.mjs': { category: 'security', timeoutMs: 120000, note: 'Bounded parent-child Task facts with exact Attempt and Run provenance, separated host evidence and attributed reports' },
   'test-model-post-write-verification.mjs': { category: 'security', timeoutMs: 180000, note: 'Owner configured fresh checks through existing write/test approvals, actual failed-test feedback and recovery' },
   'test-settings-feature-compatibility.mjs': { category: 'security', timeoutMs: 120000, note: 'Inactive feature v1 serialization, preserved prior configuration and non-destructive isolated rollback' },

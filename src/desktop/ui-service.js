@@ -19,6 +19,7 @@ import { projectChatActivityTimeline, projectChatToolActivity } from './chat-act
 import { chatConfigurationObservations } from './chat-configuration.js';
 import { safeModelIdentifier } from '../model/model-discovery.js';
 import { normalizeSkillReferences } from '../context/skill-references.js';
+import { normalizeExperience } from '../memory/experience.js';
 
 // Narrow, renderer-safe DTO adapter for the privileged Desktop WebView.
 // Business state stays in existing Core services; this module owns no persistent data.
@@ -346,9 +347,10 @@ function projectOnboarding(value) {
   };
 }
 
-function projectMemory(value) {
+function projectMemory(value, { includeExperience = false } = {}) {
   const row = record(value);
   const memory = record(row.memory ?? row);
+  const experience = memory.experience ? normalizeExperience(memory.experience, { scope: memory.scope, revision: memory.rev }) : null;
   let display = null;
   if (memory.type === 'working' && Array.isArray(memory.tags) && memory.tags.includes('core-task-working-v1')) {
     try {
@@ -367,7 +369,9 @@ function projectMemory(value) {
     id: string(memory.id, 128), type: string(memory.type, 80), scope: string(memory.scope, 120),
     title: display?.title ?? string(memory.title ?? memory.content, 300), content: typeof memory.content === 'string' ? memory.content : string(memory.summary, 4000),
     summary: display?.summary ?? string(memory.summary ?? memory.content, 1200), tags: boundedStrings(memory.tags, 30, 100),
-    provenance: {status:['user-confirmed','agent-inference','historical-unverified'].includes(memory.provenance?.status)?memory.provenance.status:'historical-unverified',actor:string(memory.provenance?.actor,160)||null,at:scalar(memory.provenance?.at)},
+    provenance: {status:['user-confirmed','agent-inference','historical-unverified','conditional-reference'].includes(memory.provenance?.status)?memory.provenance.status:'historical-unverified',actor:string(memory.provenance?.actor,160)||null,at:scalar(memory.provenance?.at)},
+    ...(experience ? { experienceSummary: { state: experience.state, meaning: experience.meaning, historyCount: experience.history.length, observedOutcomes: experience.outcomes.length },
+      ...(includeExperience ? { experience } : {}) } : {}),
     validUntil: Number.isFinite(memory.validUntil)?memory.validUntil:null,
     pinned: memory.pinned === true, rev: Number.isSafeInteger(memory.rev) ? memory.rev : null,
     createdAt: scalar(memory.createdAt), updatedAt: scalar(memory.updatedAt)
@@ -1680,7 +1684,25 @@ export function createDesktopUiService({ services = {}, system = services.system
       return { results: result.results.map(row => ({ id: string(row.id, 128),
         ...(row.error ? { error: { code: string(row.error.code, 80), message: string(row.error.message, 300) } } : {}) })) };
     },
-    'ui.memory.get': async p => projectMemory(await memory('memory.get', { id: idParam(p) })),
+    'ui.memory.get': async p => {
+      const result = projectMemory(await memory('memory.get', { id: idParam(p) }), { includeExperience: true });
+      requireIpcItem(result); return result;
+    },
+    'ui.memory.experience.transition': async p => {
+      const result = await memory('memory.experience.transition', { id: idParam(p), expectedRev: p.expectedRev, state: p.state });
+      emit('memory.updated', { status: 'experience-updated' });
+      return projectMemory(result);
+    },
+    'ui.memory.experience.revise': async p => {
+      const result = await memory('memory.experience.revise', { id: idParam(p), expectedRev: p.expectedRev, content: boundedText(p.content, 'content', 4000) });
+      emit('memory.updated', { status: 'experience-updated' });
+      return projectMemory(result);
+    },
+    'ui.memory.experience.rollback': async p => {
+      const result = await memory('memory.experience.rollback', { id: idParam(p), expectedRev: p.expectedRev, revision: p.revision });
+      emit('memory.updated', { status: 'experience-updated' });
+      return projectMemory(result);
+    },
     'ui.memory.create': async p => {
       const result = await memory('memory.create', {
         type: boundedText(p.type, 'type', 80), scope: boundedText(p.scope, 'scope', 120),

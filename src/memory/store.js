@@ -12,6 +12,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { memoryError, scopeKey, isMemoryType, normalizeScope, MEMORY_SOURCES } from './types.js';
+import { normalizeExperience } from './experience.js';
 
 export const MEMORY_SCHEMA_VERSION = 1;
 const MAX_RECORDS = 20000;
@@ -36,6 +37,9 @@ function normalizeLoadedRecord(raw) {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
   const id = String(raw.id === null || raw.id === undefined ? '' : raw.id).trim();
   if (!id) return null;
+  const origin = raw.origin && typeof raw.origin === 'object' ? structuredClone(raw.origin) : null;
+  const experience = raw.experience ?? origin?.experience;
+  if (origin) delete origin.experience;
   return {
     id,
     type: raw.type,
@@ -52,10 +56,11 @@ function normalizeLoadedRecord(raw) {
     rev: Number.isSafeInteger(raw.rev) && raw.rev > 0 ? raw.rev : 1,
     confirmedAt: raw.confirmedAt === undefined ? null : raw.confirmedAt,
     confirmedBy: raw.confirmedBy === undefined ? null : raw.confirmedBy,
-    origin: raw.origin && typeof raw.origin === 'object' ? raw.origin : null,
+    origin,
     sourceRefs: Array.isArray(raw.sourceRefs) ? structuredClone(raw.sourceRefs) : [],
     entityIds: Array.isArray(raw.entityIds) ? [...raw.entityIds] : [],
-    factKey: raw.factKey ?? null, validUntil: raw.validUntil ?? null
+    factKey: raw.factKey ?? null, validUntil: raw.validUntil ?? null,
+    ...(experience ? { experience: normalizeExperience(experience, { scope: raw.scope, revision: raw.rev }) } : {})
   };
 }
 
@@ -79,11 +84,21 @@ export function assertMemorySchema(raw, file) {
       || (row.validUntil!=null && (!Number.isSafeInteger(row.validUntil)||row.validUntil<=0))) {
       throw memoryError('STORE_CORRUPT', '记忆记录结构无效：' + file);
     }
+    const experience = row.experience ?? row.origin?.experience;
+    if (experience !== undefined) {
+      try {
+        if (row.type !== 'skill' || normalizedScope.kind !== 'workspace' || row.source !== 'chat-candidate'
+          || row.origin?.proposedBy !== 'agent:core-task-experience' || !row.confirmedBy?.startsWith('user:')
+          || (row.experience !== undefined && row.origin?.experience !== undefined
+            && JSON.stringify(row.experience) !== JSON.stringify(row.origin.experience))) throw memoryError('INVALID_EXPERIENCE', 'Experience must come from confirmed Core candidates');
+        normalizeExperience(experience, { scope: normalizedScope, revision: row.rev });
+      } catch { throw memoryError('STORE_CORRUPT', 'Experience record metadata is invalid: ' + file); }
+    }
     ids.add(row.id);
   }
 }
 
-export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory } = {}) {
+export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory, experienceWriteToken } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createMemoryStore 需要 stateDir');
   const dir = path.join(stateDir, 'memory');
   const file = path.join(dir, 'memories.json');
@@ -153,7 +168,14 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
       schemaVersion: MEMORY_SCHEMA_VERSION,
       revision: nextRevision,
       updatedAt: now(),
-      memories: [...records.values()]
+      memories: [...records.values()].map(record => {
+        if (!record.experience) return record;
+        // v1 readers/writers retain origin intact. Keep one canonical copy here;
+        // top-level experience is the new Runtime's read projection only.
+        const stored = { ...record, origin: { ...record.origin, experience: structuredClone(record.experience) } };
+        delete stored.experience;
+        return stored;
+      })
     });
     fileRevision = nextRevision;
   }
@@ -161,7 +183,7 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
   function get(id) {
     load();
     const record = records.get(String(id === null || id === undefined ? '' : id));
-    return record ? { ...record, tags: [...record.tags] } : null;
+    return record ? structuredClone(record) : null;
   }
 
   function count() {
@@ -192,7 +214,8 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
         const record = records.get(id);
         if (!record) continue;
         scanned += 1;
-        if (!predicate || predicate(record)) out.push({ ...record, tags: [...record.tags] });
+        const detached = structuredClone(record);
+        if (!predicate || predicate(detached)) out.push(detached);
       }
     }
     stats.lastScanned = scanned;
@@ -201,8 +224,21 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
     return out;
   }
 
-  function insert(record) {
+  function authorizeExperienceWrite(record, previous, token) {
+    if (record.origin && Object.hasOwn(record.origin, 'experience')) throw memoryError('EXPERIENCE_CORE_ONLY', 'Caller-provided origin cannot mint trusted experience metadata');
+    if (record.experience !== undefined || previous?.experience !== undefined) {
+      if (typeof experienceWriteToken !== 'symbol' || token !== experienceWriteToken) throw memoryError('EXPERIENCE_CORE_ONLY', 'Experience writes require the trusted Memory owner');
+      if (record.experience) {
+        if (record.type !== 'skill' || record.source !== 'chat-candidate' || record.origin?.proposedBy !== 'agent:core-task-experience'
+          || !record.confirmedBy?.startsWith('user:')) throw memoryError('EXPERIENCE_CORE_ONLY', 'Experience requires an Owner-confirmed Core candidate');
+        normalizeExperience(record.experience, { scope: record.scope, revision: record.rev });
+      }
+    }
+  }
+
+  function insert(record, { experienceWriteToken: token } = {}) {
     load();
+    authorizeExperienceWrite(record, null, token);
     if (records.size >= MAX_RECORDS) {
       throw memoryError('STORE_FULL', '记忆条数已达上限 ' + MAX_RECORDS);
     }
@@ -212,13 +248,14 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
       throw memoryError('STORE_FULL', 'Scope ' + key + ' 的记忆条数已达上限 ' + MAX_IDS_PER_SCOPE);
     }
     if (records.has(record.id)) throw memoryError('DUPLICATE_ID', '记忆 id 已存在：' + record.id);
-    indexRecord(record);
-    try { persist(); } catch (error) { unindexRecord(record); throw error; }
-    return { ...record, tags: [...record.tags] };
+    const inserted = structuredClone(record);
+    indexRecord(inserted);
+    try { persist(); } catch (error) { unindexRecord(inserted); throw error; }
+    return structuredClone(inserted);
   }
 
   /** 读取-修改-写回，带 revision 冲突检测。 */
-  function update(id, expectedRev, mutate) {
+  function update(id, expectedRev, mutate, { experienceWriteToken: token } = {}) {
     load();
     const record = records.get(String(id));
     if (!record) throw memoryError('MEMORY_NOT_FOUND', '记忆不存在：' + String(id));
@@ -228,12 +265,13 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
     if (record.rev !== expectedRev) {
       throw memoryError('MEMORY_CONFLICT', '记忆已被其它操作修改（期望 rev ' + expectedRev + '，当前 rev ' + record.rev + '）');
     }
-    const next = mutate({ ...record, tags: [...record.tags] });
+    const next = structuredClone(mutate(structuredClone(record)));
     next.rev = record.rev + 1;
     next.updatedAt = next.updatedAt || now();
+    authorizeExperienceWrite(next, record, token);
     records.set(record.id, next);
     try { persist(); } catch (error) { records.set(record.id, record); throw error; }
-    return { ...next, tags: [...next.tags] };
+    return structuredClone(next);
   }
 
   function remove(id, expectedRev) {
@@ -273,7 +311,7 @@ export function createMemoryStore({ stateDir, now = () => Date.now(), idFactory 
     /** 仅供诊断 / 导出，明确取名以提醒调用方它不是检索入口。 */
     _adminAll() {
       load();
-      return [...records.values()].map((r) => ({ ...r, tags: [...r.tags] }));
+      return [...records.values()].map((r) => structuredClone(r));
     }
   };
 }

@@ -110,11 +110,11 @@ export function createMemoryLinks({ stateDir, policy, store, now, list, assess =
     // identity/content is never exposed or implicitly granted to a reference reader.
     const checked=targets.map(target=>{const ref={kind:'memory',id:target.id,scope:target.scope};
       const decision=authorized(principal,ref);const row=retrieve(decision,ref).memory;
-      return {id:row.id,scope:row.scopeKey,revision:row.rev};});
+      return {id:row.id,scope:row.scopeKey,revision:row.rev,experience:Boolean(row.experience)};});
     load();
     return checked.filter(target=>links.some(link=>link.relation==='supersedes'&&link.createdBy?.startsWith('user:')
       &&link.target.kind==='memory'&&link.target.scope===target.scope&&link.target.id===target.id
-      &&link.factBinding?.targetRevision===target.revision)).map(target=>target.id);
+      &&(link.factBinding?.targetRevision===target.revision||target.experience))).map(target=>target.id);
   }
   function resolveReferences(request = {}) {
     const normalized = normalizeReferences(request.refs);
@@ -136,10 +136,10 @@ export function createMemoryLinks({ stateDir, policy, store, now, list, assess =
         :{reference,status:'needs-review',validity};
     }) };
   }
-  function buildContextPackage({ principal, scope, query, types, limit = 8, explicitCrossScope = false } = {}) {
+  function buildContextPackage({ principal, scope, query, types, limit = 8, explicitCrossScope = false, experienceContext } = {}) {
     const key = scopeKey(normalizeScope(scope));
-    const memories = list({ principal, scope: key, query, types, limit: Math.min(Number(limit) || 8, CONTEXT_LIMITS.related) }).memories;
-    const eligible=ref=>ref.kind!=='memory'||!assess||assess({principal,id:ref.id}).status==='current';
+    const memories = list({ principal, scope: key, query, types, limit: Math.min(Number(limit) || 8, CONTEXT_LIMITS.related), experienceContext }).memories;
+    const eligible=ref=>ref.kind!=='memory'||!assess||assess({principal,id:ref.id,experienceContext}).status==='current';
     const visible = listLinks({ principal, scope: key, explicitCrossScope }).links.filter(link=>
       [link.source,link.target,...link.context.sourceRefs,...link.context.relatedMemories].every(eligible));
     const related = [...memories.map((memory) => ({ kind: 'memory', id: memory.id, scope: memory.scope }))];

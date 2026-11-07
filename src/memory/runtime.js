@@ -36,6 +36,8 @@ import { createMemoryStore } from './store.js';
 import { createMemoryLinks } from './links.js';
 import { normalizeReferences } from './references.js';
 import { createCandidateReviewer } from './candidate-review.js';
+import { EXPERIENCE_LIMITS, EXPERIENCE_STATES, appendExperienceSnapshot, initialExperience, isSafeExperienceText,
+  matchesExperienceConditions, normalizeExperienceConditions, normalizeExperienceProposal, normalizeExperienceReceipt } from './experience.js';
 
 const CANDIDATE_SCHEMA_VERSION = 1;
 const MAX_CANDIDATES = 500;
@@ -57,11 +59,15 @@ function loadCandidateFile(file, fallback) {
 
 /** Retention：已决策候选只保留最近 MAX_DECIDED_CANDIDATES 条；pending 绝不自动清。 */
 export function pruneDecidedCandidates(list) {
+  // Experience trigger decisions are the existing durable dedupe/budget owner.
+  // Never prune a rejection and thereby silently authorize its re-proposal.
+  const retained = list.filter(candidate => candidate?.experience && !['pending', 'confirming'].includes(candidate.status)).length;
   const decided = list
-    .filter((candidate) => candidate && candidate.status !== 'pending' && candidate.status !== 'confirming')
+    .filter((candidate) => candidate && !candidate.experience && candidate.status !== 'pending' && candidate.status !== 'confirming')
     .sort((a, b) => (Number(a.decidedAt) || 0) - (Number(b.decidedAt) || 0));
-  if (decided.length <= MAX_DECIDED_CANDIDATES) return list;
-  const evict = new Set(decided.slice(0, decided.length - MAX_DECIDED_CANDIDATES).map((c) => c.id));
+  const slots = Math.max(0, MAX_DECIDED_CANDIDATES - retained);
+  if (decided.length <= slots) return list;
+  const evict = new Set(decided.slice(0, decided.length - slots).map((c) => c.id));
   return list.filter((candidate) => !evict.has(candidate?.id));
 }
 
@@ -75,6 +81,7 @@ function normalizeEntityIds(values) {
 /** Derive truth level from recorded writers, never caller-supplied source labels. */
 function memoryProvenance(record) {
   const actor = record.updatedBy ?? (record.source === 'qq-adapter' ? null : record.createdBy) ?? record.confirmedBy ?? null;
+  if (record.experience) return { status: 'conditional-reference', actor, at: record.updatedAt ?? record.confirmedAt ?? record.createdAt ?? null };
   return { status: actor?.startsWith('user:') ? 'user-confirmed'
     : actor?.startsWith('agent:') ? 'agent-inference' : 'historical-unverified',
     actor, at: record.updatedAt ?? record.confirmedAt ?? record.createdAt ?? null };
@@ -101,6 +108,7 @@ function toView(record) {
     sourceRefs: structuredClone(record.sourceRefs || []),
     entityIds: [...(record.entityIds || [])],
     provenance: memoryProvenance(record),
+    ...(record.experience ? { experience: structuredClone(record.experience) } : {}),
     ...(record.factKey ? { factKey: record.factKey } : {}),
     ...(record.validUntil != null ? { validUntil: record.validUntil } : {})
   };
@@ -109,7 +117,8 @@ function toView(record) {
 export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.now() } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createMemoryRuntime 需要 stateDir');
   const policy = createMemoryPolicy({ audit });
-  const store = createMemoryStore({ stateDir, now });
+  const experienceWriteToken = Symbol('Memory-owned experience mutation');
+  const store = createMemoryStore({ stateDir, now, experienceWriteToken });
   const candidatesFile = path.join(stateDir, 'memory', 'candidates.json');
   const links = createMemoryLinks({ stateDir, policy, store, now, list: retrieveRecords, assess: assessFact });
 
@@ -143,6 +152,12 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
         || typeof item.scope?.key !== 'string' || typeof item.content !== 'string' || next.has(item.id)) {
         backupCandidates();
         throw memoryError('STORE_CORRUPT', '候选记录结构无效：' + candidatesFile);
+      }
+      if (item.experience) {
+        try {
+          if (item.type !== 'skill') throw memoryError('INVALID_EXPERIENCE', 'Experience must be scoped skill advice');
+          item.experience = normalizeExperienceProposal(item.experience, item.scope.key);
+        } catch { backupCandidates(); throw memoryError('STORE_CORRUPT', 'Experience candidate metadata is invalid'); }
       }
       next.set(item.id, item);
     }
@@ -194,6 +209,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       memoryId: candidate.memoryId,
       sourceRefs: structuredClone(candidate.sourceRefs || []),
       entityIds: [...(candidate.entityIds || [])],
+      ...(candidate.experience ? { experience: structuredClone(candidate.experience) } : {}),
       ...(review ? { review } : {})
     };
   }
@@ -319,13 +335,15 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       && target.content === content && target.source === 'chat-candidate'
       && target.origin?.candidateId === candidate.id && target.origin.proposedBy === actor);
   }
-  function assessFact({principal,id}={}) {
+  function assessFact({principal,id,experienceContext}={}) {
     const decision=authorizeRead({principal});const row=findAuthorized(decision,id);
     if(!row)throw memoryError('MEMORY_NOT_FOUND','Memory not found');
     const state=factEligibility(scanFor(decision,item=>item.scopeKey===row.scopeKey&&item.type===row.type),principal);
-    return {id:row.id,status:state.expired.has(row.id)?'expired':state.superseded.has(row.id)?'superseded':state.conflicted.has(row.id)?'conflicted':'current'};
+    return {id:row.id,status:state.expired.has(row.id)?'expired':state.superseded.has(row.id)?'superseded':state.conflicted.has(row.id)?'conflicted'
+      :row.experience?.state==='retired'?'retired'
+      :row.experience&&!matchesExperienceConditions(row.experience.conditions,experienceContext)?'conditional':'current'};
   }
-  function retrieveRecords({ principal, scope, types, query, limit } = {}) {
+  function retrieveRecords({ principal, scope, types, query, limit, experienceContext } = {}) {
     const scopes = scope === undefined || scope === null ? null : [normalizeScope(scope)];
     const decision = authorizeRead({ principal, scopes, types: types || null });
     const needle = normalizeQuery(query).toLowerCase();
@@ -334,7 +352,8 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       return chars.length > 2 ? [...chars.slice(1).map((_, i) => chars.slice(i, i + 2).join('')), word] : [word];
     }))];
     const scannedRows = scanFor(decision), eligibility = factEligibility(scannedRows,principal);
-    const rows = scannedRows.filter(row=>!eligibility.expired.has(row.id)&&!eligibility.conflicted.has(row.id)&&!eligibility.superseded.has(row.id));
+    const rows = scannedRows.filter(row=>!eligibility.expired.has(row.id)&&!eligibility.conflicted.has(row.id)&&!eligibility.superseded.has(row.id)
+      && (!row.experience || (row.experience.state !== 'retired' && matchesExperienceConditions(row.experience.conditions, experienceContext))));
     // Automatic retrieval excludes unrelated records; empty queries preserve browsing.
     const ranked = rows.map(row => {
       const haystack = (row.content + ' ' + row.tags.join(' ')).toLowerCase();
@@ -345,7 +364,13 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     // Collapse exact repeats only when the authorized scope, writer and evidence
     // agree. Different sources remain separate; this never merges stored history.
     const seen = new Set();
+    let experienceCount = 0, trialCount = 0;
     const distinct = ranked.filter(({row}) => {
+      if (row.experience) {
+        if (experienceCount >= EXPERIENCE_LIMITS.recall || (row.experience.state === 'trial' && trialCount >= EXPERIENCE_LIMITS.trials)) return false;
+        experienceCount++;
+        if (row.experience.state === 'trial') trialCount++;
+      }
       const provenance = memoryProvenance(row);
       const key = JSON.stringify([row.scopeKey, row.type, row.content, row.source,
         provenance.status, provenance.actor, row.sourceRefs ?? []]);
@@ -384,7 +409,8 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       .map((entry) => entry.record);
   }
 
-  function createMemory({ principal, type, scope, content, tags, source, pinned, confirmationId, originRef, sourceRefs = [], entityIds = [], factKey, validUntil } = {}) {
+  function createMemory({ principal, type, scope, content, tags, source, pinned, confirmationId, originRef, sourceRefs = [], entityIds = [], factKey, validUntil, experience } = {}) {
+    if (experience !== undefined) throw memoryError('EXPERIENCE_CORE_ONLY', 'Experience metadata must come from the trusted candidate confirmation path');
     const normalizedType = normalizeMemoryType(type);
     const normalizedScope = normalizeScope(scope);
     const normalizedSource = normalizeSource(source);
@@ -404,6 +430,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     let confirmedAt = null;
     let confirmedBy = null;
     let origin = null;
+    let confirmedExperience = null;
 
     if (normalizedSource === 'chat-candidate') {
       if (!confirmationId) {
@@ -417,6 +444,7 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       confirmedAt = candidate.decidedAt;
       confirmedBy = candidate.decidedBy;
       origin = { candidateId: candidate.id, proposedBy: candidate.proposedBy };
+      if (candidate.experience) confirmedExperience = initialExperience(candidate.experience);
     } else if (normalizedSource === 'qq-adapter') {
       origin = { adapter: 'qq', ref: originRef === undefined ? null : String(originRef),
         sourceHash: crypto.createHash('sha256').update(JSON.stringify({ content: text, tags: normalizedTags, pinned: pinned === true })).digest('hex') };
@@ -449,9 +477,10 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       origin,
       sourceRefs: references,
       entityIds: entities,
+      ...(confirmedExperience ? { experience: confirmedExperience } : {}),
       ...normalizeFactMetadata({factKey,validUntil},principal)
     };
-    return toView(store.insert(record));
+    return toView(store.insert(record, { experienceWriteToken }));
   }
 
   function updateMemory({ principal, id, expectedRev, content, tags, pinned, factKey, validUntil } = {}) {
@@ -469,7 +498,10 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     if (tags !== undefined) patch.tags = normalizeTags(tags);
     if (pinned !== undefined) patch.pinned = pinned === true;
     if (Object.keys(patch).length === 0) throw memoryError('INVALID_PARAMS', '没有需要更新的字段');
-    const updated = store.update(existing.id, expectedRev, (record) => ({ ...record, ...patch, updatedAt: now(), updatedBy: patch.content !== undefined && patch.content !== record.content ? principal.kind + ':' + principal.id : record.updatedBy }));
+    if (existing.experience && patch.content !== undefined && !isSafeExperienceText(patch.content)) throw memoryError('INVALID_EXPERIENCE', 'Experience content contains sensitive or invalid reference text');
+    const updated = store.update(existing.id, expectedRev, (record) => ({ ...record, ...patch,
+      ...(record.experience && patch.content !== undefined && patch.content !== record.content ? { experience: appendExperienceSnapshot(record, principal.kind + ':' + principal.id, now()) } : {}),
+      updatedAt: now(), updatedBy: patch.content !== undefined && patch.content !== record.content ? principal.kind + ':' + principal.id : record.updatedBy }), { experienceWriteToken });
     return readView(updated, principal);
   }
 
@@ -488,7 +520,12 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     return { memory: readView(existing, principal), meta: { scanned } };
   }
 
-  function proposeCandidate({ principal, type, scope, content, reason, sourceRefs = [], entityIds = [] } = {}) {
+  function proposeCandidate(request = {}) {
+    if (request.experience !== undefined || request.triggerId !== undefined) throw memoryError('EXPERIENCE_CORE_ONLY', 'Only the trusted Task recorder may assign Core experience provenance');
+    return proposeCandidateInternal(request);
+  }
+
+  function proposeCandidateInternal({ principal, type, scope, content, reason, sourceRefs = [], entityIds = [], experience } = {}) {
     const normalizedType = normalizeMemoryType(type);
     const normalizedScope = normalizeScope(scope);
     const decision = policy.requireAuthorization({
@@ -503,11 +540,21 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     const entities = normalizeEntityIds(entityIds);
     loadCandidates();
     const normalizedContent = normalizeContent(content);
-    const duplicate = [...candidates.values()].find(item => item.status === 'pending'
+    if (experience) {
+      const prior = [...candidates.values()].find(item => item.experience?.trigger.id === experience.trigger.id);
+      if (prior) return { candidate: candidateView(prior, principal), duplicate: true };
+      const taskCandidates = [...candidates.values()].filter(item => item.experience?.trigger.taskId === experience.trigger.taskId);
+      if (taskCandidates.some(item => item.experience.trigger.turnId === experience.trigger.turnId)) return { skipped: true, code: 'EXPERIENCE_TURN_LIMIT' };
+      if (taskCandidates.length >= EXPERIENCE_LIMITS.perTask) return { skipped: true, code: 'EXPERIENCE_TASK_LIMIT' };
+      if ([...candidates.values()].filter(item => item.experience).length >= EXPERIENCE_LIMITS.candidates) {
+        throw memoryError('STORE_FULL', 'Experience decision capacity reached; retained Owner decisions cannot be evicted for new suggestions');
+      }
+    }
+    const duplicate = [...candidates.values()].find(item => !experience && !item.experience && item.status === 'pending'
       && item.type === normalizedType && item.scope.key === scopeKey(normalizedScope)
       && item.content === normalizedContent);
     if (duplicate) return { candidate: candidateView(duplicate, principal), duplicate: true };
-    const priorCandidates = [...candidates.values()].filter(item => item.status === 'accepted'
+    const priorCandidates = [...candidates.values()].filter(item => !experience && !item.experience && item.status === 'accepted'
       && item.type === normalizedType && item.scope.key === scopeKey(normalizedScope)
       && item.content === normalizedContent && item.memoryId);
     const currentById = new Map((priorCandidates.length ? currentCandidateRecords(principal, priorCandidates[0]) : [])
@@ -533,12 +580,24 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
       decidedBy: null,
       memoryId: null,
       sourceRefs: references,
-      entityIds: entities
+      entityIds: entities,
+      ...(experience ? { experience } : {})
     };
     candidates.set(candidate.id, candidate);
     try { persistCandidates(); }
     catch (error) { candidates.delete(candidate.id); throw error; }
     return { candidate: candidateView(candidate, principal) };
+  }
+
+  /** In-process Core-only writer. The IPC/model proposal path never forwards metadata. */
+  function proposeExperienceCandidate({ type = 'skill', scope, content, experience } = {}) {
+    if (type !== 'skill' || !isSafeExperienceText(content)) throw memoryError('INVALID_EXPERIENCE', 'Experience is bounded scoped reference advice');
+    const metadata = normalizeExperienceProposal(experience, scope);
+    const principal = { kind: 'agent', id: 'core-task-experience', grants: { scopes: ['workspace:' + metadata.conditions.workspaceId], types: ['skill'] } };
+    const key = 'workspace:' + metadata.conditions.workspaceId;
+    return proposeCandidateInternal({ principal, type, scope: key, content,
+      reason: 'Core 本地有限信号产生的条件参考；批准后先试用，不代表事实核验、Task 完成或可执行 Skill。',
+      sourceRefs: [{ kind: 'task', id: metadata.trigger.taskId, scope: key }, { kind: 'workspace', id: metadata.conditions.workspaceId, scope: key }], experience: metadata });
   }
 
   function listCandidates({ principal, status } = {}) {
@@ -684,6 +743,89 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     return { id, action: 'update', rev: updated.rev };
   }
 
+  function ownerExperience(principal, id) {
+    policy.requireAuthorization({ principal, action: 'confirm' });
+    const record = findAuthorized(authorizeRead({ principal }), id);
+    if (!record) throw memoryError('MEMORY_NOT_FOUND', 'Experience is unavailable in this authorized scope');
+    if (!record.experience || record.type !== 'skill' || record.scope.kind !== 'workspace') throw memoryError('INVALID_EXPERIENCE', 'Memory is not governed experience advice');
+    links.authorizeRefs({ principal, sourceScope: record.scope, refs: record.sourceRefs ?? [] });
+    return record;
+  }
+
+  function requireCurrentExperienceSource(record, principal, conditions, experienceContext) {
+    const decision = authorizeRead({ principal, scopes: [record.scope], types: [record.type] });
+    const eligibility = factEligibility(scanFor(decision), principal);
+    if (eligibility.expired.has(record.id) || eligibility.conflicted.has(record.id) || eligibility.superseded.has(record.id)) {
+      throw memoryError('EXPERIENCE_SOURCE_REVIEW_REQUIRED', 'Expired, conflicted or superseded experience requires source review before restoration');
+    }
+    for (const ref of record.sourceRefs ?? []) if (ref.kind === 'memory' && assessFact({ principal, id: ref.id, experienceContext }).status !== 'current') {
+      throw memoryError('EXPERIENCE_SOURCE_REVIEW_REQUIRED', 'Experience source no longer qualifies for automatic reference');
+    }
+    if (!matchesExperienceConditions(conditions, experienceContext)) throw memoryError('EXPERIENCE_CONDITIONS_CHANGED', 'Observe and review the current Workspace/configuration before activating or restoring this reference');
+  }
+
+  function requireExperienceRevision(record, expectedRev) {
+    if (!Number.isSafeInteger(expectedRev)) throw memoryError('REVISION_REQUIRED', 'Experience changes require expectedRev');
+    if (record.rev !== expectedRev) throw memoryError('MEMORY_CONFLICT', 'Experience changed; refresh before applying the reviewed revision');
+  }
+
+  function transitionExperience({ principal, id, expectedRev, state, experienceContext } = {}) {
+    const record = ownerExperience(principal, id);
+    requireExperienceRevision(record, expectedRev);
+    if (!EXPERIENCE_STATES.includes(state)) throw memoryError('INVALID_EXPERIENCE', 'Unknown experience state');
+    if (state !== 'retired') requireCurrentExperienceSource(record, principal, record.experience.conditions, experienceContext);
+    if (state === record.experience.state) return readView(record, principal);
+    const experience = appendExperienceSnapshot(record, principal.kind + ':' + principal.id, now());
+    experience.state = state;
+    return readView(store.update(record.id, expectedRev, row => ({ ...row, experience, updatedAt: now(), updatedBy: principal.kind + ':' + principal.id }), { experienceWriteToken }), principal);
+  }
+
+  function reviseExperience({ principal, id, expectedRev, content, conditions, experienceContext } = {}) {
+    const record = ownerExperience(principal, id);
+    requireExperienceRevision(record, expectedRev);
+    const text = content === undefined ? record.content : normalizeContent(content);
+    if (!isSafeExperienceText(text)) throw memoryError('INVALID_EXPERIENCE', 'Experience content contains sensitive or invalid reference text');
+    const nextConditions = conditions === undefined ? record.experience.conditions : normalizeExperienceConditions(conditions, record.scope.id);
+    if (record.experience.state !== 'retired') requireCurrentExperienceSource(record, principal, nextConditions, experienceContext);
+    if (text === record.content && JSON.stringify(nextConditions) === JSON.stringify(record.experience.conditions)) return readView(record, principal);
+    const experience = appendExperienceSnapshot(record, principal.kind + ':' + principal.id, now());
+    experience.conditions = structuredClone(nextConditions);
+    return readView(store.update(record.id, expectedRev, row => ({ ...row, content: text, experience, updatedAt: now(), updatedBy: principal.kind + ':' + principal.id }), { experienceWriteToken }), principal);
+  }
+
+  function rollbackExperience({ principal, id, expectedRev, revision, experienceContext } = {}) {
+    const record = ownerExperience(principal, id);
+    requireExperienceRevision(record, expectedRev);
+    if (!Number.isSafeInteger(revision)) throw memoryError('EXPERIENCE_REVISION_UNAVAILABLE', 'Choose one of the retained experience revisions');
+    const snapshot = record.experience.history.find(row => row.revision === revision);
+    if (!snapshot) throw memoryError('EXPERIENCE_REVISION_UNAVAILABLE', 'This experience revision is no longer retained; current content and evidence are preserved');
+    // A rollback is a fresh Owner revision. It neither rewinds receipt history
+    // nor revives an expired/superseded source or a changed applicability proof.
+    requireCurrentExperienceSource(record, principal, snapshot.conditions, experienceContext);
+    const experience = appendExperienceSnapshot(record, principal.kind + ':' + principal.id, now());
+    experience.state = snapshot.state;
+    experience.conditions = structuredClone(snapshot.conditions);
+    return readView(store.update(record.id, expectedRev, row => ({ ...row, content: snapshot.content, experience,
+      updatedAt: now(), updatedBy: principal.kind + ':' + principal.id }), { experienceWriteToken }), principal);
+  }
+
+  /** In-process trusted receipt update; never exposed as an IPC/model mutation. */
+  function recordExperienceOutcome({ id, expectedRev, evidence, experienceContext } = {}) {
+    const receipt = normalizeExperienceReceipt(evidence);
+    const principal = { kind: 'user', id: 'desktop' };
+    const record = ownerExperience(principal, id);
+    requireExperienceRevision(record, expectedRev);
+    requireCurrentExperienceSource(record, principal, record.experience.conditions, experienceContext);
+    if (receipt.workspaceId !== record.scope.id) throw memoryError('INVALID_EXPERIENCE', 'Observed receipt belongs to a different Workspace');
+    if (record.experience.state === 'retired') return { ...readView(record, principal), observation: { recorded: false, code: 'EXPERIENCE_RETIRED' } };
+    if ([...record.experience.evidence, ...record.experience.outcomes].some(row => row.eventId === receipt.eventId)) return readView(record, principal);
+    if (record.experience.outcomes.length >= EXPERIENCE_LIMITS.outcomes) return { ...readView(record, principal), observation: { recorded: false, code: 'EXPERIENCE_OUTCOME_LIMIT' } };
+    const experience = structuredClone(record.experience);
+    experience.outcomes.push(receipt);
+    // Metadata observations preserve the Owner's content attribution and state.
+    return { ...readView(store.update(record.id, expectedRev, row => ({ ...row, experience }), { experienceWriteToken }), principal), observation: { recorded: true } };
+  }
+
   function stats({ principal } = {}) {
     const decision = authorizeRead({ principal });
     const rows = scanFor(decision);
@@ -718,6 +860,11 @@ export function createMemoryRuntime({ stateDir, audit = null, now = () => Date.n
     listOriginRefs,
     syncQqEntry,
     proposeCandidate,
+    proposeExperienceCandidate,
+    transitionExperience,
+    reviseExperience,
+    rollbackExperience,
+    recordExperienceOutcome,
     listCandidates,
     confirmCandidate,
     recoverConfirmations,

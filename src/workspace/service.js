@@ -492,14 +492,18 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
   }
 
   // Internal Owner configuration observation, never a capability or test grant.
+  function readPostWriteVerificationConfig({ workspaceId } = {}) {
+    return postWriteVerificationSnapshot(registry.get(String(workspaceId ?? '').trim()).settings?.postWriteVerification);
+  }
+
   async function resolvePostWriteVerification({ workspaceId, signal } = {}) {
     assertObservationActive(signal);
     const entry = registry.get(String(workspaceId ?? '').trim());
-    const config = postWriteVerificationSnapshot(entry.settings?.postWriteVerification);
+    const config = readPostWriteVerificationConfig({ workspaceId: entry.id });
     if (!config || config.enabled !== true || config.maxRunsPerTurn === 0) return config;
     const proof = await collectContentProof(entry.id, { expectedRoot: entry.root, signal });
     assertObservationActive(signal);
-    const current = postWriteVerificationSnapshot(registry.get(entry.id).settings?.postWriteVerification);
+    const current = readPostWriteVerificationConfig({ workspaceId: entry.id });
     if (current?.configDigest !== config.configDigest) fail('POST_WRITE_CONFIG_CHANGED', 'Owner verifier configuration changed during observation');
     return { ...config, sourceDigest: proof.sha256 };
   }
@@ -521,7 +525,7 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     return contentProof(assertWritable(entry), [], signal);
   }
 
-  return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof, resolvePostWriteVerification };
+  return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof, readPostWriteVerificationConfig, resolvePostWriteVerification };
 }
 
 export { WorkspaceBoundaryError, WorkspaceRegistryError, WorkspaceToolError };
