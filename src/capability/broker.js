@@ -305,6 +305,32 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   finally{if(typeof releaseRead==='function')releaseRead();}
  }
  return {execute,register:registry.register,list:registry.list,registry,approvals:approval,
+  // Trusted Core observation only. Discovery may ask about a directory; the
+  // caller must still enforce its own bounded content and path/hash contract.
+  // Never consumes approval/grants, executes a provider or records an effect.
+  async assertReadAuthorization(raw,{signal}={}){
+   const request=normalizeRequest(raw);
+   if(request.capability!=='filesystem.read'||['approvalId','approved','operationId'].some(key=>Object.hasOwn(request,key)))
+    throw capabilityError('READ_AUTHORIZATION_ONLY','Only an exact, unapproved Core filesystem read may be queried');
+   const entry=registry.require(request.capability);
+   if(entry.provider!=='workspace'||entry.workspace!==true||entry.readOnly!==true||entry.effect!=='read-only'
+    ||(entry.source!==undefined&&entry.source!=='workspace')||entry.catalogOwner||entry.delegatesOperation)
+    throw capabilityError('READ_AUTHORIZATION_ONLY','The current exact Core Workspace read descriptor is required');
+   const check=async()=>{
+    if(signal?.aborted)throw abortError(signal);
+    if(registry.require(request.capability)!==entry)throw capabilityError('APPROVAL_EXPIRED','Core read descriptor changed during authorization');
+    const decision=await policy.authorize(request,entry);
+    if(decision?.allowed!==true||decision.approvalRequired===true)
+     throw capabilityError('READ_AUTHORIZATION_APPROVAL_REQUIRED','An authorization query cannot grant or consume read approval');
+    await executionGuard();await validatePluginParent(request);await entry.validate?.(request);
+   };
+   await check();await check();
+   if(signal?.aborted)throw abortError(signal);
+   if(registry.require(request.capability)!==entry)throw capabilityError('APPROVAL_EXPIRED','Core read descriptor changed during authorization');
+   const decision=await policy.authorize(request,entry);
+   if(decision?.allowed!==true||decision.approvalRequired===true)throw capabilityError('READ_AUTHORIZATION_APPROVAL_REQUIRED','Current read authorization is required');
+   return {allowed:true,capability:entry.id};
+  },
   // Trusted adapter receipts use the existing effect journal; neither method is an IPC capability.
   assertAgentNativeEffectAvailable,beginAgentNativeEffect,settleAgentNativeEffect,
   setExecutionGuard(guard){if(typeof guard!=='function')throw TypeError('Execution guard required');executionGuard=guard;},

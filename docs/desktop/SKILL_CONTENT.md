@@ -89,6 +89,37 @@ not split across pages. A changed, disabled, unregistered, revoked or uninstalle
 source cannot be replaced by a namesake. Reselect the current reviewed source to
 recover a stale reference.
 
+## Explicit reference libraries
+
+`extensions.skillSources` is an optional Settings v1 field with an empty default.
+It contains at most 32 `{sourceId,root,revision,enabled}` entries. The existing
+Settings service owns registration, enablement and removal. Its
+`settings.skillSources.register`, `settings.skillSources.setEnabled` and
+`settings.skillSources.remove` commands require the trusted Desktop Owner actor
+and exact `expectedRev`. Ordinary Settings saves can preserve an unchanged array;
+they cannot register or enable a different source. Removing a source never
+deletes its directory.
+
+Source generations use the monotonically increasing Settings revision. Disabling
+and enabling a source, or removing and registering it again, invalidates earlier
+content references. The source authorizer rechecks current Settings, Extension
+state and Task identity before reads. Project sources reuse the current
+Capability Broker `filesystem.read` policy, including a read-only child's exact
+path scope. The trusted internal `assertReadAuthorization` query does not execute
+a provider, create or consume an approval, or grant any capability. Reference-only
+user and installed content does not acquire a general filesystem permission.
+
+The shared picker uses the same index for add and slash entry points. Each Chat
+message may select at most 16 exact Skill references. It shows source versions,
+omissions, shadowing and bounded body pages; replacing a stale version requires
+an explicit new selection. These UI selections do not change Task grants,
+approval mode or execution identity.
+
+Missing optional source configuration remains compatible with the current
+reader. A historical strict Settings reader may reject newly persisted fields.
+Loading an old file is not evidence of safe downgrade writes; release validation
+must verify the historical-reader and rollback path separately.
+
 Update, rollback, disable/re-enable and restart invalidate earlier enabled content
 generations. Catalog revocations add a persisted denial to the existing Extension
 record. Files and history remain available for Owner recovery, while that revoked

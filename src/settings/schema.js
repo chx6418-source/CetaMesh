@@ -11,6 +11,7 @@
 
 import { DEFAULT_GITHUB_FALLBACK_MANIFEST_URL, DEFAULT_GITCODE_MANIFEST_URL } from '../update/sources.js';
 import { normalizeModelConnections, normalizeModelPreferences } from '../model/configuration.js';
+import { normalizeSkillSources } from '../context/skill-sources.js';
 
 export const SETTINGS_SCHEMA_VERSION = 1;
 
@@ -84,6 +85,7 @@ export const FIELDS = Object.freeze({
     presenceTtlMs: num(90000, { min: 10000, max: 600000, description: '在线判定 TTL（毫秒）' })
   }),
   extensions: Object.freeze({
+    skillSources: { type: 'object', default: [], locked: false, description: 'Explicit Owner-registered Skill reference directories; reference text never grants tool or approval authority' },
     allowLocalImport: bool(true, { description: '允许本地导入扩展' }),
     developerMode: bool(false, { description: '允许加载未经目录验证的本地插件；本地插件仍须通过 Extension Runtime 审查并默认禁用' }),
     requireReviewApproval: bool(true, {
@@ -160,6 +162,7 @@ export function coerceField(section, key, value) {
   }
   if (section === 'models' && key === 'connections') return normalizeModelConnections(value);
   if (section === 'models' && key === 'modelPreferences') return normalizeModelPreferences(value);
+  if (section === 'extensions' && key === 'skillSources') return normalizeSkillSources(value);
   if (spec.type === 'boolean') {
     if (typeof value !== 'boolean') throw settingsError('SETTINGS_INVALID', section + '.' + key + ' 必须是布尔值');
     return value;
