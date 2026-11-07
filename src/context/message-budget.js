@@ -1,12 +1,14 @@
 import { evidenceSummary, sanitizeToolEvidence, EVIDENCE_SOURCE_CAPABILITIES } from './tool-evidence.js';
 import { createHash } from 'node:crypto';
+import { projectHistoryLayers } from './history-synopsis.js';
 
 /** Conservative transport-byte guard, NOT a model-specific tokenizer estimate.
  * Exact repeated completed tool bodies can refer to an earlier full body in the
  * SAME request. No user text, native continuation, tool ID or permission is lost.
  * Originals remain owned by the caller; no external retrieval authority is added.
  */
-export function projectMessageBudget(messages, { maxBytes = 512 * 1024, evidenceStore = null, binding = null, canRetrieveEvidence = false, deduplicate = true } = {}) {
+export function projectMessageBudget(messages, { maxBytes = 512 * 1024, evidenceStore = null, binding = null, canRetrieveEvidence = false, deduplicate = true,
+  synopsis = null, sourceBinding = binding, sourceResolver = null, task = null, keepRecentTurns = 4, maxSynopsisChars = 8000 } = {}) {
   // Binary modality bytes have their own explicit bound; text/tool accounting
   // remains unchanged and no image is silently removed during compaction.
   let imageBytes=0,imageCount=0;
@@ -16,7 +18,8 @@ export function projectMessageBudget(messages, { maxBytes = 512 * 1024, evidence
   if(imageBytes>6*1024*1024||imageCount>20)throw Object.assign(new Error('Image transport exceeds bounds'),{code:'MODEL_IMAGE_LIMIT'});
   maxBytes+=imageBytes;
   if (!Number.isSafeInteger(maxBytes) || maxBytes < 1) throw new RangeError('maxBytes must be a positive integer');
-  const projected = structuredClone(messages);
+  let projected = structuredClone(messages);
+  let appliedSynopsis = null;
   const compactions = [];
   const warnings = [];
   // Only server-authorized retrieval permits evidence-backed projection.
@@ -63,9 +66,20 @@ export function projectMessageBudget(messages, { maxBytes = 512 * 1024, evidence
     message.content = JSON.stringify(evidence);
     compactions.push({ messageIndex: index, sourceMessageIndex: prior, sha256 });
   }
+  // Source references bind retained originals, even when the earlier safe tool
+  // evidence/dedup layer produced a different request-only representation.
+  if (synopsis && Buffer.byteLength(JSON.stringify(projected), 'utf8') > maxBytes) {
+    // The synopsis restores every retained recent/native/open turn verbatim.
+    // Earlier request-relative duplicate indexes cannot anchor removed sources.
+    const layers = projectHistoryLayers(projected, { synopsis, task, sourceBinding, sourceResolver, sourceMessages: messages, keepRecentTurns, maxSynopsisChars });
+    projected = layers.messages;
+    appliedSynopsis = layers.synopsis;
+    if (appliedSynopsis) { compactions.splice(0); compactions.push(...layers.compactions); }
+    warnings.push(...layers.warnings);
+  }
   const bytes = Buffer.byteLength(JSON.stringify(projected), 'utf8');
   if (bytes > maxBytes) throw Object.assign(new Error('Context exceeds the conservative byte budget; original history is preserved. An explicit verified checkpoint or smaller tool output is required.'), {
     code: 'CONTEXT_BUDGET_EXCEEDED', maxBytes, requiredBytes: bytes, warnings
   });
-  return { messages: projected, compactions, bytes, maxBytes, warnings };
+  return { messages: projected, compactions, bytes, maxBytes, warnings, ...(appliedSynopsis ? { synopsis: appliedSynopsis } : {}) };
 }
