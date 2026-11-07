@@ -20,6 +20,7 @@ import {
 } from '../types.js';
 import { defineModelProvider, modelStreamEvent } from '../model-provider.js';
 import { createRequestDiagnostics, requestValueHash } from '../request-diagnostics.js';
+import { discoverModels, safeObservationModelIdentifier } from '../model-discovery.js';
 
 const LIST_TIMEOUT_MS = 10_000;
 const CHAT_TIMEOUT_MS = 300_000;
@@ -75,6 +76,7 @@ export function createOpenAiCompatibleModelProvider({
   supportsReasoning = null,
   contextProfiles = {},
   imageProfiles = {},
+  modelProfile = null,
   requestTimeoutMs = CHAT_TIMEOUT_MS,
   sseIdleTimeoutMs = SSE_IDLE_TIMEOUT_MS,
   log = () => {}
@@ -83,6 +85,7 @@ export function createOpenAiCompatibleModelProvider({
     throw new Error(`createOpenAiCompatibleModelProvider「${id}」需要注入 secrets（src/providers/secrets.js）`);
   }
   const catalogCapabilities = new Map();
+  let catalogBinding = null;
   // Only explicitly selected adapters can own native continuation state.
   const deepseekProfile = protocolProfile === 'deepseek-chat-v1';
   function continuation(value, model) {
@@ -106,7 +109,18 @@ export function createOpenAiCompatibleModelProvider({
         `Model Provider「${label}」尚未配置服务地址（baseUrl）`
       );
     }
+    const binding = requestValueHash({ base, revision: entry.revision ?? null, apiKey: entry.apiKey });
+    if (catalogBinding !== binding) { catalogCapabilities.clear(); catalogBinding = binding; }
     return { apiKey: entry.apiKey, base };
+  }
+
+  function configuredModel(model) { return typeof modelProfile === 'function' ? modelProfile(model) : null; }
+  function advertisedCapability(model, capability) {
+    // A key/endpoint change invalidates provider-derived declarations too.
+    try { resolveCredentials(); } catch { catalogCapabilities.clear(); }
+    const declared = configuredModel(model)?.discoveredCapabilities?.[capability];
+    return declared?.source === 'protocol-declared' && typeof declared.value === 'boolean'
+      ? declared.value : catalogCapabilities.get(String(model ?? '').trim())?.[capability];
   }
 
   function mapFetchError(error, apiKey) {
@@ -127,14 +141,16 @@ export function createOpenAiCompatibleModelProvider({
 
   function toolCallingEnabled(model = null) {
     const configured = typeof supportsTools === 'function' ? supportsTools(model) === true : supportsTools === true;
-    const advertised = catalogCapabilities.get(String(model ?? ''))?.tools;
-    return configured && advertised !== false;
+    const advertised = advertisedCapability(model, 'tools');
+    return configured && configuredModel(model)?.manualCapabilities?.tools !== false && advertised !== false;
   }
 
   function reasoningEnabled(model) {
-    const advertised = catalogCapabilities.get(String(model ?? ''))?.reasoning;
+    const advertised = advertisedCapability(model, 'reasoning');
+    const manual = configuredModel(model)?.manualCapabilities?.reasoning;
+    if (manual === false) return false;
     if (deepseekProfile) return advertised !== false;
-    if (!reasoningParam || advertised === false || (!isReasoningModel(model) && advertised !== true)) return false;
+    if (!reasoningParam || advertised === false || (!isReasoningModel(model) && advertised !== true && manual !== true)) return false;
     return typeof supportsReasoning === 'function' ? supportsReasoning(model) === true : supportsReasoning !== false;
   }
 
@@ -228,6 +244,12 @@ export function createOpenAiCompatibleModelProvider({
     // Explicit profiles are pinned to an endpoint as well as exact model ID.
     const declared = Object.hasOwn(contextProfiles, model) ? contextProfiles[model] : null;
     if (declared && declared.baseUrl === endpoint.href.replace(/\/$/, '')) return { ...declared, status: 'declared' };
+    const manual = configuredModel(model)?.manualCapabilities;
+    if (manual?.contextWindowTokens && manual?.maxOutputTokens && manual?.defaultOutputTokens) {
+      return { status: 'declared', contextWindowTokens: manual.contextWindowTokens, maxOutputTokens: manual.maxOutputTokens,
+        defaultOutputTokens: manual.defaultOutputTokens, outputTokenParameter: protocolProfile === 'openai-chat-v1' && /^o[0-9](?:-|$)/.test(model) ? 'max_completion_tokens' : 'max_tokens',
+        source: 'manual-model-configuration', version: 'manual-v1' };
+    }
     if(id==='deepseek-official'&&['https://api.deepseek.com','https://api.deepseek.com/v1'].includes(endpoint.href.replace(/\/$/,''))
       &&['deepseek-flash','deepseek-v4-flash','deepseek-v4-flash-vision-exp'].includes(model)) {
       // Official endpoint and exact aliases only, reviewed 2026-11-01. 1,000,000 is a
@@ -248,17 +270,21 @@ export function createOpenAiCompatibleModelProvider({
   }
 
   function imageInputCapabilities(model=defaultModel) {
+    const manual = configuredModel(model)?.manualCapabilities?.vision;
+    if (manual === false || advertisedCapability(model, 'vision') === false) return { supported: false, status: 'unsupported', source: manual === false ? 'manual-model-configuration' : 'provider-model-catalog' };
     let endpoint;try{endpoint=new URL(secrets.raw(id)?.baseUrl||baseUrl).href.replace(/\/$/,'');}catch{return {supported:false,status:'unknown'};}
     const declared=Object.hasOwn(imageProfiles,model)?imageProfiles[model]:null;
     if(declared?.baseUrl===endpoint&&declared.supported===true)return {...declared,status:'declared'};
+    if (manual === true) return { supported: true, status: 'declared', maxImages: 20, maxImageBytes: 2 * 1024 * 1024,
+      maxTotalBytes: 4 * 1024 * 1024, lowDetailTokens: 4000, source: 'manual-model-configuration', version: 'manual-v1' };
     if(id==='deepseek-official'&&['https://api.deepseek.com','https://api.deepseek.com/v1'].includes(endpoint)&&['deepseek-flash','deepseek-v4-flash','deepseek-v4-flash-vision-exp'].includes(model))return {supported:true,status:'verified',maxImages:20,maxImageBytes:2*1024*1024,maxTotalBytes:4*1024*1024,lowDetailTokens:1024,maxImageTokens:1024,preferredDetail:'auto',source:'https://api-docs.deepseek.com/guides/vision/',version:'2026-10-30'};
     if(id==='openai'&&endpoint==='https://api.openai.com/v1'&&['gpt-4o-mini','gpt-4o-mini-2024-07-18','gpt-4o','gpt-4.1','gpt-4.1-mini'].includes(model))return {supported:true,status:'verified',maxImages:20,maxImageBytes:2*1024*1024,maxTotalBytes:4*1024*1024,lowDetailTokens:4000,source:'https://developers.openai.com/api/docs/guides/images-vision',version:'2026-10-30'};
     return {supported:false,status:id==='deepseek-official'?'unsupported':'unknown'};
   }
   function modelCapabilities(model = defaultModel) {
     const image = imageInputCapabilities(model);
-    const advertised = catalogCapabilities.get(String(model ?? ''));
-    const reasoning = deepseekProfile
+    const advertised = { tools: advertisedCapability(model, 'tools'), reasoning: advertisedCapability(model, 'reasoning') };
+    const reasoning = deepseekProfile && reasoningEnabled(model)
       ? { levels: ['off', 'low', 'high', 'max'], status: 'declared', source: 'provider-adapter:deepseek-chat-v1' }
       : reasoningEnabled(model)
         ? { levels: ['off', 'low', 'high'], status: 'declared', source: 'provider-adapter:reasoning-effort-map' }
@@ -274,6 +300,9 @@ export function createOpenAiCompatibleModelProvider({
     };
   }
   function buildBody({ model, messages, reasoning, stream, tools = [], toolChoice, maxOutputTokens }) {
+    if (stream && (configuredModel(model)?.manualCapabilities?.streaming === false || advertisedCapability(model, 'streaming') === false)) {
+      throw modelRuntimeError('MODEL_STREAMING_UNSUPPORTED', 'Streaming is disabled or unsupported for this model; select a compatible model or review its Settings');
+    }
     if (typeof model !== 'string' || !model.trim()) {
       throw modelRuntimeError(
         MODEL_ERROR_CODES.MODEL_NO_MODEL,
@@ -284,7 +313,7 @@ export function createOpenAiCompatibleModelProvider({
       throw modelRuntimeError(MODEL_ERROR_CODES.INVALID_PARAMS, 'messages 不能为空');
     }
     if(messages.some(m=>Array.isArray(m.content)&&m.content.some(p=>p.type==='image_url'))&&imageInputCapabilities(model).supported!==true)throw modelRuntimeError('MODEL_IMAGE_UNSUPPORTED','当前 Provider/模型未验证图像输入能力，请选择已支持视觉的模型');
-    const thinking = deepseekProfile && reasoning !== 'off';
+    const thinking = deepseekProfile && reasoningEnabled(model) && reasoning !== 'off';
     const wireMessages = messages.map(message => {
       const { modelContinuation, reasoning_content, ...wire } = message;
       if (deepseekProfile && message.role === 'assistant' && thinking && tools.length) {
@@ -335,29 +364,57 @@ export function createOpenAiCompatibleModelProvider({
     return body;
   }
 
-  function observedError(error, requestDiagnostics, responseModel = null) {
+  function observedError(error, requestDiagnostics, responseModel = null, configurationObservation = null) {
     if (error && typeof error === 'object') {
       error.providerId = id;
-      error.resolvedModel = typeof responseModel === 'string' && responseModel.trim() ? responseModel.trim() : null;
+      error.resolvedModel = safeObservationModelIdentifier(responseModel);
       error.requestDiagnostics = { ...requestDiagnostics,
         responseModelHash: error.resolvedModel ? requestValueHash(error.resolvedModel) : null };
+      if (configurationObservation) error.configurationObservation = configurationObservation;
     }
     return error;
   }
 
-  async function request(path, { body, signal, timeoutMs }) {
+  async function request(path, { body, signal, timeoutMs, configurationContext, onConfiguration, assertConfiguration }) {
     const { apiKey, base } = resolveCredentials();
     // Serialize exactly once. Both transport and diagnostics consume these same
     // bytes, after schema/continuation/image/parameter projection is complete.
     const serializedBody = JSON.stringify(body);
     const requestDiagnostics = createRequestDiagnostics({ serializedBody, endpoint: `${base}${path}`, providerId: id,
       protocol: { adapter: 'openai-compatible-v1', profile: protocolProfile } });
+    const requested = configurationContext?.requested ?? { model: body.model, reasoning: null };
+    const actualReasoning = body.reasoning_effort ?? (body.thinking?.type === 'disabled' ? 'off' : null);
+    const configurationObservation = { schemaVersion: 1, requestId: crypto.randomUUID(), providerId: id,
+      connectionRevision: Number.isSafeInteger(configurationContext?.connectionRevision) ? configurationContext.connectionRevision : null,
+      requested: { model: safeObservationModelIdentifier(requested.model, apiKey), reasoning: REASONING_EFFORT_CHOICES.includes(requested.reasoning) ? requested.reasoning : null },
+      effective: { model: safeObservationModelIdentifier(body.model, apiKey), reasoning: actualReasoning }, response: { model: null },
+      source: { model: ['request', 'configuration', 'provider-default'].includes(configurationContext?.source?.model) ? configurationContext.source.model : 'request',
+        reasoning: ['request', 'configuration', 'model-preference'].includes(configurationContext?.source?.reasoning) ? configurationContext.source.reasoning : 'request', effective: 'wire-projection' },
+      application: 'current-request', stage: 'serialized',
+      overrideReason: requested.reasoning != null && requested.reasoning !== actualReasoning ? actualReasoning === null ? 'reasoning-unavailable' : 'adapter-reasoning-map' : null,
+      at: Date.now() };
+    function observeConfiguration(responseModel = null, stage = 'serialized') {
+      configurationObservation.response.model = safeObservationModelIdentifier(responseModel, apiKey);
+      configurationObservation.stage = stage;
+      if (typeof onConfiguration === 'function') {
+        try {
+          const result = onConfiguration(JSON.parse(JSON.stringify(configurationObservation)));
+          if (result && typeof result.catch === 'function') result.catch(() => log('Model configuration observer failed'));
+        } catch { log('Model configuration observer failed'); }
+      }
+      return JSON.parse(JSON.stringify(configurationObservation));
+    }
+    observeConfiguration();
     const deadline = AbortSignal.timeout(timeoutMs);
     const effectiveSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
     let response;
     try {
+      // Stream creation and consumption need not occur in the same turn. Keep
+      // the final configuration fence beside the actual transport call.
+      assertConfiguration?.();
       response = await fetchImpl(`${base}${path}`, {
         method: 'POST',
+        redirect: 'manual',
         headers: {
           authorization: `Bearer ${apiKey}`,
           'content-type': 'application/json',
@@ -367,16 +424,17 @@ export function createOpenAiCompatibleModelProvider({
         signal: effectiveSignal
       });
     } catch (error) {
+      if (error?.code === 'MODEL_CONFIGURATION_CHANGED') throw observedError(error, requestDiagnostics, null, configurationObservation);
       if (deadline.aborted && !signal?.aborted) {
-        throw observedError(modelRuntimeError('MODEL_REQUEST_TIMEOUT', `「${label}」请求超时`, { cause: error }), requestDiagnostics);
+        throw observedError(modelRuntimeError('MODEL_REQUEST_TIMEOUT', `「${label}」请求超时`, { cause: error }), requestDiagnostics, null, configurationObservation);
       }
-      throw observedError(mapFetchError(error, apiKey), requestDiagnostics);
+      throw observedError(mapFetchError(error, apiKey), requestDiagnostics, null, configurationObservation);
     }
     if (!response.ok) {
       const bodyText = await response.text().catch(() => '');
-      throw observedError(mapHttpError(response.status, bodyText, apiKey, response, body.model), requestDiagnostics);
+      throw observedError(mapHttpError(response.status, bodyText, apiKey, response, body.model), requestDiagnostics, null, configurationObservation);
     }
-    return { response, apiKey, signal: effectiveSignal, deadline, requestDiagnostics };
+    return { response, apiKey, signal: effectiveSignal, deadline, requestDiagnostics, configurationObservation, observeConfiguration };
   }
 
   return defineModelProvider({
@@ -387,6 +445,8 @@ export function createOpenAiCompatibleModelProvider({
     id,
     label,
     defaultModel,
+    protocolProfile,
+    configurationControl: { mode: 'per-request', application: 'next-request', source: 'provider-adapter', status: 'declared' },
     supportsTools: toolCallingEnabled,
     supportsToolsForModel: toolCallingEnabled,
     supportsReasoning: reasoningEnabled,
@@ -399,55 +459,30 @@ export function createOpenAiCompatibleModelProvider({
     methods: {
       async listModels({ signal } = {}) {
         const { apiKey, base } = resolveCredentials();
-        const deadline = AbortSignal.timeout(LIST_TIMEOUT_MS);
-        const effectiveSignal = signal ? AbortSignal.any([signal, deadline]) : deadline;
-        let response;
-        try {
-          response = await fetchImpl(`${base}/models`, {
-            headers: { authorization: `Bearer ${apiKey}`, accept: 'application/json' },
-            signal: effectiveSignal
-          });
-        } catch (error) {
-          throw mapFetchError(error, apiKey);
+        let result;
+        try { result = await discoverModels({ baseUrl: base, credential: apiKey, signal, profile: protocolProfile ?? 'openai-compatible-v1', fetchImpl, timeoutMs: LIST_TIMEOUT_MS }); }
+        catch (error) {
+          if (error?.code === 'ABORTED') throw modelRuntimeError('ABORTED', '请求已取消');
+          if (Number.isSafeInteger(error?.status)) throw mapHttpError(error.status, '', apiKey);
+          if (error?.code === 'MODEL_DISCOVERY_UNAVAILABLE') throw modelRuntimeError(MODEL_ERROR_CODES.MODEL_PROVIDER_UNAVAILABLE, `无法连接到「${label}」，请检查网络和服务地址`);
+          throw modelRuntimeError(MODEL_ERROR_CODES.MODEL_PROVIDER_ERROR, `「${label}」模型列表不可用`);
         }
-        if (!response.ok) {
-          const bodyText = await response.text().catch(() => '');
-          throw mapHttpError(response.status, bodyText, apiKey, response);
-        }
-        let payload;
-        try {
-          payload = await response.json();
-        } catch (error) {
-          throw modelRuntimeError(MODEL_ERROR_CODES.MODEL_PROVIDER_ERROR, `「${label}」模型列表不是合法 JSON`, { cause: error });
-        }
-        const entries = Array.isArray(payload?.data) ? payload.data : Array.isArray(payload?.models) ? payload.models : [];
-        const models = entries
-          .map((entry) => (typeof entry === 'string' ? { id: entry } : entry))
-          .filter(entry => typeof entry?.id === 'string' && entry.id.trim())
-          .sort((a, b) => a.id.localeCompare(b.id))
-          .map(entry => {
-            const modelId = entry.id.trim();
-            const capabilities = entry.capabilities && typeof entry.capabilities === 'object' ? entry.capabilities : {};
-            const tools = typeof capabilities.tools === 'boolean' ? capabilities.tools
-              : typeof entry.supports_tools === 'boolean' ? entry.supports_tools : null;
-            const reasoning = typeof capabilities.reasoning === 'boolean' ? capabilities.reasoning : null;
-            const streaming = typeof capabilities.streaming === 'boolean' ? capabilities.streaming : null;
-            catalogCapabilities.set(modelId, { tools, reasoning, streaming });
-            return { id: modelId, label: modelId,
-              toolCalling: tools === null ? 'unverified' : tools ? 'supported' : 'unsupported',
-              streaming: streaming === null ? 'unverified' : streaming ? 'supported' : 'unsupported',
-              reasoning: reasoning === null ? 'unverified' : reasoning ? 'supported' : 'unsupported' };
-          });
-        return models;
+        catalogCapabilities.clear();
+        return result.models.map(entry => {
+          const facts = Object.fromEntries(Object.entries(entry.capabilities).map(([key, fact]) => [key, fact.value]));
+          catalogCapabilities.set(entry.id, facts);
+          const status = key => typeof facts[key] !== 'boolean' ? 'unverified' : facts[key] ? 'supported' : 'unsupported';
+          return { id: entry.id, label: entry.id, toolCalling: status('tools'), streaming: status('streaming'), reasoning: status('reasoning') };
+        });
       },
 
       async chat(options) {
         const body = buildBody({ ...options, stream: false });
         const { byName } = buildToolSchemas(options?.tools);
-        const { response, signal: requestSignal, requestDiagnostics } = await request('/chat/completions', {
+        const { response, apiKey, signal: requestSignal, requestDiagnostics, configurationObservation, observeConfiguration } = await request('/chat/completions', {
           body,
           signal: options?.signal,
-          timeoutMs: requestTimeoutMs
+          timeoutMs: requestTimeoutMs, configurationContext: options?.configurationContext, onConfiguration: options?.onConfiguration, assertConfiguration: options?.assertConfiguration
         });
         let payload;
         try {
@@ -483,18 +518,20 @@ export function createOpenAiCompatibleModelProvider({
             };
           }),
           usage: payload?.usage && typeof payload.usage === 'object' ? payload.usage : null,
-          requestDiagnostics: { ...requestDiagnostics, responseModelHash: typeof payload?.model === 'string' && payload.model.trim() ? requestValueHash(payload.model.trim()) : null },
-          model: typeof payload?.model === 'string' && payload.model.trim() ? payload.model.trim() : null,
+          configurationObservation: observeConfiguration(payload?.model, 'response'),
+          requestDiagnostics: { ...requestDiagnostics, responseModelHash: safeObservationModelIdentifier(payload?.model, apiKey) ? requestValueHash(payload.model.trim()) : null },
+          model: safeObservationModelIdentifier(payload?.model, apiKey),
           finishReason: choice?.finish_reason ?? null
         };
-        } catch (error) { throw observedError(error, requestDiagnostics, payload?.model); }
+        } catch (error) { throw observedError(error, requestDiagnostics, safeObservationModelIdentifier(payload?.model, apiKey), observeConfiguration(payload?.model, 'error')); }
       },
 
       /** 流式回合：async generator，产出 model-stream-v1 事件；取消以 turn/end(aborted) 收尾。 */
       async *stream(options) {
         const body = buildBody({ ...options, stream: true });
         const { byName } = buildToolSchemas(options?.tools);
-        const { response, signal: requestSignal, deadline, requestDiagnostics } = await request('/chat/completions', { body, signal: options?.signal, timeoutMs: requestTimeoutMs });
+        const { response, apiKey, signal: requestSignal, deadline, requestDiagnostics, configurationObservation, observeConfiguration } = await request('/chat/completions', { body, signal: options?.signal, timeoutMs: requestTimeoutMs,
+          configurationContext: options?.configurationContext, onConfiguration: options?.onConfiguration, assertConfiguration: options?.assertConfiguration });
         let streamModel = null;
         try {
         const signal = options?.signal;
@@ -526,8 +563,8 @@ export function createOpenAiCompatibleModelProvider({
             );
           }
           if (typeof payload?.model === 'string' && payload.model.trim()) {
-            streamModel = payload.model.trim();
-            requestDiagnostics.responseModelHash = requestValueHash(streamModel);
+            streamModel = safeObservationModelIdentifier(payload.model, apiKey);
+            requestDiagnostics.responseModelHash = streamModel ? requestValueHash(streamModel) : null;
           }
           if (payload?.usage && typeof payload.usage === 'object') usage = payload.usage;
           const choice = Array.isArray(payload?.choices) ? payload.choices[0] : null;
@@ -563,6 +600,7 @@ export function createOpenAiCompatibleModelProvider({
         yield modelStreamEvent('turn/start', {
           providerId: id,
           requestDiagnostics,
+          configurationObservation: { ...configurationObservation },
           requestedModel: options?.requestedModel ?? 'provider-default',
           resolvedModel: null
         });
@@ -630,7 +668,8 @@ export function createOpenAiCompatibleModelProvider({
           if (aborted) {
             try { await reader.cancel('aborted'); }
             catch (cancelError) { log(`Model Provider「${label}」SSE abort cleanup failed (${cancelError?.code ?? cancelError?.name ?? 'stream-error'})`); }
-            yield modelStreamEvent('turn/end', { providerId: id, resolvedModel: streamModel, requestDiagnostics, reason: { kind: 'aborted', usage } });
+            yield modelStreamEvent('turn/end', { providerId: id, resolvedModel: streamModel, requestDiagnostics,
+              configurationObservation: observeConfiguration(streamModel, 'aborted'), reason: { kind: 'aborted', usage } });
             return;
           }
           throw error;
@@ -654,12 +693,13 @@ export function createOpenAiCompatibleModelProvider({
           message: { content: [{ type: 'text', text: fullText }], ...(usage ? { usage } : {}) }
         });
         yield modelStreamEvent('turn/end', { providerId: id,
+          configurationObservation: observeConfiguration(streamModel, 'response'),
           requestDiagnostics,
           requestedModel: options?.requestedModel ?? 'provider-default',
           resolvedModel: streamModel,
           ...(continuation(nativeReasoning, body.model) ? { modelContinuation: continuation(nativeReasoning, body.model) } : {}),
           reason: { kind: 'completed', usage } });
-        } catch (error) { throw observedError(error, requestDiagnostics, streamModel); }
+        } catch (error) { throw observedError(error, requestDiagnostics, streamModel, observeConfiguration(streamModel, 'error')); }
       }
     }
   });

@@ -10,6 +10,7 @@
 // 用户可以看见它、知道它开着，但不能在 UI 上把它关掉。试图关闭 -> LOCKED_SETTING。
 
 import { DEFAULT_GITHUB_FALLBACK_MANIFEST_URL, DEFAULT_GITCODE_MANIFEST_URL } from '../update/sources.js';
+import { normalizeModelConnections, normalizeModelPreferences } from '../model/configuration.js';
 
 export const SETTINGS_SCHEMA_VERSION = 1;
 
@@ -46,6 +47,8 @@ export const FIELDS = Object.freeze({
     confirmOnExit: bool(true, { description: '退出前确认' })
   }),
   models: Object.freeze({
+    connections: { type: 'object', default: null, locked: false, description: 'Owner-managed model connections; null preserves the legacy derived view' },
+    modelPreferences: { type: 'object', default: [], locked: false, description: 'Per-connection model reasoning defaults' },
     provider: text('deepseek-official', { description: '模型 provider' }),
     defaultModel: text('deepseek-flash', { description: '新会话默认模型' }),
     reasoningEffort: text('max', { choices: ['off', 'low', 'high', 'max'], description: '新会话默认推理强度；现有会话保持各自选择' }),
@@ -155,6 +158,8 @@ export function coerceField(section, key, value) {
     throw settingsError('LOCKED_SETTING',
       section + '.' + key + ' 是安全姿态项，不能修改（' + (spec.description || '') + '）');
   }
+  if (section === 'models' && key === 'connections') return normalizeModelConnections(value);
+  if (section === 'models' && key === 'modelPreferences') return normalizeModelPreferences(value);
   if (spec.type === 'boolean') {
     if (typeof value !== 'boolean') throw settingsError('SETTINGS_INVALID', section + '.' + key + ' 必须是布尔值');
     return value;

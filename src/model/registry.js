@@ -24,6 +24,20 @@ export function createModelProviderRegistry({ providers = [] } = {}) {
 
   return Object.freeze({
     register,
+    // Configuration refreshes adapters inside this same registry. Existing
+    // callers keep register's duplicate protection; only its owner uses upsert.
+    upsert(provider) {
+      if (!provider || typeof provider.id !== 'string' || !provider.id.trim()) throw new Error('Model Registry upsert requires provider.id');
+      if (!byId.has(provider.id)) return register(provider);
+      byId.set(provider.id, provider);
+      return provider;
+    },
+    unregister(id) {
+      const key = String(id ?? '');
+      if (!byId.delete(key)) return false;
+      order.splice(order.indexOf(key), 1);
+      return true;
+    },
     get(id) {
       return byId.get(String(id ?? '')) ?? null;
     },

@@ -74,7 +74,8 @@ function publicEntry(provider, entry) {
     hint: maskKey(entry.apiKey),
     baseUrl: entry.baseUrl ?? '',
     updatedAt: entry.updatedAt ?? null,
-    revision: typeof entry.revision==='string'?entry.revision:null
+    revision: typeof entry.revision==='string'?entry.revision:null,
+    ...(entry.modelPreparation ? { modelPreparation: { ...entry.modelPreparation } } : {})
   };
 }
 
@@ -137,6 +138,7 @@ export function createProviderSecrets({ root, fileOps = fs } = {}) {
     const normalizedKey = normalizeApiKey(apiKey);
     const document = readDocument();
     const previous = document.providers[normalizedProvider];
+    if (previous?.modelPreparation) fail('PROVIDER_SECRET_IMMUTABLE', 'Prepared model credentials are immutable; test and save a new connection credential');
     const normalizedBaseUrl = baseUrl === undefined
       ? (typeof previous?.baseUrl === 'string' ? previous.baseUrl : '')
       : normalizeBaseUrl(baseUrl);
@@ -163,6 +165,28 @@ export function createProviderSecrets({ root, fileOps = fs } = {}) {
     return { provider: normalizedProvider, removed: existed };
   }
 
+  // Narrow model preparation: an immutable credential record plus nonsecret
+  // recovery metadata. Only an atomic Settings pointer activates this record.
+  // Failed activation retains it; this store never pretends to roll back the
+  // other file and never silently deletes the preceding credential.
+  function prepareModelConnectionCredential({ connectionId, expectedConfigurationRevision, previousCredentialRef = null, apiKey, baseUrl } = {}) {
+    const id = normalizeProvider(connectionId);
+    if (!Number.isSafeInteger(expectedConfigurationRevision) || expectedConfigurationRevision < 0
+      || (previousCredentialRef !== null && !PROVIDER_RE.test(previousCredentialRef))) {
+      fail('PROVIDER_SECRET_INVALID', 'Invalid model credential preparation binding');
+    }
+    const normalizedKey = normalizeApiKey(apiKey);
+    const normalizedBase = normalizeBaseUrl(baseUrl);
+    if (!normalizedBase) fail('PROVIDER_SECRET_INVALID', 'Model credential preparation requires a service address');
+    const document = readDocument();
+    const provider = `mc-${crypto.randomUUID()}`;
+    document.providers[provider] = { apiKey: normalizedKey, baseUrl: normalizedBase,
+      revision: crypto.randomUUID(), updatedAt: new Date().toISOString(),
+      modelPreparation: { connectionId: id, expectedConfigurationRevision, previousCredentialRef, preparedAt: new Date().toISOString() } };
+    writeDocument(document);
+    return publicEntry(provider, document.providers[provider]);
+  }
+
   function raw(provider) {
     const normalizedProvider = normalizeProvider(provider);
     const document = readDocument();
@@ -170,7 +194,7 @@ export function createProviderSecrets({ root, fileOps = fs } = {}) {
     if (!entry || typeof entry.apiKey !== 'string') {
       fail('PROVIDER_SECRET_NOT_FOUND', `provider ${normalizedProvider} 尚未配置 API Key`);
     }
-    return { provider: normalizedProvider, apiKey: entry.apiKey, baseUrl: entry.baseUrl ?? '' };
+    return { provider: normalizedProvider, apiKey: entry.apiKey, baseUrl: entry.baseUrl ?? '', revision: entry.revision ?? entry.updatedAt ?? null };
   }
 
   async function test({ provider, apiKey, baseUrl: candidateBaseUrl, model, fetchImpl = fetch } = {}) {
@@ -242,5 +266,5 @@ export function createProviderSecrets({ root, fileOps = fs } = {}) {
     }
   }
 
-  return Object.freeze({ execute, list, set, remove, raw, test, filePath: file, maskKey });
+  return Object.freeze({ execute, list, set, remove, raw, test, prepareModelConnectionCredential, filePath: file, maskKey });
 }

@@ -9,7 +9,7 @@
 import { calculateModelContextBudget, enforceModelContextBudget } from '../context/model-budget.js';
 import { modelRuntimeError, MODEL_ERROR_CODES } from './types.js';
 
-export function createModelRuntimeService({ registry, secrets, preferredProviderId = null, log = () => {} } = {}) {
+export function createModelRuntimeService({ registry, secrets, configuration = null, preferredProviderId = null, log = () => {} } = {}) {
   if (!registry || typeof registry.require !== 'function') {
     throw new Error('createModelRuntimeService 需要 registry（src/model/registry.js）');
   }
@@ -27,6 +27,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
   }
 
   function hasKey(providerId) {
+    if (configuration?.isManaged()) return configuration.hasKey(String(providerId ?? ''));
     return configuredProviderIds().has(String(providerId ?? ''));
   }
 
@@ -37,6 +38,7 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
 
   /** 解析 Provider：显式 id 必须已注册且已配置 Key；null 时按注册顺序取第一个有 Key 的。 */
   function resolveProvider(providerId) {
+    if (configuration?.isManaged()) return configuration.provider(providerId);
     if (providerId === null || providerId === undefined || providerId === '') {
       const preferred = preferredConfiguredProviderId();
       if (preferred) return registry.require(preferred);
@@ -60,6 +62,11 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
 
   /** 自动解析默认 Provider id（无 Key 配置时返回 null，调用方回退 DSH 直连路径）。 */
   function defaultProviderId() {
+    if (configuration?.isManaged()) {
+      const id = configuration.defaultProviderId();
+      if (!id) throw modelRuntimeError('MODEL_NO_ENABLED_MODELS', 'No enabled model connection is available; enable a model in Settings');
+      return id;
+    }
     const preferred = preferredConfiguredProviderId();
     if (preferred) return preferred;
     for (const id of registry.ids()) {
@@ -69,6 +76,11 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
   }
 
   function listProviders() {
+    if (configuration?.isManaged()) return configuration.get().connections.map(connection => ({
+      id: connection.id, label: connection.label, hasKey: connection.configured, enabled: connection.enabled,
+      toolCalling: connection.enabled && configuration.listEnabledModels({ connectionId: connection.id }).some(model => model.capabilities.tools.value === true),
+      settingsFields: [{ key: 'baseUrl', label: 'Base URL', type: 'string' }]
+    }));
     return registry.list().map((provider) => ({
       id: provider.id,
       label: provider.label,
@@ -164,6 +176,10 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
 
   async function listModels(providerId) {
     const provider = resolveProvider(providerId);
+    if (configuration?.isManaged()) return { provider: provider.id,
+      models: configuration.listEnabledModels({ connectionId: provider.id }).map(model => ({ ...model,
+        capabilities: { ...modelCapabilities(provider.id, model.id), configuration: model.capabilities } })),
+      configurationRevision: configuration.get().revision, error: null };
     try {
       const models = await provider.listModels({});
       return { provider: provider.id, models: models.map(model => ({ ...model, capabilities: modelCapabilities(provider.id, model.id) })), error: null };
@@ -174,7 +190,16 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
   }
 
   async function health(providerId) {
-    const provider = registry.require(providerId);
+    let provider;
+    if (configuration?.isManaged()) {
+      const connection = configuration.get().connections.find(entry => entry.id === providerId);
+      if (!connection) throw modelRuntimeError(MODEL_ERROR_CODES.MODEL_PROVIDER_UNKNOWN, 'Unknown model connection');
+      if (!connection.enabled || !connection.models.some(entry => entry.enabled) || !connection.configured) return {
+        provider: connection.id, status: connection.enabled ? 'needs-setup' : 'disabled', available: null,
+        configured: connection.configured, reachable: null, authenticated: null, inferencing: null
+      };
+      provider = configuration.provider(providerId);
+    } else provider = registry.require(providerId);
     const configured = hasKey(provider.id);
     if (!configured) return {
       provider: provider.id, status: 'needs-setup', available: null,
@@ -188,8 +213,12 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
   }
 
   /** 回合流入口：chat-service 传 providerId（已解析）或 null（自动）。 */
-  function stream({ providerId, model, messages, reasoning, signal, tools, toolChoice, maxOutputTokens, onContext }) {
-    const provider = resolveProvider(providerId);
+  function stream({ providerId, model, messages, reasoning, signal, tools, toolChoice, maxOutputTokens, onContext, onConfiguration }) {
+    const selected = configuration?.isManaged() ? configuration.resolveSelection({ providerId, model, reasoning }) : null;
+    const provider = selected?.provider ?? resolveProvider(providerId);
+    const requestedModel = model;
+    model = selected?.model ?? model;
+    reasoning = selected?.reasoning ?? reasoning;
     const effectiveModel = typeof model === 'string' && model.trim()
       ? model.trim()
       : provider.defaultModel;
@@ -211,7 +240,12 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
     return provider.stream({
       maxOutputTokens: budget.reservedOutputTokens ?? maxOutputTokens,
       model: effectiveModel,
-      requestedModel: typeof model === 'string' && model.trim() ? model.trim() : 'provider-default',
+      requestedModel: typeof requestedModel === 'string' && requestedModel.trim() ? requestedModel.trim() : 'provider-default',
+      configurationContext: selected?.configurationContext ?? { connectionRevision: null,
+        requested: { model: typeof requestedModel === 'string' && requestedModel.trim() ? requestedModel.trim() : null, reasoning: reasoning ?? null },
+        source: { model: requestedModel ? 'request' : 'provider-default', reasoning: 'request' } },
+      onConfiguration,
+      assertConfiguration: selected?.assertCurrent,
       messages,
       reasoning,
       tools,
@@ -220,8 +254,12 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
     });
   }
 
-  async function chat({ providerId, model, messages, reasoning, signal, tools, toolChoice, maxOutputTokens, onContext }) {
-    const provider = resolveProvider(providerId);
+  async function chat({ providerId, model, messages, reasoning, signal, tools, toolChoice, maxOutputTokens, onContext, onConfiguration }) {
+    const selected = configuration?.isManaged() ? configuration.resolveSelection({ providerId, model, reasoning }) : null;
+    const provider = selected?.provider ?? resolveProvider(providerId);
+    const requestedModel = model;
+    model = selected?.model ?? model;
+    reasoning = selected?.reasoning ?? reasoning;
     const effectiveModel = typeof model === 'string' && model.trim() ? model.trim() : provider.defaultModel;
     if (!effectiveModel) {
       throw modelRuntimeError(
@@ -235,12 +273,16 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
     }
     const contextBudget = enforceModelContextBudget({ provider, model: effectiveModel, messages, tools, maxOutputTokens });
     notifyContext(onContext, provider, effectiveModel, messages, tools, maxOutputTokens, contextBudget);
-    const response = await provider.chat({ model: effectiveModel, messages, reasoning, signal, tools, toolChoice, maxOutputTokens: contextBudget.reservedOutputTokens ?? maxOutputTokens });
+    const response = await provider.chat({ model: effectiveModel, messages, reasoning, signal, tools, toolChoice,
+      onConfiguration, assertConfiguration: selected?.assertCurrent, configurationContext: selected?.configurationContext ?? { connectionRevision: null,
+        requested: { model: typeof requestedModel === 'string' && requestedModel.trim() ? requestedModel.trim() : null, reasoning: reasoning ?? null },
+        source: { model: requestedModel ? 'request' : 'provider-default', reasoning: 'request' } },
+      maxOutputTokens: contextBudget.reservedOutputTokens ?? maxOutputTokens });
     return {
       ...(response && typeof response === 'object' ? response : { text: String(response ?? '') }),
       contextBudget,
       providerId: provider.id,
-      requestedModel: typeof model === 'string' && model.trim() ? model.trim() : 'provider-default',
+      requestedModel: typeof requestedModel === 'string' && requestedModel.trim() ? requestedModel.trim() : 'provider-default',
       resolvedModel: typeof response?.model === 'string' && response.model.trim() ? response.model.trim() : null,
       toolCalling: (typeof provider.supportsToolsForModel === 'function'
         ? provider.supportsToolsForModel(effectiveModel) : provider.supportsTools) === true ? 'supported' : 'unsupported'
@@ -281,8 +323,8 @@ export function createModelRuntimeService({ registry, secrets, preferredProvider
     health,
     stream,
     chat,
-    providerIds: () => registry.ids(),
-    isRegistered: (id) => registry.has(id),
+    providerIds: () => configuration?.isManaged() ? configuration.get().connections.map(connection => connection.id) : registry.ids(),
+    isRegistered: (id) => configuration?.isManaged() ? configuration.get().connections.some(connection => connection.id === id) : registry.has(id),
     execute({ method, params } = {}) {
       const handler = handlers[method];
       if (!handler) {

@@ -345,6 +345,8 @@ const REGISTRY = {
   'test-product-context.mjs': { category: 'runtime' },
   'test-continuity-rollover.mjs': { category: 'runtime' },
   'test-continuity-auto-rollover.mjs': { category: 'runtime' },
+  'test-model-configuration.mjs': { category: 'runtime', timeoutMs: 120000, note: 'Revision-bound Model connections, manual capability configuration and actual request selection' },
+  'test-model-discovery.mjs': { category: 'security', timeoutMs: 120000, note: 'Bounded same-origin model discovery, fallback, cancellation and credential-safe failures' },
   'test-model-runtime.mjs': { category: 'runtime' },
   'test-model-tool-calling.mjs': { category: 'runtime' },
   'test-smart-router.mjs': { category: 'runtime' },
