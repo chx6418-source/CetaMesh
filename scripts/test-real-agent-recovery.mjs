@@ -13,6 +13,14 @@ import {createProviderSecrets} from '../src/providers/secrets.js';
 import {redactText} from '../src/logging/redact.js';
 import {assertRecoveryAccount} from './real-recovery-account-guard.mjs';
 
+// Separate, newly authorized subscription-only pause/resume continuation. This
+// branch runs before any legacy Managed credential source is constructed.
+if (process.env.CETAMESH_TEST_RECOVERY_SUBSCRIPTION_PAUSE === '1') {
+  const {runSubscriptionPauseResumeAcceptance} = await import('./helpers/subscription-pause-resume.mjs');
+  await runSubscriptionPauseResumeAcceptance();
+  process.exit(process.exitCode || 0);
+}
+
 const codexRestartOnly=process.env.CETAMESH_TEST_RECOVERY_CODEX_RESTART_ONLY==='1';
 if ((!codexRestartOnly&&process.env.WHALEBRIDGE_TEST_REAL_MANAGED !== '1') || process.env.WHALEBRIDGE_TEST_REAL_CODEX !== '1') {
   console.log('NOT_RUN_ENVIRONMENT: explicit real Managed and Codex opt-ins required');

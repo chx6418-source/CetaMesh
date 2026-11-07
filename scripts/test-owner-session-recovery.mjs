@@ -751,6 +751,43 @@ test('automatic recovery retires a stopped non-Git execution without a manual fo
   } finally { await f.close(); }
 });
 
+test('historical Codex stop blockers defer Workspace traversal until a later verified boot', async () => {
+  const f = await fixture('legacy-stop-before-workspace-proof');
+  const contentProof = f.workspaces.collectContentProof, recoveryProof = f.workspaces.collectRecoveryProof;
+  let contentScans = 0, recoveryScans = 0;
+  try {
+    const before = f.read();
+    const bootA = { kind: 'windows-kernel-boot-v1', hostId: 'f'.repeat(64),
+      bootedAt: 100000, eventRecordId: 10, bootMode: 0, bootType: 0 };
+    const provider = boot => createCodexAgentProvider({ stateDir: f.stateDir,
+      cliProcess: { executable: () => null, probe: () => ({ available: false, stdout: '', stderr: '' }), async shutdown() {} },
+      resolveTaskWorkspace: () => ({ task: f.read(), workspace: f.workspace }),
+      legacyRecoveryTasks: () => [f.read()], probeHostBoot: () => boot });
+    let selected = provider(bootA);
+    f.broker.require = () => selected;
+    f.workspaces.collectContentProof = (...args) => { contentScans++; return contentProof(...args); };
+    f.workspaces.collectRecoveryProof = (...args) => { recoveryScans++; return recoveryProof(...args); };
+    const preview = await f.call('ui.task.recovery.inspect', { id: before.id, automatic: true });
+    assert.equal(preview.session.code, 'CODEX_HOST_RESTART_REQUIRED');
+    assert.equal(preview.canResume, false);
+    assert.equal(preview.workspace, null, 'a known stop blocker must not trigger an unusable full Workspace proof');
+    assert.equal(contentScans + recoveryScans, 0, 'blocked Task detail reads leave Workspace traversal deferred');
+    assert.deepEqual(f.read(), before);
+    selected = provider({ ...bootA, bootedAt: 200000, eventRecordId: 20 });
+    const verified = await f.call('ui.task.recovery.inspect', { id: before.id, automatic: true });
+    assert.equal(verified.canResume, true);
+    assert.equal(verified.workspace.kind, 'filtered-workspace-v1');
+    assert.equal(contentScans, 0);
+    assert.equal(recoveryScans, 1, 'a later genuine boot still requires the real Workspace owner proof');
+    assert.deepEqual(f.read(), before);
+    assert.equal(f.state.sends + f.state.creates + f.state.cancels + f.state.closes, 0);
+  } finally {
+    f.workspaces.collectContentProof = contentProof;
+    f.workspaces.collectRecoveryProof = recoveryProof;
+    await f.close();
+  }
+});
+
 test('historical Codex startup witness survives Core reload, then automatically releases and resumes the same Task', async () => {
   const f = await fixture('legacy-boot-recovery');
   const before = f.read();

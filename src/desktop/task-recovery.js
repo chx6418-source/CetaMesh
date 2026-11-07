@@ -199,11 +199,11 @@ export function createTaskRecovery({ services, now = () => Date.now() }) {
     let workspace = null;
     assertObservationActive(signal);
     try {
-      // Import rollback can write files. Inspecting an active/unknown executor
-      // must stay read-only until every execution/operation blocker is settled.
-      workspace = blockers.length
-        ? await services.workspaceService.collectContentProof?.(task.workspaceId, { signal }) ?? null
-        : await services.workspaceService.collectRecoveryProof(task.workspaceId, { signal, beforeRecovery: () => {
+      // A known execution/operation blocker makes a Workspace proof unusable.
+      // Defer its full traversal until those facts settle; Task detail reads
+      // must not scan the project while waiting for an independent stop proof.
+      // The eventual recovery proof still owns import rollback and all checks.
+      if (!blockers.length) workspace = await services.workspaceService.collectRecoveryProof(task.workspaceId, { signal, beforeRecovery: () => {
           assertObservationActive(signal);
           const current = runtime.get({ id: task.id }).task, currentReview = journals(current);
           currentReview.taskId = current.id;
