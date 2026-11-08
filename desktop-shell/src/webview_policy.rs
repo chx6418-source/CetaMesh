@@ -46,6 +46,7 @@ const UI_METHODS: &[&str] = &[
     "ui.workspace.git.commit",
     "ui.workspace.git.index.review", "ui.workspace.git.stage", "ui.workspace.git.unstage", "ui.workspace.git.commit.staged",
     "ui.workspace.git.branch.create",
+    "ui.workspace.git.branch.review", "ui.workspace.git.branch.switch",
     "ui.workspace.git.worktree.create",
     "ui.developer.forge.describe",
     "ui.developer.forge.credentials.save",

@@ -3,6 +3,7 @@ import { Button, Input, SearchInput, Select, Tabs, Textarea } from '../component
 import { Badge, Surface } from '../components/primitives/surfaces';
 import { Sheet as Drawer } from '../components/primitives/overlays';
 import { DiffViewer, parseUnifiedDiff } from '../components/product/DiffViewer';
+import { approvalClient } from '../bridge/typed-client';
 import './GitWorkspace.css';
 
 type GitEntry = { x: string; y: string; path: string; origPath?: string | null; conflict: boolean; commitEligible: boolean; sha256?: string | null; blockedReason?: string };
@@ -22,6 +23,7 @@ export type GitOverview = {
 };
 export type GitDiff = { output: string; cached: boolean; truncated: boolean; hasChanges: boolean };
 type Review = { kind: 'branch' | 'worktree'; workspaceId: string; headSha: string; taskId: string; branch: string };
+type SwitchReview = Record<string, unknown> & {workspaceId: string; targetBranch: string; mode: string; canSwitch: boolean; paths: string[]; blocker: {code: string; message: string} | null};
 type Detail = { kind: 'branch'; item: GitBranch } | { kind: 'worktree'; item: GitWorktree };
 export type GitWorkspaceProps = {
   call(method: string, params: Record<string, unknown>): Promise<unknown>;
@@ -60,6 +62,10 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
   const [taskId, setTaskId] = useState('');
   const [branch, setBranch] = useState('');
   const [review, setReview] = useState<Review | null>(null);
+  const [switchTarget, setSwitchTarget] = useState('');
+  const [switchMode, setSwitchMode] = useState('clean');
+  const [switchReview, setSwitchReview] = useState<SwitchReview | null>(null);
+  const [switchApproval, setSwitchApproval] = useState<{id: string; workspaceId: string} | null>(null);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -81,14 +87,14 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
     // Drafts and selections belong to this Workspace, never to the next selected project.
     operation.current++;
     setBusy(false); setSelected([]); setMessage(''); setCommitMode('working'); setBranch(''); setTaskId('');
-    setPreviewPath(''); setDiff(null); setDiffError(''); setReview(null); setDetail(null); setNotice('');
+    setPreviewPath(''); setDiff(null); setDiffError(''); setReview(null); setSwitchReview(null); setSwitchTarget(''); setSwitchApproval(null); setSwitchMode('clean'); setDetail(null); setNotice('');
     previewWorkspace.current = null; setLineStatistics({});
     setQuery(''); setStatusFilter('all'); setPage(0); setBranchQuery(''); setWorktreeQuery('');
     return () => { operation.current++; };
   }, [workspaceId]);
   useEffect(() => {
     const epoch = ++generation.current;
-    setOverview(null); setReview(null); setDetail(null); setError('');
+    setOverview(null); setReview(null); setSwitchReview(null); setDetail(null); setError('');
     setLineStatistics({});
     if (!workspaceId) { setLoading(false); return; }
     setLoading(true);
@@ -103,6 +109,29 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
       .finally(() => { if (generation.current === epoch && workspaceRef.current === workspaceId) setLoading(false); });
     return () => { generation.current++; };
   }, [workspaceId, revision]);
+  useEffect(() => {
+    if (!switchApproval) return;
+    let current = true, timer: ReturnType<typeof setTimeout> | undefined;
+    async function poll() {
+      try {
+        const result = await approvalClient.list();
+        if (!current || workspaceRef.current !== switchApproval!.workspaceId) return;
+        const observed = result.operations?.find(row => row.approvalId === switchApproval!.id);
+        if (observed && !['accepted','running','waiting'].includes(observed.status)) {
+          const settled = observed.status === 'unknown' && observed.operationId ? await approvalClient.operation(observed.operationId) : observed;
+          if (!current || workspaceRef.current !== switchApproval!.workspaceId) return;
+          if (settled.status === 'completed' && settled.decision === 'approved') setNotice('分支切换已完成；请核对当前分支与工作目录。草稿已保留。');
+          else setNotice(settled.status === 'unknown' ? '切换结果尚未确认。选择原目标分支并审查“完成已准备的切换”；Core 会核验原执行是否已结束。' : '分支切换未执行或未完成，草稿已保留。');
+          setSwitchApproval(null); setSwitchReview(null); setRevision(value=>value+1); await onWorkspaceChanged?.(); return;
+        }
+        if (!observed && !result.approvals.some(row=>row.id===switchApproval!.id)) {
+          setNotice('审批已不再待决；没有已完成执行回执。请重新审查后再申请，草稿已保留。');setSwitchApproval(null);return;
+        }
+      } catch (cause) { if (current) setError(errorMessage(cause)); }
+      if (current) timer = setTimeout(()=>void poll(),1000);
+    }
+    void poll(); return ()=>{current=false;if(timer)clearTimeout(timer);};
+  }, [switchApproval]);
   useEffect(() => {
     let current = true; setDiff(null); setDiffError('');
     if (!workspaceId || previewWorkspace.current !== workspaceId || tab !== 'changes' || !previewPath) return;
@@ -183,6 +212,32 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
     } catch (cause) { if (workspaceRef.current === targetWorkspace && operation.current === request) setError(errorMessage(cause)); }
     finally { if (workspaceRef.current === targetWorkspace && operation.current === request) setBusy(false); }
   }
+  async function reviewSwitch() {
+    if (locked || !switchTarget) return;
+    const targetWorkspace=workspaceId, epoch=generation.current, request=++operation.current;
+    setBusy(true);setError('');setSwitchReview(null);
+    try {
+      const result=await callRef.current('ui.workspace.git.branch.review',{id:targetWorkspace,targetBranch:switchTarget,mode:switchMode}) as SwitchReview;
+      if (workspaceRef.current!==targetWorkspace || generation.current!==epoch || operation.current!==request) return;
+      if(result.workspaceId!==targetWorkspace || result.targetBranch!==switchTarget || result.mode!==switchMode)throw new Error('分支审查范围已变化，请重新审查。');
+      setSwitchReview(result);
+    } catch(cause){if(workspaceRef.current===targetWorkspace&&operation.current===request)setError(errorMessage(cause));}
+    finally{if(workspaceRef.current===targetWorkspace&&operation.current===request)setBusy(false);}
+  }
+  async function submitSwitch() {
+    if(locked || !switchReview?.canSwitch || switchReview.workspaceId!==workspaceId || switchReview.targetBranch!==switchTarget || switchReview.mode!==switchMode)return;
+    const targetWorkspace=workspaceId,epoch=generation.current,request=++operation.current;
+    const keys=['paths','targetBranch','mode','expectedHead','expectedHeadRef','expectedTargetHead','indexIdentity','expectedRepositoryIdentity','expectedDirtyIdentity','expectedHashes','expectedWorkingModes',...(switchReview.byteTransaction?['byteTransaction']:[])];
+    setBusy(true);setError('');
+    try{
+      const result=await callRef.current('ui.workspace.git.branch.switch',{id:targetWorkspace,...(typeof switchReview.taskId==='string'?{taskId:switchReview.taskId}:{}),...Object.fromEntries(keys.map(key=>[key,switchReview[key]]))}) as {status?:string;approvalId?:string};
+      if(workspaceRef.current!==targetWorkspace||generation.current!==epoch||operation.current!==request)return;
+      if(result.status!=='pending'||!result.approvalId)throw new Error('切换执行结果尚未确认，请查看审批记录。');
+      setSwitchApproval({id:result.approvalId,workspaceId:targetWorkspace});setSwitchReview(null);
+      setNotice('分支切换等待一次性审批；请在既有审批面板确认。批准受理不代表切换完成。');await onWorkspaceChanged?.();
+    }catch(cause){if(workspaceRef.current===targetWorkspace&&operation.current===request)setError(errorMessage(cause));}
+    finally{if(workspaceRef.current===targetWorkspace&&operation.current===request)setBusy(false);}
+  }
   function prepareCreation(kind: Review['kind']) {
     if (!canCreate || !overview?.git.headSha) return;
     setReview({ kind, workspaceId, taskId, branch: branch.trim(), headSha: overview.git.headSha });
@@ -238,6 +293,13 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
         {tab === 'branches' && <><div className="git-section-heading"><h2>本地分支</h2><Badge>{overview.branches.length}</Badge></div><SearchInput label="搜索分支" placeholder="搜索分支、上游或 Task…" value={branchQuery} onChange={event => setBranchQuery(event.target.value)} />{!branches.length && <div className="git-empty">{overview.branches.length ? '没有匹配的分支。' : '首次提交后会显示本地分支。'}</div>}{branches.map(item => <div className="git-data-row" key={item.name}><div><Button type="button" variant="ghost" className="git-detail-link" aria-label={'分支详情 ' + item.name} onClick={() => setDetail({ kind: 'branch', item })}>{item.name}</Button><small>{item.upstream ? '跟踪 ' + item.upstream : '本地分支'} · {item.taskId ? 'Task ' + item.taskId : 'Task 未关联'}</small></div><div>{item.current && <Badge tone="accent">当前分支</Badge>}<small><code>{shortSha(item.headSha)}</code></small></div></div>)}</>}
         {tab === 'worktrees' && <><div className="git-section-heading"><h2>Worktrees · 工作树</h2><Badge>{overview.worktrees.length}</Badge></div><SearchInput label="搜索工作树" placeholder="搜索工作树、实际分支或 Task…" value={worktreeQuery} onChange={event => setWorktreeQuery(event.target.value)} /><div className="git-worktree-list">{!worktrees.length && <div className="git-empty">没有匹配的工作树。</div>}{worktrees.map((item, index) => <div className="git-data-row" key={item.workspaceId ?? String(item.branch) + '-' + index}><div><Button type="button" variant="ghost" className="git-detail-link" aria-label={'工作树详情 ' + item.name} onClick={() => setDetail({ kind: 'worktree', item })}>{item.name}</Button><strong className="git-actual-branch">{item.branch || 'Detached HEAD'} {item.current && <Badge tone="accent">当前</Badge>}</strong><small>{item.managed ? 'Agent 隔离目录' : item.workspaceId ? '已登记工作区' : '外部工作区'} · {item.taskId ? 'Task ' + item.taskId : 'Task 未关联'}</small><small>{shortSha(item.headSha)}{item.locked ? ' · 已锁定' : ''}{item.prunable ? ' · 需要检查登记状态' : ''}</small></div>{item.workspaceId && !item.current && <Button type="button" compact disabled={locked} onClick={() => void openWorktree(item.workspaceId!)}>打开</Button>}</div>)}</div></>}
       </section><aside className="git-context" aria-label="Git 操作">
+        <Surface className="git-switch"><h2>切换现有分支</h2><p>审查目标分支与文件范围后，再通过一次性审批执行。</p>
+          <Select label="切换目标分支" value={switchTarget} disabled={locked || !!switchApproval} onChange={event=>{setSwitchTarget(event.target.value);setSwitchReview(null);}}><option value="">选择本地分支</option>{overview.branches.map(item=><option key={item.name} value={'refs/heads/'+item.name}>{item.name+(item.current?' · 当前':'')}</option>)}</Select>
+          <Select label="分支切换方式" value={switchMode} disabled={locked || !!switchApproval} onChange={event=>{setSwitchMode(event.target.value);setSwitchReview(null);}}><option value="clean">从干净工作目录切换</option><option value="finish-prepared">完成已准备的切换</option></Select>
+          {switchMode==='finish-prepared'&&<small>沿用原事务的已发布文件，只核验并完成缺失的索引或 HEAD 阶段；原执行未确认结束时不会继续。</small>}
+          <Button compact disabled={locked || !switchTarget || !!switchApproval} onClick={()=>void reviewSwitch()}>审查分支切换</Button>
+          {switchReview&&<div className="git-switch-review"><strong>{switchReview.targetBranch}</strong><code>目标 HEAD {String(switchReview.expectedTargetHead)}</code><small>{switchReview.paths.length} 个受影响文件 · {switchReview.mode==='finish-prepared'?'核验并完成原事务':'干净切换'}</small><ul>{switchReview.paths.map(file=><li key={file}><code>{file}</code></li>)}</ul>{switchReview.blocker&&<p role="alert">{switchReview.blocker.code} · {switchReview.blocker.message}</p>}<Button compact variant="primary" disabled={locked || !switchReview.canSwitch} onClick={()=>void submitSwitch()}>请求一次性切换审批</Button></div>}
+        </Surface>
         {tab === 'changes' && <Surface className="git-commit" aria-label="提交所选文件"><div className="git-section-heading"><h2>提交所选文件</h2><Badge tone="accent">{selected.length}</Badge></div>
           <p>选中文件后，可暂存、取消暂存或选择提交内容。</p><small>{hiddenSelection ? '另有 ' + hiddenSelection + ' 个选择位于其他页或已被筛选隐藏。' : '选择会在翻页与筛选后保留。'}</small>
           <div className="git-inline"><Button type="button" compact disabled={locked || !selected.length || selected.length > 100 || !!overview.conflicts.length} onClick={() => void indexAction('stage', entries.filter(entry => selectedSet.has(entry.path) && entry.commitEligible).map(entry => entry.path))}>暂存所选文件（{selected.length}）</Button><Button type="button" compact disabled={locked || !selectedStaged.length || selectedStaged.length > 100 || !!overview.conflicts.length} onClick={() => void indexAction('unstage', selectedStaged.map(entry => entry.path))}>取消暂存所选文件（{selectedStaged.length}）</Button></div>

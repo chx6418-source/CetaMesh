@@ -66,6 +66,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   if(alias)try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}catch(error){delete dispatches[alias];throw error;}
  }
  function claimDispatch(request,entry,grantId=null){
+  if(entry.gitBranchApplication===true&&!dispatchFile)throw capabilityError('DISPATCH_PERSISTENCE_REQUIRED','Git application effects require the existing durable dispatch journal');
   // Only effects that may outlive a local Abort need durable replay protection.
   // Agent provisioning is intentionally retried by Workshop with its stable requestId.
   const declaredEffect=entry.effect && entry.effect!=='read-only';
@@ -82,13 +83,20 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   const alias=bindRequest(request,identity);
   if(previous&&previous.fingerprint!==fingerprint)throw capabilityError('REQUEST_ID_CONFLICT','Prepared operation parameters changed');
   dispatches[key]={fingerprint,capability:entry.id,at:previous?.at??Date.now(),status:'started',attemptCount:(previous?.attemptCount??0)+1,lastAttemptAt:Date.now(),
+   ...(entry.gitBranchApplication === true ? {executionAttempt: crypto.randomUUID()} : {}),
    ...(grantId?{authorization:{kind:'bounded-grant',id:grantId}}:request.approvalId?{authorization:{kind:'approval',id:request.approvalId}}:{}),
    requestId:request.requestId,...(typeof request.taskId==='string'?{taskId:request.taskId}:{}),
    workspaceId:typeof request.workspaceId==='string'?request.workspaceId:null,executorId:request.actor.id,
    attemptId:typeof request.attemptId==='string'?request.attemptId.slice(0,160):null,...(identity?{
    operationId:request.operationId,...(previous?.logicalStepId?{logicalStepId:previous.logicalStepId}:{}),
    descriptorVersion:entry.descriptorVersion??null}: {})};
-  try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}
+  try {
+  if(entry.gitBranchApplication===true&&request.input.paths?.length===0){
+   const original=request.input.mode==='finish-prepared'?entry.gitMetadataOriginal(request):gitBinding(key,dispatches[key]);
+   dispatches[key].gitMetadata={schema:1,original,closed:false,
+    ...(request.input.mode==='clean'?{reviewProof:captureGitMetadataReview(request,original,entry)}:{})};
+  }
+  if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}
   catch(error){if(previous)dispatches[key]=previous;else delete dispatches[key];if(alias)delete dispatches[alias];throw error;}
   activeDispatches.add(key);
   return {dispatchClaim:{key,row:dispatches[key]}};
@@ -101,15 +109,100 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   if(!row)return;
   activeDispatches.delete(key);
   row.status=status;
-  if(identity&&status==='completed'){
+  if((identity||entry.gitBranchApplication===true)&&status==='completed'){
    const receipt=retainedOperationResult(entry,result,request);
    if(receipt){row.retainedResult=receipt.value;row.operationProof=receipt.proof;row.accessInput=receipt.accessInput;}
   }
-  try{if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}
+  const reconciled = [];
+  try {
+  if(status==='completed'&&entry.gitBranchApplication===true){
+   if(!row.retainedResult)throw capabilityError('DISPATCH_RESULT_PERSIST_FAILED','Bounded Git completion receipt is required');
+   const bindings=row.gitMetadata ? metadataChain(row.gitMetadata.original).filter(([,item])=>item.gitMetadata.closed&&['outcome-unknown','completed','reconciled'].includes(item.status)).map(([id,item])=>gitBinding(id,item)) : entry.gitClosedBindings?.(result)??[];
+   for(const binding of bindings)if(binding.requestId!==request.requestId){
+    const original=verifiedGitDispatch(binding);
+    if(activeDispatches.has(binding.key))throw capabilityError('OPERATION_STILL_RUNNING','Original Git invocation is still active');
+    if(!['outcome-unknown','completed','reconciled'].includes(original.status))throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','Original dispatch cannot be reconciled');
+    reconciled.push([original,structuredClone(original)]);
+    original.historicalStatus??=original.status;
+    if(original.status!=='completed')original.status='reconciled';
+    original.resolution='owner-reviewed-no-replay';original.completionRequestId=request.requestId;
+   }
+  }
+  if(dispatchFile)writeJsonAtomic(dispatchFile,dispatches);}
   catch(error){audit({requestId:request.requestId,capability:request.capability,status:'dispatch-journal-failed',code:error.code??'WRITE_FAILED'});
+   for(const [original,backup] of reconciled){Object.keys(original).forEach(key=>delete original[key]);Object.assign(original,backup);}
    row.status='outcome-unknown';
    const failure=capabilityError(identity?'OPERATION_RESULT_PERSIST_FAILED':'DISPATCH_RESULT_PERSIST_FAILED','Capability result was not durably recorded');
    failure.effectStatus='unknown';throw failure;}
+ }
+ function verifiedGitDispatch(binding){
+  const row=binding&&dispatches[binding.key];
+  if(!row||row.capability!=='git.branch.switch'||row.fingerprint!==binding.fingerprint
+   ||row.requestId!==binding.requestId||row.workspaceId!==binding.workspaceId||(row.taskId??null)!==binding.taskId
+   ||(row.operationId??null)!==binding.operationId||row.executionAttempt!==binding.attemptId
+   ||row.authorization?.kind!=='approval'||row.authorization.id!==binding.approvalId)
+   throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','Original Git dispatch binding does not match its durable owner');
+  return row;
+ }
+ function gitBinding(key,row){return {key,requestId:row.requestId,capability:row.capability,fingerprint:row.fingerprint,
+  taskId:row.taskId??null,operationId:row.operationId??null,workspaceId:row.workspaceId,approvalId:row.authorization?.id,attemptId:row.executionAttempt};}
+ function metadataReviewInput(input){
+  // Retain only the original reviewed Git facts, never reason, model context,
+  // actor extras or an approval-history copy. Native/working paths are empty.
+  const fields=['paths','targetBranch','mode','expectedHead','expectedHeadRef','expectedTargetHead','indexIdentity','expectedRepositoryIdentity','expectedDirtyIdentity','expectedHashes','expectedWorkingModes'];
+  if(!input||input.mode!=='clean'||!Array.isArray(input.paths)||input.paths.length
+   ||['targetBranch','expectedHead','expectedTargetHead','expectedRepositoryIdentity','expectedDirtyIdentity'].some(key=>typeof input[key]!=='string'||!input[key])
+   ||['expectedHeadRef','indexIdentity'].some(key=>input[key]!==null&&typeof input[key]!=='string')
+   ||['expectedHashes','expectedWorkingModes'].some(key=>!input[key]||typeof input[key]!=='object'||Array.isArray(input[key])||Object.keys(input[key]).length))
+   throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','Original metadata review must contain exact zero-file Git facts');
+  const value=Object.fromEntries(fields.map(key=>[key,input[key]])),text=JSON.stringify(value);
+  if(Buffer.byteLength(text)>8192)throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','Original metadata review exceeds its bound');
+  return JSON.parse(text);
+ }
+ function verifiedMetadataApproval(request,original,entry){
+  const consumed=approval.get(original.approvalId),identity=operationIdentity(request,entry);
+  if(consumed.status!=='consumed'||consumed.fingerprint!==requestFingerprint(request)
+   ||(identity?.fingerprint??requestFingerprint(request))!==original.fingerprint||(identity?.key??request.requestId)!==original.key
+   ||request.requestId!==original.requestId||request.capability!=='git.branch.switch'||request.workspaceId!==original.workspaceId
+   ||(request.taskId??null)!==original.taskId||(request.operationId??null)!==original.operationId)
+   throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','Original metadata review does not match its consumed approval and dispatch');
+  return consumed.fingerprint;
+ }
+ function captureGitMetadataReview(request,original,entry){
+  // Called only after consume(), before the same dispatch intent is persisted.
+  const approvalFingerprint=verifiedMetadataApproval(request,original,entry),input=metadataReviewInput(request.input);
+  const scope={binding:structuredClone(original),approvalFingerprint,input};
+  const proof={schema:1,...scope,scopeFingerprint:requestFingerprint(scope)};
+  if(Buffer.byteLength(JSON.stringify(proof))>16384)throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','Original metadata review proof exceeds its bound');
+  return proof;
+ }
+ function retainedGitMetadataReview(original){
+  const row=verifiedGitDispatch(original),proof=row.gitMetadata?.reviewProof;
+  if(proof!==undefined){
+   if(!proof||proof.schema!==1||Buffer.byteLength(JSON.stringify(proof))>16384
+    ||JSON.stringify(proof.binding)!==JSON.stringify(original)||!/^[a-f0-9]{64}$/.test(proof.approvalFingerprint??''))
+    throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','Invalid original metadata review proof');
+   const input=metadataReviewInput(proof.input);
+   if(proof.scopeFingerprint!==requestFingerprint({binding:proof.binding,approvalFingerprint:proof.approvalFingerprint,input})
+    ||(!original.operationId&&proof.approvalFingerprint!==original.fingerprint))
+    throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','Original metadata review proof changed scope');
+   return input;
+  }
+  // Older dispatches can use their exact consumed approval if it still exists.
+  // Missing legacy evidence is never reconstructed from a new request.
+  let request;
+  try{request=approval.get(original.approvalId).request;}
+  catch(error){if(error.code!=='APPROVAL_NOT_FOUND')throw error;throw capabilityError('GIT_RECOVERY_PROOF_UNAVAILABLE','Legacy Git dispatch has no retained original review proof');}
+  verifiedMetadataApproval(request,original,registry.require('git.branch.switch'));
+  return metadataReviewInput(request.input);
+ }
+ function metadataChain(original){
+  verifiedGitDispatch(original);
+  const chain=Object.entries(dispatches).filter(([,row])=>row.gitMetadata?.original?.key===original.key);
+  if(!chain.length||chain.length>16||chain.some(([,row])=>row.gitMetadata.schema!==1||typeof row.gitMetadata.closed!=='boolean'
+   ||JSON.stringify(row.gitMetadata.original)!==JSON.stringify(original)||row.workspaceId!==original.workspaceId||(row.taskId??null)!==original.taskId))
+   throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','Invalid bounded metadata-only Git invocation chain');
+  return chain;
  }
  function abortError(signal,inFlight=false){
   if(!inFlight)return typeof signal?.reason?.code==='string'?signal.reason:capabilityError('INVOKE_CANCELLED','Capability operation cancelled');
@@ -237,7 +330,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    if(signal?.aborted)throw abortError(signal);
    if(request.approvalId){const row=approval.get(request.approvalId);if(row.fingerprint!==requestFingerprint(request))throw capabilityError('APPROVAL_MISMATCH','Request changed');}
    let grantId=null;
-   if(decision.approvalRequired && !(request.actor.kind==='owner'&&request.approved===true)){
+   if(decision.approvalRequired && !(entry.gitBranchApplication!==true&&request.actor.kind==='owner'&&request.approved===true)){
     if(request.approvalId)approval.consume(request.approvalId,request);
     else if(!(grantId=approval.consumeGrant?.(request,entry,decision.approvalBinding))){const pending=approval.pending({...request,approvalBinding:decision.approvalBinding});markOperationBlocker(request,entry,'permission');audit({requestId:request.requestId,capability:entry.id,status:'pending'});return {requestId:request.requestId,status:'pending',capability:entry.id,approvalId:pending.id,expiresAt:pending.expiresAt};}
    }
@@ -268,8 +361,11 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
     if(registry.require(request.capability)!==entry)throw capabilityError('APPROVAL_EXPIRED','Capability changed during Workspace read');
     if(signal?.aborted)throw abortError(signal);
    };
-   const providerRequest=cooperativeRead?{...request,...(signal?{signal}:{}),assertAuthorized,
+   let providerRequest=cooperativeRead?{...request,...(signal?{signal}:{}),assertAuthorized,
     consumeReadBytes:typeof consumeReadBytes==='function'?consumeReadBytes:undefined}:signal?{...request,signal}:request;
+   if(entry.gitBranchApplication===true)providerRequest={...providerRequest,gitDispatchBinding:{key:claim.key,
+    requestId:request.requestId,capability:entry.id,fingerprint:claim.row.fingerprint,taskId:request.taskId??null,
+    operationId:request.operationId??null,workspaceId:request.workspaceId,approvalId:request.approvalId,attemptId:claim.row.executionAttempt}};
    let executorEntered=false,knownNoEffect=false;
    const providerPromise=Promise.resolve().then(async()=>{
     if(signal?.aborted)throw abortError(signal);
@@ -300,8 +396,10 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
      }
      throw error;
     }
-   }).then(result=>{settleDispatch(request,'completed',entry,result,claim);return result;},error=>{settleDispatch(request,!executorEntered||knownNoEffect?'failed-no-effect':error.effectStatus==='unknown'?'outcome-unknown':'failed',entry,undefined,claim);throw error;});
-   const result=await (entry.cancellationAware===true&&(request.actor.kind==='agent'||cooperativeRead)?providerPromise:awaitWithAbort(providerPromise,signal));
+   }).then(result=>{settleDispatch(request,'completed',entry,result,claim);
+    if(entry.gitBranchApplication===true)try{entry.afterDurableGitResult?.(result);}catch{result.cleanupPending=true;}
+    return result;},error=>{settleDispatch(request,!executorEntered||knownNoEffect?'failed-no-effect':error.effectStatus==='unknown'?'outcome-unknown':'failed',entry,undefined,claim);throw error;});
+   const result=await (entry.gitBranchApplication===true||entry.cancellationAware===true&&(request.actor.kind==='agent'||cooperativeRead)?providerPromise:awaitWithAbort(providerPromise,signal));
    audit({requestId:request.requestId,capability:entry.id,status:'completed',actor:request.actor.id});
    return {requestId:request.requestId,status:'completed',capability:entry.id,result};
   }catch(error){
@@ -395,10 +493,59 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    .map(([key,row])=>({requestId:row.requestId??key,capability:row.capability,status:row.status,at:row.at})),
   hasActiveDispatchForTask:({taskId,workspaceId})=>[...activeDispatches].some(key=>
    dispatches[key]?.taskId===taskId&&dispatches[key]?.workspaceId===workspaceId),
-  workspaceRecoveryBlocker({workspaceId,reviewedTaskId,overlaps=(left,right)=>left===right}) {
+  verifyGitRecoveryBinding(binding){const row=verifiedGitDispatch(binding);if(activeDispatches.has(binding.key))throw capabilityError('OPERATION_STILL_RUNNING','Original Git invocation has not closed');
+   if(!['outcome-unknown','completed','reconciled'].includes(row.status))throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','Original dispatch has no eligible recovery outcome');return structuredClone(row);},
+  gitMetadataRecovery(workspaceId,{currentBinding}={}){
+   const unresolved=Object.entries(dispatches).filter(([,row])=>row.workspaceId===workspaceId&&row.capability==='git.branch.switch'
+    &&row.gitMetadata&&['started','outcome-unknown'].includes(row.status));
+   if(!unresolved.length)throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','No exact metadata-only Git operation requires completion');
+   const original=unresolved[0][1].gitMetadata.original,chain=metadataChain(original);
+   if(unresolved.some(([,row])=>row.gitMetadata.original.key!==original.key))throw capabilityError('WORKSPACE_OPERATION_UNCONFIRMED','Different Git metadata operations require their original owners');
+   for(const [key,row] of chain){
+    if(row.status==='failed-no-effect'&&!activeDispatches.has(key))continue;
+    const current=currentBinding&&JSON.stringify(gitBinding(key,row))===JSON.stringify(currentBinding);
+    if(!current&&(activeDispatches.has(key)||!row.gitMetadata.closed))throw capabilityError('EXECUTION_UNCONFIRMED','Exact metadata-only Git invocation has no persisted closure');
+   }
+   const input=retainedGitMetadataReview(original);
+   return {kind:'metadata',dispatchBinding:structuredClone(original),metadataRecovery:input,
+    closedBindings:chain.filter(([key,row])=>key!==currentBinding?.key&&['outcome-unknown','completed','reconciled'].includes(row.status)).map(([key,row])=>gitBinding(key,row)),count:chain.length};
+  },
+  closeGitMetadata(binding){
+   const row=verifiedGitDispatch(binding);if(!row.gitMetadata)return;
+   if(!activeDispatches.has(binding.key))throw capabilityError('EXECUTION_UNCONFIRMED','Only the active exact invocation can record awaited closure');
+   row.gitMetadata.closed=true;
+   try{writeJsonAtomic(dispatchFile,dispatches);}catch(error){row.gitMetadata.closed=false;throw error;}
+  },
+  gitApprovalReceipt(approvalId,request){
+   const matches=Object.entries(dispatches).filter(([,row])=>row.capability==='git.branch.switch'
+    &&row.authorization?.kind==='approval'&&row.authorization.id===approvalId);
+   if(matches.length!==1)return null;
+   const [key,row]=matches[0];if(activeDispatches.has(key))return null;
+   if(request){
+    if(request.capability!=='git.branch.switch')return null;
+    const identity=operationIdentity(request,registry.require('git.branch.switch'));
+    if(row.fingerprint!==(identity?.fingerprint??requestFingerprint(request))||row.requestId!==request.requestId
+     ||row.workspaceId!==request.workspaceId||(row.taskId??null)!==(request.taskId??null))return null;
+   }
+   if(row.status==='completed'&&row.retainedResult?.phase==='completed')return structuredClone(row.retainedResult);
+   if(row.status!=='reconciled'||row.resolution!=='owner-reviewed-no-replay'||!row.completionRequestId)return null;
+   // settleDispatch persists this exact predecessor link and successor receipt
+   // atomically. Retention of the consumed approval is not execution evidence.
+   const successors=Object.entries(dispatches).filter(([,next])=>next.capability==='git.branch.switch'
+    &&next.requestId===row.completionRequestId&&next.workspaceId===row.workspaceId&&(next.taskId??null)===(row.taskId??null));
+   if(successors.length!==1)return null;
+   const [nextKey,next]=successors[0];
+   return !activeDispatches.has(nextKey)&&next.status==='completed'&&next.authorization?.kind==='approval'
+    &&next.retainedResult?.phase==='completed'?structuredClone(next.retainedResult):null;
+  },
+  workspaceRecoveryBlocker({workspaceId,reviewedTaskId,closedGitBindings=[],currentGitBinding,overlaps=(left,right)=>left===right}) {
+   for(const binding of closedGitBindings)verifiedGitDispatch(binding);
+   if(currentGitBinding)verifiedGitDispatch(currentGitBinding);
    for(const [key,row] of Object.entries(dispatches)) {
     if(!row?.workspaceId)continue;
     const active=activeDispatches.has(key);
+    if(currentGitBinding&&key===currentGitBinding.key)continue;
+    if(closedGitBindings.some(binding=>key===binding.key)&&!active)continue;
     // Include Owner effects without Task attribution. Only the inspected Task's
     // settled uncertainty belongs to its existing exact Owner review protocol.
     const reviewed=typeof reviewedTaskId==='string'&&row.taskId===reviewedTaskId;

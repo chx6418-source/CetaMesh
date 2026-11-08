@@ -12,7 +12,7 @@
 //   显式 decide 后才执行；'allow' 直通；'deny' 拒绝。审批请求 10 分钟过期。
 // - workspace.remove 只移除登记，绝不删除用户目录。
 
-import { WorkspaceBoundaryError, isInsideRoot } from './boundary.js';
+import { WorkspaceBoundaryError, isInsideRoot, canonicalizeRoot } from './boundary.js';
 import {
   WorkspaceRegistryError,
   workspaceRegistryFile,
@@ -31,7 +31,7 @@ import {
   applyWorkspaceChanges
 } from './tools.js';
 import { createGitProduct } from './git-product.js';
-import { recoverWorkspaceImports, workspaceImportEvidence } from './transaction.js';
+import { recoverWorkspaceImports, workspaceImportEvidence, inspectWorkspaceByteTransaction } from './transaction.js';
 import { isManagedWorktree } from './managed-worktree.js';
 import { workspaceContentProof } from './handoff-facts.js';
 import { assertObservationActive } from './observation-abort.js';
@@ -39,13 +39,14 @@ import { postWriteVerificationSnapshot } from '../model/post-write-verification.
 
 const GIT_INFO_TTL_MS = 5000;
 
-export function createWorkspaceService({ stateDir, excludedRoots = [], now = () => Date.now(), audit = () => {}, getTask, listTasks } = {}) {
+export function createWorkspaceService({ stateDir, excludedRoots = [], now = () => Date.now(), audit = () => {}, getTask, listTasks, nativeExecutable } = {}) {
   if (!stateDir || typeof stateDir !== 'string') {
     throw new Error('createWorkspaceService 需要 stateDir');
   }
   const registry = createWorkspaceRegistry({ file: workspaceRegistryFile(stateDir), now });
   const recovery = new Map();
   const knownGitNoEffect = new WeakSet();
+  const gitSettlements = new WeakMap();
   // One settlement may consume this exact Core error; copied fields or reuse
   // by a later executor cannot clear that later dispatch's effect fence.
   function isKnownGitNoEffect(error) { return knownGitNoEffect.delete(error); }
@@ -217,7 +218,7 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     return result;
   }
 
-  const gitProduct = createGitProduct({ stateDir, registry, getTask, listTasks, record });
+  const gitProduct = createGitProduct({ stateDir, registry, getTask, listTasks, record, nativeExecutable });
 
   const handlers = {
     // Local read contract for startup; no Git child, file content, audit or recovery.
@@ -342,6 +343,14 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
 
     'workspace.git.overview': async p => gitProduct.overview(requireWorkspace(p)),
     'workspace.git.index.review': async p => gitProduct.reviewStaged(requireWorkspace(p), {paths: p.paths}),
+    'workspace.git.branch.review': async (p, context) => {
+      const entry = requireWorkspace(p);
+      let original;
+      if (p.mode === 'finish-prepared') original = describeGitRecoveryWorkspace(entry.id);
+      else assertGitWritable(entry);
+      return {...await gitProduct.reviewSwitch(entry, p, context), ...(original?.dispatchBinding ? {taskId:original.dispatchBinding.taskId} : {})};
+    },
+    'workspace.git.branch.switch': async () => fail('GIT_APPROVAL_REQUIRED', 'Branch switching requires once-only Capability approval'),
     ...Object.fromEntries(['stage', 'unstage', 'commit.staged'].map(action => ['workspace.git.' + action,
       async () => fail('GIT_APPROVAL_REQUIRED', 'Exact Git index mutations must use Capability Broker approval')])),
     ...Object.fromEntries([['status.page', 'status'], ['history', 'history'], ['branches', 'branches'],
@@ -478,15 +487,118 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     }
   }
 
+  // Recovery identity is available only to the exact Git descriptor. The
+  // ordinary Workspace projection remains fenced, including after restart.
+  function describeGitRecoveryWorkspace(id, {currentBinding} = {}) {
+    const entry = registry.get(id);
+    if (canonicalizeRoot(entry.root) !== entry.root) fail('WORKSPACE_RECOVERY_REQUIRED', 'Registered root changed');
+    if (pendingRecoveryState(entry) || registry.list().some(other => other.id !== id
+      && (isInsideRoot(entry.root, other.root) || isInsideRoot(other.root, entry.root))))
+      fail('WORKSPACE_RECOVERY_REQUIRED', 'Another registration or pending operation overlaps this recovery');
+    const raw = inspectWorkspaceByteTransaction(entry.root);
+    if (!raw) { assertGitWritable(entry); return {kind:'metadata',id:entry.id,name:entry.name,root:entry.root}; }
+    const binding = raw.owner?.dispatchBinding;
+    if (!raw || raw.owner.kind !== 'git-branch-switch' || raw.owner.workspaceId !== id || !binding
+      || binding.workspaceId !== id || binding.capability !== 'git.branch.switch'
+      || !['requestId','fingerprint','approvalId','attemptId'].every(key => typeof binding[key] === 'string' && binding[key].length > 0 && binding[key].length <= 240))
+      fail('WORKSPACE_RECOVERY_REQUIRED', 'Original Core dispatch binding is missing or invalid');
+    const marker = raw.completion;
+    const terminal = marker?.schema === 1 && marker.requestSha256 === raw.evidence.requestSha256
+      && JSON.stringify(marker.dispatchBinding) === JSON.stringify(binding) && marker.result?.phase === 'completed'
+      && marker.result.targetHead === raw.owner.targetHead && marker.result.targetBranch === raw.owner.targetBranch;
+    const attempts = raw.invocations;
+    if (!attempts.length || attempts.some((attempt,index) => attempt.state !== 'closed'
+      && !(index === attempts.length-1 && (currentBinding && JSON.stringify(attempt.binding)===JSON.stringify(currentBinding)
+        || terminal && JSON.stringify(marker.invocationBinding)===JSON.stringify(attempt.binding)))))
+      fail('EXECUTION_UNCONFIRMED', 'An exact Git invocation has no positive close or terminal completion proof');
+    return {kind:'raw',id: entry.id, name: entry.name, root: entry.root, dispatchBinding: structuredClone(binding),
+      closedBindings: attempts.filter(attempt=>!currentBinding||JSON.stringify(attempt.binding)!==JSON.stringify(currentBinding)).map(attempt=>attempt.binding),
+      byteTransaction: raw.evidence, terminal, completion: marker};
+  }
+  function acknowledgeGitResult(result) {
+    const held = gitSettlements.get(result);
+    if (!held) return {cleanupPending: false};
+    const settled = held.raw.settle(), transition = settled.transition;
+    if (transition?.terminal && transition.previousEvidence.requestSha256 === held.raw.evidence.requestSha256) {
+      if (transition.removed) { recovery.delete(held.entry.root); gitSettlements.delete(result); }
+      else {
+        // The journal owner positively authorized cleanup. Advance only this
+        // derived fence to its verified terminal generation, never on absence.
+        try { const batches = workspaceImportEvidence(held.entry.root); recovery.set(held.entry.root, {status:'blocked', code:'WORKSPACE_RECOVERY_REQUIRED', batches}); }
+        catch { /* Partial private cleanup remains fenced until its owner verifies it. */ }
+      }
+    }
+    const {transition: _proof, ...projection} = settled;
+    // Raw retirement owns only this exact journal obligation. Domain finally
+    // may already have retained an anchor, index lock or private index warning.
+    const resources=(result.cleanupResources??[]).filter(resource=>!(resource.kind==='workspace-byte-journal'
+      &&resource.id===held.raw.evidence.name&&resource.identity===held.raw.evidence.requestSha256));
+    for(const resource of projection.cleanupResources??[])if(!resources.some(prior=>JSON.stringify(prior)===JSON.stringify(resource)))resources.push(resource);
+    const combined={...projection,cleanupPending:projection.cleanupPending===true||resources.length>0,...(resources.length?{cleanupResources:resources}:{})};
+    if(!resources.length)delete result.cleanupResources;
+    Object.assign(result,combined);return combined;
+  }
+
   // Trusted in-process entry only. Transport approval flags cannot call this path.
-  async function validateApprovedGit({method, params = {}} = {}) {
+  function admitApprovedBranch(params, context) {
+    const entry = requireWorkspace(params);
+    if (params.mode === 'finish-prepared') {
+      const recovery=describeGitRecoveryWorkspace(entry.id);
+      if(recovery.kind==='metadata'&&!context.metadataRecovery)fail('WORKSPACE_RECOVERY_REQUIRED','Original approved metadata-only review is required');
+    } else assertGitWritable(entry);
+    if (entry.settings?.policies?.gitCommit === 'deny') fail('GIT_COMMIT_DENIED', 'Workspace policy denies Git mutations');
+    return entry;
+  }
+  async function validateApprovedGit({method, params = {}} = {}, context = {}) {
+    if (method === 'workspace.git.branch.switch') {
+      const entry = admitApprovedBranch(params,context);
+      return gitProduct.validateSwitch(entry, params, {metadataRecovery:context.metadataRecovery});
+    }
     const action = {'workspace.git.stage': 'stage', 'workspace.git.unstage': 'unstage', 'workspace.git.commit.staged': 'commit'}[method];
     if (!action) fail('METHOD_NOT_FOUND', 'Unknown exact Git index action');
     const entry = assertGitWritable(requireWorkspace(params));
     if (entry.settings?.policies?.gitCommit === 'deny') fail('GIT_COMMIT_DENIED', 'Workspace policy denies Git mutations');
     return gitProduct.validateIndexAction(entry, params, action);
   }
-  async function executeApprovedGit({ method, params = {} } = {}) {
+  async function executeApprovedGit({ method, params = {} } = {}, context = {}) {
+    if (method === 'workspace.git.branch.switch') {
+      // The domain executor owns its exact branded, effect-free preparation.
+      // Do not run a second unbranded async preparation after Broker intent.
+      let entry; const binding = context.dispatchBinding;
+      try {
+        entry = admitApprovedBranch(params,context);
+        if (!binding) fail('GIT_APPROVAL_REQUIRED', 'Core dispatch context is required');
+      } catch (error) {
+        // Only this exact new invocation is unexecuted. The inspected foreign
+        // import, prior Git journal and all derived recovery fences stay intact.
+        const refusal=Object.assign(new Error(error.message),{code:error.code??'GIT_ADMISSION_REFUSED',effectStatus:'none'});
+        knownGitNoEffect.add(refusal);throw refusal;
+      }
+      let invocation, returned;
+      try {
+        return returned = await gitProduct.switchBranch(entry, params, params.actor, {signal: context.signal, application: {
+          dispatchBinding: binding, assertAvailable: context.assertAvailable, metadataRecovery:context.metadataRecovery,
+          retainTransaction(raw) { invocation = raw; },
+          deferSettlement(result, raw) { gitSettlements.set(result, {entry, raw}); }
+        }});
+      } catch (error) {
+        if (gitProduct.isKnownBranchNoEffectError(error)) knownGitNoEffect.add(error);
+        if (error.byteTransaction || invocation) retainRecovery(entry,error);
+        throw error;
+      } finally {
+        // Domain awaits real native/Git close, including abort and every Git
+        // observation. Only this exact invocation can establish local quiescence.
+        try {
+          const raw = invocation ?? inspectWorkspaceByteTransaction(entry.root);
+          if (raw && JSON.stringify(raw.invocations.at(-1)?.binding) === JSON.stringify(binding)) {
+            raw.closeGitInvocation(binding);
+            if (returned) returned.byteTransaction = raw.evidence;
+          }
+          if (raw) retainRecovery(entry, {code:'GIT_BRANCH_SWITCH_REVIEW_REQUIRED'});
+        } catch { if (invocation) retainRecovery(entry,{code:'EXECUTION_UNCONFIRMED'}); }
+        gitInfoCache.delete(entry.id);
+      }
+    }
     const action = {'workspace.git.stage': 'stage', 'workspace.git.unstage': 'unstage', 'workspace.git.commit.staged': 'commitStaged'}[method];
     if (action) {
       const entry = assertGitWritable(requireWorkspace(params));
@@ -572,7 +684,10 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     return contentProof(assertWritable(entry), [], signal);
   }
 
-  return { execute, executeApprovedGit, validateApprovedGit, isKnownGitNoEffect, describeWorkspace, applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof, readPostWriteVerificationConfig, resolvePostWriteVerification };
+  return { execute, executeApprovedGit, validateApprovedGit, isKnownGitNoEffect, describeWorkspace, describeGitRecoveryWorkspace, acknowledgeGitResult,
+    gitOriginalBinding: result => gitSettlements.get(result)?.raw.owner.dispatchBinding,
+    gitClosedBindings: result => gitSettlements.get(result)?.raw.invocations.filter(row=>row.state==='closed').map(row=>row.binding) ?? [],
+    applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof, readPostWriteVerificationConfig, resolvePostWriteVerification };
 }
 
 export { WorkspaceBoundaryError, WorkspaceRegistryError, WorkspaceToolError };

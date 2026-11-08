@@ -51,7 +51,7 @@ try {
     window.ipc={postMessage(raw){const request=JSON.parse(raw);transport(request.method,request.params).then(result=>window.__cetameshReceive({id:request.id,ok:true,result}),error=>window.__cetameshReceive({id:request.id,ok:false,error:{code:error.code||'FIXTURE',message:error.message}}));}};
     function Harness(){const [workspaces,setWorkspaces]=useState([{id:sourceId,name:'Real Git project'}]),[activeId,setActiveId]=useState(sourceId),[approvals,setApprovals]=useState([]),[error,setError]=useState('');
       async function refresh(){const [work,review]=await Promise.all([workspaceClient.list(),approvalClient.list()]);setWorkspaces(work.workspaces);setActiveId(work.activeId||sourceId);setApprovals(review.approvals);}
-      async function decide(id,approve){setError('');try{let receipt=await approvalClient.decide(id,approve);for(let index=0;receipt.operationId&&['accepted','running'].includes(receipt.status)&&index<200;index++){await new Promise(resolve=>setTimeout(resolve,30));receipt=await approvalClient.operation(receipt.operationId);}window.lastDecision=receipt;await refresh();}catch(error){setError(error.message);window.lastDecision={status:'fixture-error',message:error.message};}}
+      async function decide(id,approve){setError('');try{let receipt=await approvalClient.decide(id,approve);for(let index=0;receipt.operationId&&['accepted','running'].includes(receipt.status)&&index<1200;index++){await new Promise(resolve=>setTimeout(resolve,30));receipt=await approvalClient.operation(receipt.operationId);}window.lastDecision=receipt;await refresh();}catch(error){setError(error.message);window.lastDecision={status:'fixture-error',message:error.message};}}
       useEffect(()=>{void refresh().catch(error=>setError(error.message));},[]);
       window.fixture={approvals,refresh,sourceId};
       return <><GitWorkspace call={productToolsClient.call} workspaces={workspaces} activeWorkspaceId={activeId} onWorkspaceChanged={refresh}/><section id="existing-approvals" aria-label="既有 Owner 审批">{approvals.map(approval=><ApprovalCard key={approval.id} approval={approval} onDecide={decide}/>)}{error&&<p role="alert">{error}</p>}</section></>;
@@ -89,10 +89,10 @@ try {
   async function until(expression, label, timeout = 15000) { const deadline = Date.now() + timeout; while (Date.now() < deadline) { if (await evaluate(expression)) return; await delay(40); } throw new Error('Timed out: ' + label + '\n' + await evaluate('document.body.innerText')); }
   const click = async text => { await until('!!window.findButton(' + JSON.stringify(text) + ')&&!window.findButton(' + JSON.stringify(text) + ').disabled', 'action available: ' + text); await evaluate('window.findButton(' + JSON.stringify(text) + ').click()'); await delay(40); };
   const input = async (selector, value) => { await evaluate('window.setControl(' + JSON.stringify(selector) + ',' + JSON.stringify(value) + ')'); await delay(40); };
-  async function reviewRequest(capability) {
+  async function reviewRequest(capability, scope = {taskId:selectedTask.id,workspaceId:workspace.id}) {
     await until('window.fixture.approvals.some(row=>row.capability===' + JSON.stringify(capability) + ')', capability + ' becomes pending');
     const row = capabilityService.broker.approvals.list().find(item => item.request.capability === capability); assert.ok(row);
-    assert.deepEqual(row.request.actor, { kind: 'owner', id: 'desktop' }); assert.equal(row.request.taskId, selectedTask.id); assert.equal(row.request.workspaceId, workspace.id); assert.equal(Object.hasOwn(row.request.input, 'taskId'), false, 'Task is server-bound outside the tool input schema');
+    assert.deepEqual(row.request.actor, { kind: 'owner', id: 'desktop' }); assert.equal(row.request.taskId, scope.taskId); assert.equal(row.request.workspaceId, scope.workspaceId); assert.equal(Object.hasOwn(row.request.input, 'taskId'), false, 'Task is server-bound outside the tool input schema');
     return row;
   }
   async function approve(row) {
@@ -129,6 +129,10 @@ try {
   assert.ok(await evaluate('document.querySelector(".git-detail")?.textContent.includes("未知 · 未提供执行者信息")'), 'missing actual executor remains explicitly unknown');
   await evaluate('document.querySelector(".cm-sheet button[aria-label=\\"关闭\\"]").click()');
   console.log('PASS production Task selection, real diff, pending branch without side effects, existing Owner approval and branch refresh');
+  await choose('切换目标分支','codex/ui-branch');await click('审查分支切换');
+  await until('document.querySelector(".git-switch-review")?.textContent.includes("GIT_WORKTREE_DIRTY")','actual dirty branch review refusal');
+  assert.equal(await evaluate('window.findButton("请求一次性切换审批").disabled'),true);assert.equal(git(project,'status','--porcelain'),initialStatus);
+  console.log('PASS production branch review displays actual canSwitch refusal without discarding dirty bytes or requesting approval');
 
   await selectTask(); await input('input[aria-label="新分支名称"]', 'codex/ui-worktree'); await click('创建 Worktree'); await click('确认创建');
   const worktreeApproval = await reviewRequest('git.worktree.create');
@@ -184,6 +188,17 @@ try {
   await until('document.body.innerText.includes("文件包含未解决的 Git 冲突")', 'actual conflict file visible'); assert.equal(await evaluate('document.querySelector("input[aria-label=\\"提交 a.txt\\"]").disabled'), true); assert.equal(fs.readFileSync(path.join(project, 'a.txt'), 'utf8'), conflicted);
   assert.equal(calls.filter(row => row.method === 'ui.approvals.decide').length, 7); assert.ok(calls.filter(row => /^ui\.workspace\.git\.(?:commit|stage|unstage|commit\.staged|branch\.create|worktree\.create)$/.test(row.method)).every(row => !Object.hasOwn(row.params, 'actor') && !Object.hasOwn(row.params, 'approved')), 'renderer never supplies identity or approval authority');
   console.log('PASS real merge conflict visibility disables commit and preserves conflict bytes; renderer identity and authority are not forged');
+  const branchProject=path.join(sandbox.root,'branch-switch-project');fs.mkdirSync(branchProject);git(branchProject,'init','-q','-b','main');git(branchProject,'config','user.name','UI switch fixture');git(branchProject,'config','user.email','switch@example.invalid');
+  fs.writeFileSync(path.join(branchProject,'same.txt'),'same tree\n');git(branchProject,'add','.');git(branchProject,'commit','-qm','same-tree baseline');git(branchProject,'branch','switch-target');
+  const {workspace:branchWorkspace}=await workspaceService.execute({method:'workspace.create',params:{root:branchProject,name:'Branch switch UI fixture'}});await workspaceService.execute({method:'workspace.open',params:{id:branchWorkspace.id}});await evaluate('window.fixture.refresh()');
+  await until('document.querySelector(".git-repository-name")?.textContent.includes("Branch switch UI fixture")','new registered branch fixture');
+  await click('Changes · 变更');await input('#git-commit-message','retain this draft');await choose('切换目标分支','switch-target');await click('审查分支切换');await until('!!document.querySelector(".git-switch-review")','actual clean switch review');
+  await click('刷新');await until('!document.body.innerText.includes("正在读取 Git 状态")','fresh generation');assert.equal(await evaluate('!!document.querySelector(".git-switch-review")'),false);
+  await click('审查分支切换');await until('!!document.querySelector(".git-switch-review")','new exact review');await click('请求一次性切换审批');const switchApproval=await reviewRequest('git.branch.switch',{taskId:undefined,workspaceId:branchWorkspace.id});assert.equal(git(branchProject,'symbolic-ref','HEAD'),'refs/heads/main');assert.equal(switchApproval.request.input.targetBranch,'refs/heads/switch-target');assert.deepEqual(switchApproval.request.input.paths,[]);
+  assert.equal(await evaluate('document.body.innerText.includes("分支切换已完成")'),false);await approve(switchApproval);await until('document.querySelector(".git-notice")?.textContent.includes("分支切换已完成")','existing approval operation polled to terminal completion');
+  await until('document.querySelector(".git-repository")?.textContent.includes("switch-target") && !!document.querySelector("#git-commit-message")','completed branch overview refresh restores draft controls');
+  assert.equal(git(branchProject,'symbolic-ref','HEAD'),'refs/heads/switch-target');assert.equal(await evaluate('document.querySelector("#git-commit-message").value'),'retain this draft');assert.equal(fs.readFileSync(path.join(project,'a.txt'),'utf8'),conflicted);
+  console.log('PASS production same-tree branch switch uses fresh scoped review and existing once approval; accepted is not complete, terminal polling refreshes and preserves draft/other conflicted Workspace');
   await closeBrowser(); await delay(750); failed = false; console.log('Git Workspace Chromium: PASS (actual Git, Core Broker and Owner approval UI; native host acceptance separate)');
 } catch (error) { console.error(JSON.stringify(calls.slice(-15).map(row=>({method:row.method,params:row.params,status:row.result?.status,error:row.error})))); console.error(error.stack); throw error; } finally {
   if (closeBrowser && socket?.readyState === WebSocket.OPEN) { try { await closeBrowser(); } catch {} await delay(1000); }

@@ -5,6 +5,7 @@ import { isInsideRoot, resolveInside } from './boundary.js';
 import { gitRun, gitStatus } from './tools.js';
 import { createGitObservations } from './git-observation.js';
 import { createGitIndexActions } from './git-index-actions.js';
+import { createGitBranchActions } from './git-branch-actions.js';
 
 const fail = (code, message, extra = {}) => { throw Object.assign(new Error(message), { code, ...extra }); };
 const samePath = (a, b) => process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b);
@@ -34,7 +35,7 @@ function enrichEntries(root, rows) {
 }
 
 /** A read projection and two trusted Broker effects; no separate task/worktree store. */
-export function createGitProduct({ stateDir, registry, getTask = () => null, listTasks = () => [], record = () => {} }) {
+export function createGitProduct({ stateDir, registry, getTask = () => null, listTasks = () => [], record = () => {}, nativeExecutable }) {
   async function overview(entry) {
     const status = await gitStatus(entry.root, { completeFiles: true });
     const taskRows = await listTasks({ workspaceId: entry.id, limit: 100 });
@@ -133,5 +134,5 @@ export function createGitProduct({ stateDir, registry, getTask = () => null, lis
     record(entry, actor, 'git.worktree.create', binding.branch);
     return { created: true, ...binding, parentWorkspaceId: entry.id, workspace: { id: workspace.id, name: workspace.name, root: workspace.root, gitWorktree: workspace.gitWorktree } };
   }
-  return { overview, create, ...createGitObservations(), ...createGitIndexActions({ record }) };
+  return { overview, create, ...createGitObservations(), ...createGitIndexActions({ record }), ...createGitBranchActions({record, nativeExecutable}) };
 }

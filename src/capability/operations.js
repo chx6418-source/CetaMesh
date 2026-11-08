@@ -3,7 +3,7 @@ import { readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { capabilityError } from './types.js';
 
 // Capability-domain operation journal; no new execution authority or transport.
-export function createApprovalOperations({ stateDir, execute, getApproval, cancelApproval = () => {}, notify = () => {} }) {
+export function createApprovalOperations({ stateDir, execute, getApproval, cancelApproval = () => {}, notify = () => {}, completedReceipt = () => null }) {
   const file = stateDir ? path.join(stateDir, 'capability', 'operations.json') : null;
   const rows = file ? readJsonFile(file, { missing: {} }) : {};
   if (!rows || typeof rows !== 'object' || Array.isArray(rows)) throw capabilityError('OPERATION_STORE_CORRUPT', 'Invalid operation journal');
@@ -37,6 +37,20 @@ export function createApprovalOperations({ stateDir, execute, getApproval, cance
   function get(id) {
     const row = Object.hasOwn(rows, id) ? rows[id] : null;
     if (!row) throw capabilityError('OPERATION_NOT_FOUND', 'Operation not found');
+    let receipt = null;
+    if (row.status === 'unknown' && !active.has(id) && row.approve) {
+      let request;
+      try { request = getApproval(row.approvalId).request; }
+      catch(error){if(error.code!=='APPROVAL_NOT_FOUND')throw error;}
+      // Only the trusted dispatch owner may attest completion without pruned
+      // approval history. No receipt leaves the original unknown row untouched.
+      receipt = completedReceipt(row.approvalId, request);
+    }
+    if (receipt) {
+      const before = structuredClone(row);
+      row.historicalStatus = 'unknown'; row.resolution = 'exact-durable-dispatch-receipt'; row.status = 'completed'; row.code = null;
+      try { save(); } catch { Object.keys(row).forEach(key=>delete row[key]); Object.assign(row,before); }
+    }
     return view(row);
   }
   function submit({ id, approve }) {

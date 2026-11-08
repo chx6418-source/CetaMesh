@@ -40,6 +40,10 @@ export function createCapabilityRegistry() {
         throw capabilityError('INVALID_CAPABILITY', 'Parallel execution requires the trusted Core Workspace read contract');
       }
       if (entries.has(id)) throw capabilityError('CAPABILITY_EXISTS', id);
+      if (definition.gitBranchApplication !== undefined && (definition.gitBranchApplication !== true
+        || id !== 'git.branch.switch' || definition.provider !== 'workspace' || definition.catalogOwner
+        || typeof definition.gitOriginalBinding !== 'function' || typeof definition.gitClosedBindings !== 'function' || typeof definition.gitMetadataOriginal !== 'function' || typeof definition.afterDurableGitResult !== 'function'))
+        throw capabilityError('INVALID_CAPABILITY', 'Git completion belongs to the exact Core Workspace descriptor');
       const risk = definition.risk ?? 'low';
       const entry = Object.freeze({
         ...definition,

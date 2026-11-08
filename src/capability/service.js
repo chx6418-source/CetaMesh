@@ -36,6 +36,7 @@ export const WORKSPACE_CAPABILITIES = Object.freeze({
   'workspace.git.overview':'git.overview','workspace.git.branch.create':'git.branch.create','workspace.git.worktree.create':'git.worktree.create',
   'workspace.git.index.review': 'git.index.review', 'workspace.git.stage': 'git.stage',
   'workspace.git.unstage': 'git.unstage', 'workspace.git.commit.staged': 'git.commit.staged',
+  'workspace.git.branch.review': 'git.branch.review', 'workspace.git.branch.switch': 'git.branch.switch',
   'workspace.test.run': 'test.run', 'workspace.create': 'workspace.create',
   'workspace.apply': 'workspace.apply'
 });
@@ -63,6 +64,14 @@ const gitIndexInput = (commit = false) => objectInput({
   ...(commit ? {message: stringField('Commit message for the exact reviewed staged objects.')} : {})
 }, ['paths', 'expectedHead', 'expectedHeadRef', 'indexIdentity', 'expectedRepositoryIdentity', 'expectedHashes', ...(commit ? ['expectedIndexEntries', 'message'] : [])]);
 const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
+  'git.branch.review': ['Review one existing local branch and its exact byte/index/HEAD switch scope.', objectInput({targetBranch:{type:'string'},mode:{type:'string',enum:['clean','finish-prepared']}},['targetBranch'])],
+  'git.branch.switch': ['Switch one exactly reviewed local branch after once-only approval; finish-prepared never republishes working files.', objectInput({
+    paths:{type:'array',items:{type:'string'},maxItems:100},targetBranch:{type:'string'},mode:{type:'string',enum:['clean','finish-prepared']},
+    expectedHead:{type:'string'},expectedHeadRef:{type:['string','null']},expectedTargetHead:{type:'string'},
+    indexIdentity:{type:['string','null']},expectedRepositoryIdentity:{type:'string'},expectedDirtyIdentity:{type:'string'},
+    expectedHashes:{type:'object',additionalProperties:{type:['string','null']}},expectedWorkingModes:{type:'object',additionalProperties:{type:['integer','null']}},
+    byteTransaction:objectInput({name:{type:'string'},sha256:{type:'string'},status:{type:'string'},requestSha256:{type:'string'}},['name','sha256','status','requestSha256'])
+  },['paths','targetBranch','mode','expectedHead','expectedHeadRef','expectedTargetHead','indexIdentity','expectedRepositoryIdentity','expectedDirtyIdentity','expectedHashes','expectedWorkingModes'])],
   'filesystem.read': ['Read a page of a file inside the authorized Workspace.', objectInput({ path: stringField('Workspace-relative file path.'),
     offset: { type: 'integer', minimum: 0 }, maxBytes: { type: 'integer', minimum: 1, maximum: 50000 },
     maxChars: { type: 'integer', minimum: 1, maximum: 50000 } }, ['path'])],
@@ -455,7 +464,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     try { taskRuntime.assertChildParentCurrent({ id: task.id, workspaceId: fence.workspaceId }); return true; }
     catch { return false; }
   }
-  const resolveWorkspace = id => workspaceService?.describeWorkspace(id);
+  const resolveWorkspace = (id, request, entry) => {
+    if (entry && ['git.branch.review','git.branch.switch'].includes(entry.id)
+      && broker.registry.require(entry.id) === entry && entry.provider === 'workspace'
+      && request?.input?.mode === 'finish-prepared') return workspaceService.describeGitRecoveryWorkspace(id);
+    return workspaceService?.describeWorkspace(id);
+  };
   const policy = createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor,
     resolveGrants: taskId => grants[taskId],
     checkOperation: (request, entry, task) => {
@@ -472,6 +486,45 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     policy,
     approval: createCapabilityApproval({ stateDir, now }), audit, stateDir
   });
+  const gitAdmissionNoEffect = new WeakSet();
+  function assertGitApplicationAvailable(request, currentGitBinding) {
+    const workspaceId = request.workspaceId;
+    let recovery = request.input.mode === 'finish-prepared' ? workspaceService.describeGitRecoveryWorkspace(workspaceId,{currentBinding:currentGitBinding}) : null;
+    if(recovery?.kind==='metadata')recovery={...recovery,...broker.gitMetadataRecovery(workspaceId,{currentBinding:currentGitBinding})};
+    if (recovery) {
+      for (const binding of recovery.closedBindings) broker.verifyGitRecoveryBinding(binding);
+      if (request.capability !== 'git.branch.review' && (request.taskId ?? null) !== recovery.dispatchBinding.taskId)
+        throw capabilityError('TASK_SCOPE_MISMATCH','Git completion must retain original Task attribution');
+    }
+    const blocker = broker.workspaceRecoveryBlocker({workspaceId, closedGitBindings: recovery?.closedBindings,
+      currentGitBinding, overlaps: workspacesOverlap});
+    if (blocker) throw capabilityError(blocker.active ? 'OPERATION_STILL_RUNNING' : 'WORKSPACE_OPERATION_UNCONFIRMED','Another Workspace effect remains unconfirmed');
+    if (broker.approvals.list().some(row => row.request?.workspaceId && row.request.requestId !== request.requestId
+      && workspacesOverlap(row.request.workspaceId, workspaceId))) throw capabilityError('WORKSPACE_APPROVAL_PENDING','Another Workspace approval must be settled first');
+    for (const row of operations.list()) {
+      if (!['accepted','running','waiting','unknown'].includes(row.status)) continue;
+      // Closed dispatch identities and durable Git completion belong to Broker,
+      // not the bounded approval-history list. Never exempt an active wrapper.
+      if (row.status === 'unknown' && (recovery?.closedBindings.some(binding=>binding.approvalId === row.approvalId)
+        || broker.gitApprovalReceipt(row.approvalId))) continue;
+      let original;
+      try { original = broker.approvals.get(row.approvalId).request; }
+      catch(error){if(error.code!=='APPROVAL_NOT_FOUND')throw error;
+        throw capabilityError('WORKSPACE_OPERATION_UNCONFIRMED','An approval operation has no retained scope or verified Git completion');}
+      if (!original?.workspaceId || !workspacesOverlap(original.workspaceId, workspaceId) || original.requestId === request.requestId) continue;
+      if (row.status === 'unknown' && (broker.approvalDispatchReviewed(row.approvalId, original)
+        || broker.gitApprovalReceipt(row.approvalId, original))) continue;
+      throw capabilityError('WORKSPACE_OPERATION_UNCONFIRMED','Another approval execution remains unconfirmed');
+    }
+    const task = request.taskId ? taskFor(request.taskId) : null;
+    const owner = taskRuntime?.activeWorkspaceOwner?.({workspaceId}) ?? taskRuntime?.activeWorkspaceReaders?.({workspaceId})?.[0];
+    if (owner || task?.currentAgent || task?.recoveryIntent || request.taskId && taskHandoffGuard(request.taskId)
+      || [...workspaceProvisioning].some(([id])=>workspacesOverlap(id,workspaceId))
+      || [...workspaceReadProvisioning].some(([id,rows])=>rows.size && workspacesOverlap(id,workspaceId))
+      || workspaceFences().some(row=>workspacesOverlap(row.workspaceId,workspaceId)))
+      throw capabilityError('TASK_WORKSPACE_BUSY','Task execution or provisioning still owns this Workspace');
+    return recovery;
+  }
   const nativeApproval = createNativeApprovalAdapter({ broker, resolveWorkspace, agentBroker, now,
     resolveTask: taskId => taskHandoffGuard(taskId) ? null : taskFor(taskId) });
   function saveGrants() {
@@ -686,7 +739,13 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       broker.register({ id, cancellationAware: concurrentRead || id === 'test.run',
         ...(concurrentRead ? { readOnly: true, parallelSafe: true, effect: 'read-only',
           cancellationMode: 'cooperative', timeoutMode: 'await-settlement' } : {}),
-        permission: ['git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS].includes(id)?'git.commit':['git.overview', 'git.index.review'].includes(id)?'git.status':id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
+        permission: ['git.branch.switch','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS].includes(id)?'git.commit':['git.branch.review','git.overview', 'git.index.review'].includes(id)?'git.status':id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
+        ...(id === 'git.branch.switch' ? {effect:'conditional-write',gitBranchApplication:true,
+          retainOperationResult: result=>result, gitOriginalBinding: result=>workspaceService.gitOriginalBinding(result),
+          gitClosedBindings: result=>workspaceService.gitClosedBindings(result),
+          gitMetadataOriginal: request=>{const recovery=broker.gitMetadataRecovery(request.workspaceId);if(recovery.count>=16)throw capabilityError('GIT_RECOVERY_LIMIT','Bounded metadata invocation chain requires Owner review');return recovery.dispatchBinding;},
+          afterDurableGitResult: result=>workspaceService.acknowledgeGitResult(result),
+          isKnownNoEffectError: error=>gitAdmissionNoEffect.delete(error)||workspaceService.isKnownGitNoEffect(error)} : id === 'git.branch.review' ? {effect:'read-only'} : {}),
         ...(GIT_INDEX_MUTATIONS.includes(id) ? {effect: 'conditional-write'} : id === 'git.index.review' ? {effect: 'read-only'} : {}),
         ...(GIT_INDEX_MUTATIONS.includes(id) ? {isKnownNoEffectError: error => workspaceService.isKnownGitNoEffect?.(error) === true} : {}),
         ...(['git.branch.create','git.worktree.create'].includes(id)?{effect:'non-idempotent',requiresTask:true}:{}),
@@ -705,8 +764,13 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         // test.run = 执行 Workspace 中可被 Agent 修改的代码：high（审批必经），
         // 不是普通 medium。Owner 直接点击"运行测试"走 executeWorkspace 的
         // approved:true（Owner 的点击本身就是显式决定，语义与既往一致）。
-        risk: ['workspace.create', 'git.commit','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS, 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
+        risk: ['git.branch.switch','workspace.create', 'git.commit','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS, 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
         async validate(request, { replay = false } = {}) {
+          if (['git.branch.review','git.branch.switch'].includes(id)) {
+            if (!['owner','agent'].includes(request.actor.kind)) throw capabilityError('EXTENSION_SCOPE_UNSUPPORTED','Branch actions require Owner or explicit Task grants');
+            const recovery=assertGitApplicationAvailable(request);
+            if (id === 'git.branch.switch') await workspaceService.validateApprovedGit({method,params:{...request.input,id:request.workspaceId}},{metadataRecovery:recovery?.metadataRecovery});
+          }
           if (GIT_INDEX_MUTATIONS.includes(id)) {
             if (request.actor.kind === 'extension') throw capabilityError('EXTENSION_SCOPE_UNSUPPORTED', 'Exact Git mutations require the Owner or an explicitly granted Task principal');
             if (!replay) await workspaceService.validateApprovedGit({method, params: {...request.input, id: request.workspaceId}});
@@ -769,6 +833,25 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         },
         execute: request => {
           const run = async () => {
+            if(id==='git.branch.review'){
+              const recovery=assertGitApplicationAvailable(request);
+              const result=await workspaceService.execute({method,params:{...request.input,id:request.workspaceId}},{signal:request.signal,metadataRecovery:recovery?.metadataRecovery});
+              return {...result,...(recovery?{taskId:recovery.dispatchBinding.taskId}:{})};
+            }
+            if (id === 'git.branch.switch') {
+              let recovery;
+              try { recovery=assertGitApplicationAvailable(request, request.gitDispatchBinding); }
+              catch(error){
+                // This predicate only reads existing owners. No new domain
+                // intent, file/index/HEAD effect or provider has been entered.
+                const refusal=capabilityError(error.code??'GIT_ADMISSION_REFUSED',error.message);refusal.effectStatus='none';
+                gitAdmissionNoEffect.add(refusal);throw refusal;
+              }
+              try{return await workspaceService.executeApprovedGit({method,params:{...request.input,id:request.workspaceId,actor:request.actor.id}},
+                {signal:request.signal,dispatchBinding:request.gitDispatchBinding,metadataRecovery:recovery?.metadataRecovery,
+                  assertAvailable:()=>assertGitApplicationAvailable(request,request.gitDispatchBinding)});
+              }finally{if(request.input.paths.length===0)broker.closeGitMetadata(request.gitDispatchBinding);}
+            }
             if (id === 'workspace.create' && journal[request.requestId]) {
               const list = await workspaceService.execute({ method: 'workspace.list' });
               const existing = list.workspaces.find(ws => path.resolve(ws.root) === path.resolve(request.input.root));
@@ -1473,6 +1556,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     }
   });
   const operations = createApprovalOperations({ stateDir, getApproval: id => broker.approvals.get(id),
+    completedReceipt: (id, request) => broker.gitApprovalReceipt(id, request),
     cancelApproval: id => broker.approvals.cancel(id, 'owner-cancelled-before-dispatch'),
     execute: (params, context) => decideApproval(params, context), notify: onOperation });
   function unresolvedApprovalOperations(taskId) {

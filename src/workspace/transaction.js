@@ -382,6 +382,29 @@ function readByteBatch(root, journalDir, name) {
     if (seen.has(key) || [...seen].some(previous => key.startsWith(previous + '/') || previous.startsWith(key + '/'))) throw byteFailure('IMPORT_JOURNAL_INVALID', 'Overlapping raw-byte request rows');
     seen.add(key);
   }
+  if (manifest.gitCompletion !== undefined) {
+    const completion = manifest.gitCompletion, value = completion?.result;
+    if (manifest.owner?.kind !== 'git-branch-switch' || !manifest.owner.dispatchBinding || completion?.schema !== 1
+      || completion.requestSha256 !== manifest.requestSha256 || JSON.stringify(completion.dispatchBinding) !== JSON.stringify(manifest.owner.dispatchBinding)
+      || value?.phase !== 'completed' || value.targetHead !== manifest.owner.targetHead || value.targetBranch !== manifest.owner.targetBranch
+      || !byteHash(value.indexIdentity) || Buffer.byteLength(JSON.stringify(completion)) > 32768)
+      throw byteFailure('IMPORT_JOURNAL_INVALID', 'Invalid terminal Git completion marker');
+  }
+  if (manifest.gitInvocations !== undefined) {
+    const attempts = manifest.gitInvocations, seen = new Set();
+    if (!manifest.owner?.dispatchBinding || !Array.isArray(attempts) || !attempts.length || attempts.length > 16)
+      throw byteFailure('IMPORT_JOURNAL_INVALID', 'Invalid bounded Git invocation chain');
+    for (const attempt of attempts) {
+      const binding = attempt?.binding;
+      if (!['started','closed'].includes(attempt?.state) || !binding || binding.capability !== 'git.branch.switch'
+        || binding.workspaceId !== manifest.owner.workspaceId || binding.taskId !== manifest.owner.dispatchBinding.taskId
+        || !['key','requestId','approvalId','attemptId'].every(key=>typeof binding[key]==='string'&&binding[key].length>0&&binding[key].length<=240)
+        || !byteHash(binding.fingerprint) || seen.has(binding.attemptId)) throw byteFailure('IMPORT_JOURNAL_INVALID', 'Unbound Git invocation chain entry');
+      seen.add(binding.attemptId);
+    }
+    if (JSON.stringify(attempts[0].binding) !== JSON.stringify(manifest.owner.dispatchBinding))
+      throw byteFailure('IMPORT_JOURNAL_INVALID', 'Git invocation chain lost its original owner');
+  }
   if (retirement) {
     if (!['completed', 'completed-no-effect'].includes(manifest.status) || fs.existsSync(path.join(parent, 'batch-' + nonce))) throw byteFailure('IMPORT_JOURNAL_INVALID', 'Invalid raw-byte retirement state');
     assertByteRoot(root, request.rootNode);
@@ -392,10 +415,14 @@ function readByteBatch(root, journalDir, name) {
 }
 const byteEvidence = (dir, manifest) => ({name: path.basename(dir), sha256: digest(JSON.stringify(manifest)), status: manifest.status, requestSha256: manifest.requestSha256});
 function byteSettlement(root, batch, result) {
-  const {dir, parent, manifest} = batch, originalIdentity = digest(JSON.stringify(manifest)); let settled = false;
-  const assertApplied = () => {
+  const {dir, parent, manifest} = batch; let originalIdentity = digest(JSON.stringify(manifest)), settled = false;
+  const assertGeneration = () => {
     if (digest(JSON.stringify(JSON.parse(readByteArtifact(dir, 'manifest.json', 512 * 1024).toString('utf8')))) !== originalIdentity) throw byteFailure('WORKSPACE_RECOVERY_REQUIRED', 'The original raw-byte journal generation changed');
     assertByteRoot(root, manifest.request.rootNode);
+  };
+  const persistGeneration = () => { persistByteManifest(dir, manifest); originalIdentity = digest(JSON.stringify(manifest)); };
+  const assertApplied = () => {
+    assertGeneration();
     const current = readWorkspaceByteReceipt(dir, manifest.request, manifest.requestSha256);
     if (current.receiptSha256 !== result.receiptSha256 || current.receipt.status !== 'completed') throw byteFailure('WORKSPACE_RECOVERY_REQUIRED', 'The terminal raw-byte receipt changed');
     for (const row of current.receipt.rows) {
@@ -404,13 +431,45 @@ function byteSettlement(root, batch, result) {
     }
   };
   assertApplied();
-  return {owner: structuredClone(manifest.owner), evidence: batch.evidence, assertApplied,
+  return {owner: structuredClone(manifest.owner), get evidence() { return byteEvidence(dir, manifest); },
+    get invocations() { return structuredClone(manifest.gitInvocations ?? []); },
+    completion: manifest.gitCompletion ? structuredClone(manifest.gitCompletion) : null, receiptSha256: result.receiptSha256, assertApplied,
+    beginGitInvocation(binding) {
+      assertApplied(); const attempts = manifest.gitInvocations;
+      const terminal = manifest.gitCompletion;
+      if (!attempts?.length || attempts.length >= 16 || attempts.some((row,index)=>row.state!=='closed'
+        && !(index===attempts.length-1&&terminal?.result?.phase==='completed'&&JSON.stringify(terminal.invocationBinding)===JSON.stringify(row.binding)))
+        || attempts.some(row=>row.binding.attemptId===binding.attemptId))
+        throw byteFailure('EXECUTION_UNCONFIRMED', 'Previous Git invocations must be exactly closed before a bounded new attempt');
+      manifest.gitInvocations = [...attempts.map(row=>({...row,state:'closed'})),{binding:structuredClone(binding),state:'started'}];
+      delete manifest.gitCompletion; persistGeneration();
+    },
+    closeGitInvocation(binding) {
+      // Closure proves only the exact awaited invocation ended; it does not
+      // certify current working bytes, recover files, or grant cleanup.
+      assertGeneration(); const attempts=manifest.gitInvocations, last=attempts?.at(-1);
+      if (!last || JSON.stringify(last.binding)!==JSON.stringify(binding))
+        throw byteFailure('EXECUTION_UNCONFIRMED', 'Only the exact latest Git invocation can publish closure');
+      last.state='closed'; persistGeneration();
+    },
+    recordGitCompletion(completion) {
+      assertApplied();
+      if (manifest.owner?.kind !== 'git-branch-switch' || !manifest.owner.dispatchBinding
+        || completion?.schema !== 1 || completion.requestSha256 !== manifest.requestSha256
+        || completion.result?.phase !== 'completed' || Buffer.byteLength(JSON.stringify(completion)) > 32768)
+        throw byteFailure('WORKSPACE_RECOVERY_REQUIRED', 'Invalid Git completion receipt');
+      // Applied remains recovery-fenced until the existing Broker acknowledges
+      // its durable result. Startup must not mistake this marker for cleanup permission.
+      manifest.gitCompletion = structuredClone(completion); persistGeneration();
+    },
     settle() {
       if (settled) return {cleanupPending: false};
+      const previousEvidence = byteEvidence(dir, manifest); let terminal = false;
       try {
         assertApplied(); manifest.status = 'completed'; persistByteManifest(dir, manifest);
-        removeByteBatch(dir, parent, manifest); settled = true; return {cleanupPending: false};
-      } catch { return {cleanupPending: true, cleanupResources: [{kind: 'workspace-byte-journal', id: path.basename(dir), identity: manifest.requestSha256}]}; }
+        terminal = true; removeByteBatch(dir, parent, manifest); settled = true;
+        return {cleanupPending: false, transition: {previousEvidence, terminal: true, removed: true}};
+      } catch { return {cleanupPending: true, ...(terminal ? {transition: {previousEvidence, terminal: true, removed: false}} : {}), cleanupResources: [{kind: 'workspace-byte-journal', id: path.basename(dir), identity: manifest.requestSha256}]}; }
     }};
 }
 
@@ -428,6 +487,8 @@ export function inspectWorkspaceByteTransaction(root, {journalDir = workspaceJou
     || readByteArtifact(dir, 'native.claimed', 64).toString('utf8') !== manifest.requestSha256) throw byteFailure('IMPORT_JOURNAL_INVALID', 'Original native request or claim changed');
   const result = readWorkspaceByteReceipt(dir, manifest.request, manifest.requestSha256);
   if (result.receipt.status !== 'completed' || manifest.receiptSha256 !== null && result.receiptSha256 !== manifest.receiptSha256) throw byteFailure('WORKSPACE_RECOVERY_REQUIRED', 'Native file completion remains unconfirmed');
+  if (manifest.gitCompletion && manifest.gitCompletion.result.nativeReceiptSha256 !== result.receiptSha256)
+    throw byteFailure('IMPORT_JOURNAL_INVALID', 'Git completion refers to a different native receipt');
   for (const [index, row] of manifest.request.rows.entries()) if (row.originalHash !== null
     && digest(readByteArtifact(dir, index + '.preimage', 10 * 1024 * 1024)) !== row.originalHash) throw byteFailure('IMPORT_JOURNAL_INVALID', 'Original raw preimage cannot be verified');
   return byteSettlement(root, batch, result);
@@ -476,7 +537,7 @@ export async function applyWorkspaceByteTransaction(rootReal, changes, {journalD
   const request = {schema: WORKSPACE_BYTE_REQUEST, nonce, binding, root: rootReal, rootNode, rows};
   const requestBytes = Buffer.from(JSON.stringify(request));
   manifest = {schemaVersion: 2, kind: BYTE_KIND, root: rootReal, status: 'prepared', request, requestSha256: digest(requestBytes), owner,
-    journalNode, receiptSha256: null};
+    journalNode, receiptSha256: null, ...(owner?.dispatchBinding ? {gitInvocations:[{binding:structuredClone(owner.dispatchBinding),state:'started'}]} : {})};
     persistByteManifest(dir, manifest);
     payloads.forEach((bytes, index) => { if (bytes) writeByteArtifact(path.join(dir, index + '.staged'), bytes); });
     writeByteArtifact(path.join(dir, 'request.json'), requestBytes);
@@ -487,7 +548,7 @@ export async function applyWorkspaceByteTransaction(rootReal, changes, {journalD
     manifest.status = 'applied'; manifest.receiptSha256 = result.receiptSha256; persistByteManifest(dir, manifest);
     const settlement = byteSettlement(rootReal, {dir, parent, manifest, evidence: evidence()}, result);
     return {changes: rows.map(row => ({path: row.path, action: row.action, originalHash: row.originalHash, hash: row.stagedHash})),
-      ...settlement, cancelled: result.cancelled};
+      ...settlement, get evidence() { return settlement.evidence; }, get invocations() { return settlement.invocations; }, cancelled: result.cancelled};
   } catch (error) {
     const none = !launched || error.effectStatus === 'none';
     if (manifest) {

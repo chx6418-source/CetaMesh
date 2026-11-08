@@ -39,6 +39,7 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-git-branch-core.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 600000, note: 'Ordinary Core approved branch switch, exact prior-dispatch recovery and durable raw-byte settlement without replay' },
   'test-git-branch-actions.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 600000, note: 'Actual clean branch switch, fixed physical worktree HEAD, current ref transactions and Windows cleanup recovery' },
   'test-git-branch-byte-preservation.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 180000, note: 'Actual branch publication preserves final-gap ignored additions and Git-canonical-equivalent raw edits' },
   'test-git-branch-conversion.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 180000, note: 'Actual protected branch publication preserves native LF/CRLF/UTF16 and target attribute conversions' },

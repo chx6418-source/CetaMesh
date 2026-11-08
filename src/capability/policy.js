@@ -84,7 +84,7 @@ export function createCapabilityPolicy({resolveWorkspace,resolveTask,resolveGran
   if(entry.workspace){
    if(!request.workspaceId)throw capabilityError('WORKSPACE_REQUIRED','Explicit workspace required');
    if(actor.kind!=='owner'&&!actor.grants?.workspaceIds?.includes(request.workspaceId))throw capabilityError('WORKSPACE_NOT_AUTHORIZED',request.workspaceId);
-   if(!resolveWorkspace?.(request.workspaceId))throw capabilityError('WORKSPACE_NOT_FOUND',request.workspaceId);
+   if(!resolveWorkspace?.(request.workspaceId,request,entry))throw capabilityError('WORKSPACE_NOT_FOUND',request.workspaceId);
   }
   if(actor.kind==='extension'&&entry.id==='network'){
    const url=new URL(String(request.input.url??''));

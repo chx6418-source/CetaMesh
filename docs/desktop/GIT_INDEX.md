@@ -59,3 +59,75 @@ Cleanup cannot replace an established result. A known success may carry
 `cleanupPending` and bounded owned-resource evidence. An existing unknown error
 keeps its code, effect status, SHA and ref. Deferred cleanup evidence is not
 permission to delete external locks or directories.
+
+## Branch switching and exact completion
+
+`workspace.git.branch.review` / `git.branch.review` returns the target local ref,
+target commit, exact changed paths, current raw hashes and modes, index/HEAD and
+repository identities, and `canSwitch` with a refusal reason. The corresponding
+`branch.switch` action always requires a fresh high-risk once-only approval.
+Renderer approval flags, default Agent grants and generic Plugin declarations do
+not authorize it. The Git Workspace uses the existing approval operations and
+refreshes on a terminal result; accepted/running requests are not completion.
+
+The existing Workspace raw transaction owns native byte publication. Its immutable
+owner binds the original Core request, optional Task/operation, consumed approval,
+fingerprint and invocation identity before source writes. After a retained file
+phase, `finish-prepared` reviews the same native receipt, original preimages,
+current postimages and physical repository ownership. It never republishes the
+files. Only the exact original index or already prepared target index is eligible;
+HEAD still uses native physical-ref CAS after fresh checks.
+
+The same raw manifest holds at most 16 exact invocation records. A continuation
+durably appends `started` before any new index/HEAD effect. Workspace writes
+`closed` only after awaiting that domain invocation, its actual Git/native child
+close events and its final cleanup block. Older closed records never prove a
+newer invocation ended. Raw-only incomplete records, legacy unbound records,
+mixed/corrupt evidence and any latest unclosed invocation remain
+`EXECUTION_UNCONFIRMED` or recovery-required. An exact terminal Git marker also
+proves that invocation has no remaining effects. Process IDs, matching HEAD,
+timeouts and missing in-memory Sessions do not establish closure. These records
+support reconstructed-Core recovery after a proven closed invocation, not arbitrary
+abrupt-crash recovery or power-loss durability claims.
+
+The original raw journal remains applied/fenced until Broker has durably retained
+the bounded completion result, including Owner requests without a Task. That same
+dispatch save reconciles only inactive, exactly bound closed invocations from the
+raw chain, retaining historical unknown status and the new completion request.
+Unrelated effects, approvals, overlapping registrations and Task/provisioning
+ownership continue to block admission. No Task-wide acknowledgement is used.
+
+After durable completion, an opaque Workspace result handle acknowledges the
+journal. Only its affirmative terminal transition may retire the derived fence.
+Private cleanup failures remain known results with `cleanupPending`; the existing
+journal recovery retries only cleanup. Raw journal retirement clears only its own
+exact obligation; retained routing-anchor, index-lock and private-index resources
+continue to report pending cleanup in the completion result. A failed approval-wrapper save can settle
+from its exact durable Broker receipt, without repeating Git or needing an already
+retired raw journal. Added manifest fields remain within schema v2; incomplete
+records keep the existing old-reader refusal and native request/receipt digests.
+
+A zero-file tree delta creates no native file transaction and leaves the normal
+index bytes unchanged. Its existing Broker dispatch row retains the exact
+original approval binding and invocation closure instead. Before the first effect,
+the dispatch owner also retains a bounded original Git review proof after verifying
+consumed approval and exact request/operation fingerprints. The proof contains only
+allowlisted Git facts, original dispatch identity and their scope digest, without
+reason, model context or approval history. Ordinary approval pruning cannot remove
+these recovery facts. Legacy records require the exact consumed approval while it
+remains available; missing legacy proof is an explicit refusal. The ordinary UI
+approval-operation wrapper uses verified closed dispatch identities before reading
+pruned approval history. After completion, the Broker's unique approval-bound
+receipt or explicit same-Task/same-Workspace completed successor can reconcile the
+old inactive unknown wrapper. Missing, ambiguous, active or unrelated evidence
+retains the refusal; inspection never dispatches another operation. Fresh completion
+requires that original approved zero-path scope, the same repository and index,
+and the original or target physical HEAD. A bounded chain of closed dispatches
+supports repeated failures and reconstructed-Core completion; a newer unclosed
+intent blocks it. No empty native file set, fabricated receipt or separate Git
+store is used. Related logical Task operations retain their original Task scope.
+
+`test-git-branch-core` uses real isolated Core, native byte publication and Git with
+controlled failures. `test-git-workspace-ui` exercises production Chromium UI and
+the existing approval panel. Neither substitutes for installed WebView2, external
+accounts, arbitrary process-crash or release acceptance.

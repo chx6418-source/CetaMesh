@@ -1696,6 +1696,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.workspace.git.overview':p=>workspace('workspace.git.overview',{id:idParam(p)}),
     'ui.workspace.git.index.review': p => workspace('workspace.git.index.review', {id: idParam(p), paths: p.paths}),
+    'ui.workspace.git.branch.review': p => services.capabilityService.executeWorkspace({method:'workspace.git.branch.review',params:{id:idParam(p),targetBranch:p.targetBranch,mode:p.mode??'clean'}}),
     ...Object.fromEntries(['status.page', 'history', 'branches', 'commit.detail', 'preview', 'review'].map(action => [
       'ui.workspace.git.' + action, async (p, { signal } = {}) => {
         if (!services.workspaceService) throw uiError('SERVICE_UNAVAILABLE', 'Workspace is unavailable');
@@ -1706,7 +1707,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       }
     ])),
     'ui.workspace.git.diff':p=>workspace('workspace.git.diff',{id:idParam(p),cached:p.cached===true,...(p.path!==undefined?{path:p.path}:{})}),
-    ...Object.fromEntries(['commit','branch.create','worktree.create','stage','unstage','commit.staged'].map(action=>['ui.workspace.git.'+action,async(p,{signal}={})=>{
+    ...Object.fromEntries(['commit','branch.create','branch.switch','worktree.create','stage','unstage','commit.staged'].map(action=>['ui.workspace.git.'+action,async(p,{signal}={})=>{
       const {id,taskId,operationId,...input}=p;const capability='git.'+action;
       const result=await services.capabilityService.broker.execute({capability,actor:OWNER_ACTOR,approved:false,workspaceId:id,taskId,
         ...(operationId?{operationId}:{}),input,reason:'Owner requested scoped Git action; await explicit approval'},{signal});

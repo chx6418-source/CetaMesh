@@ -262,9 +262,20 @@ export function createGitBranchActions({ record = () => {}, nativeExecutable } =
     if (owner.oldRef && await targetHead(meta, owner.oldRef, signal) !== owner.oldHead) fail('GIT_HEAD_CHANGED', 'The original source branch changed after its file phase; preserve both branches for review');
     return retained;
   }
-  async function reviewSwitch(entry, { targetBranch, mode = 'clean' } = {}, { signal } = {}) {
+  async function assertMetadataRecovery(meta, original, branch, signal) {
+    if (!original || original.paths?.length !== 0 || original.targetBranch !== branch
+      || meta.repositoryIdentity !== original.expectedRepositoryIdentity || meta.index.identity !== original.indexIdentity
+      || !(meta.headSha===original.expectedHead&&meta.headRef===original.expectedHeadRef
+        || meta.headSha===original.expectedTargetHead&&meta.headRef===original.targetBranch)
+      || (await changedPaths(meta, original.expectedTargetHead, signal)).length
+      || await targetHead(meta,original.targetBranch,signal)!==original.expectedTargetHead
+      || original.expectedHeadRef&&await targetHead(meta,original.expectedHeadRef,signal)!==original.expectedHead)
+      fail('GIT_METADATA_RECOVERY_CHANGED','Original zero-file Git scope, repository, index or physical HEAD changed');
+  }
+  async function reviewSwitch(entry, { targetBranch, mode = 'clean' } = {}, { signal, metadataRecovery } = {}) {
     if (!['clean', 'finish-prepared'].includes(mode)) fail('GIT_SWITCH_REVIEW_REQUIRED', 'Select a clean switch or a fresh reviewed prepared-state completion');
     active(signal); const branch = branchOf(targetBranch), source = await observeGitMutation(entry, []); active(signal);
+    if(metadataRecovery)await assertMetadataRecovery(source,metadataRecovery,branch,signal);
     if (!source.headSha) fail('GIT_UNBORN_SWITCH_UNSUPPORTED', 'Create the first reviewed commit before using the clean-switch flow');
     await protocol(source, signal); await assertSourceHead(source, signal);
     const target = await targetHead(source, branch, signal), retained = await retainedPhase(entry, source, branch, target, signal);
@@ -276,9 +287,10 @@ export function createGitBranchActions({ record = () => {}, nativeExecutable } =
     return { workspaceId: entry.id, paths, ...binding(meta), targetBranch: branch, expectedTargetHead: target, mode, canSwitch: blocker === null, blocker,
       dirtyEntries: meta.status.entries.slice(0, 100), dirtyEntriesTruncated: meta.status.entries.length > 100, ...(retained ? {byteTransaction: retained.evidence} : {}) };
   }
-  async function prepareSwitch(entry, input, signal) {
+  async function prepareSwitch(entry, input, signal, metadataRecovery) {
     const request = requireRequest(input); active(signal);
     const before = await observeGitMutation(entry, request.paths); assertBinding(before, request); await protocol(before, signal); await assertSourceHead(before, signal);
+    if(metadataRecovery)await assertMetadataRecovery(before,metadataRecovery,request.targetBranch,signal);
     if (await targetHead(before, request.targetBranch, signal) !== request.expectedTargetHead) fail('GIT_BRANCH_CHANGED', 'The reviewed target branch moved; review its new contents before switching');
     const retained = await retainedPhase(entry, before, request.targetBranch, request.expectedTargetHead, signal);
     if (JSON.stringify(retained?.evidence) !== JSON.stringify(request.byteTransaction)) fail('WORKSPACE_RECOVERY_REQUIRED', 'The retained file phase changed since approval review');
@@ -288,28 +300,42 @@ export function createGitBranchActions({ record = () => {}, nativeExecutable } =
     assertNoLocks(before); active(signal);
     return {request, before, retained};
   }
-  async function switchBranch(entry, input, actor, { signal } = {}) {
+  async function switchBranch(entry, input, actor, { signal, application } = {}) {
     let prepared;
-    try { prepared = await prepareSwitch(entry, input, signal); }
+    try { prepared = await prepareSwitch(entry, input, signal, application?.metadataRecovery); }
     catch (error) { throw noEffect(error); }
     const {request, before, retained} = prepared;
-    const evidence = { oldHead: before.headSha, oldRef: before.headRef, targetHead: request.expectedTargetHead, targetBranch: request.targetBranch, paths: request.paths };
+    try { application?.assertAvailable?.(); } catch (error) { throw noEffect(error); }
+    if (application && retained) { retained.beginGitInvocation(application.dispatchBinding); application.retainTransaction(retained); }
+    const evidence = { oldHead: before.headSha, oldRef: before.headRef, targetHead: request.expectedTargetHead, targetBranch: request.targetBranch, paths: request.paths,
+      ...(application ? {repositoryIdentity: before.repositoryIdentity, recoveryIdentity: before.recoveryIdentity} : {}) };
     let phase = 'reviewed', attempted = false, anchor, indexContext, indexLock, result, outcomeError, byteTransaction = retained;
+    const complete = value => {
+      if (!application || !byteTransaction) { const {transition: _transition, ...settled} = byteTransaction?.settle() ?? {}; return {...value, ...settled}; }
+      value = {...value, nativeReceiptSha256: byteTransaction.receiptSha256};
+      byteTransaction.recordGitCompletion({schema: 1, requestSha256: byteTransaction.evidence.requestSha256,
+        dispatchBinding: byteTransaction.owner.dispatchBinding, invocationBinding: application.dispatchBinding, result: value});
+      const completed = {...value, byteTransaction: byteTransaction.evidence, cleanupPending: true};
+      application.deferSettlement(completed, byteTransaction);
+      return completed;
+    };
     if (byteTransaction) evidence.byteTransaction = byteTransaction.evidence;
     try {
       if (before.headRef === request.targetBranch && before.headSha === request.expectedTargetHead) {
         byteTransaction?.assertApplied(); active(signal);
-        return result = { ...evidence, switched: false, reason: 'already-current', phase: 'completed', indexIdentity: before.index.identity, ...(byteTransaction?.settle() ?? {}) };
+        return result = complete({ ...evidence, switched: false, reason: 'already-current', phase: 'completed', indexIdentity: before.index.identity });
       }
-      if (request.mode === 'clean' || retained && !await indexMatches(before, request.expectedTargetHead, signal)) {
+      if (request.mode === 'clean' && request.paths.length || retained && !await indexMatches(before, request.expectedTargetHead, signal)) {
         indexLock = acquireGitMutationIndexLock(before); indexContext = temporaryIndex();
         const changes = await prepareTargetBytes(before, request.expectedTargetHead, request.paths, indexContext, signal);
         const final = await observeGitMutation(entry, request.paths); assertBinding(final, request, before); assertNoLocks(final, indexLock); indexContext.assertOwned(); active(signal);
         if (!retained && changes.length) {
           phase = 'tree-pending'; attempted = true;
-          byteTransaction = await applyWorkspaceByteTransaction(before.root, changes, {nativeExecutable, signal,
-            owner: {kind: 'git-branch-switch', workspaceId: entry.id, repositoryIdentity: before.repositoryIdentity, recoveryIdentity: before.recoveryIdentity, initialIndexIdentity: before.index.identity, ...evidence}});
+          byteTransaction = await applyWorkspaceByteTransaction(before.root, changes, {nativeExecutable, signal, beforeCommit: application?.assertAvailable,
+            owner: {kind: 'git-branch-switch', workspaceId: entry.id, repositoryIdentity: before.repositoryIdentity, recoveryIdentity: before.recoveryIdentity, initialIndexIdentity: before.index.identity, ...evidence,
+              ...(application ? {dispatchBinding: application.dispatchBinding} : {})}});
           evidence.byteTransaction = byteTransaction.evidence;
+          application?.retainTransaction(byteTransaction);
           byteTransaction.assertApplied(); active(signal);
         }
         phase = 'index-pending';
@@ -320,7 +346,7 @@ export function createGitBranchActions({ record = () => {}, nativeExecutable } =
         const candidate = readGitMutationIndex(indexContext.indexFile), last = await observeGitMutation(entry, request.paths);
         assertBinding(last, { paths: request.paths, ...binding(filesWritten) }, filesWritten); indexContext.assertOwned(); indexLock.assertOwned(); before.assertRepositoryUnchanged();
         if (readGitMutationIndex(indexContext.indexFile).identity !== candidate.identity) fail('GIT_INDEX_CHANGED', 'The prepared private index changed before normal-index replacement');
-        byteTransaction?.assertApplied(); active(signal); attempted = true; indexLock.replace(candidate.bytes);
+        byteTransaction?.assertApplied(); active(signal); application?.assertAvailable?.(); attempted = true; indexLock.replace(candidate.bytes);
       }
       phase = 'tree-written';
       const prepared = await observeGitMutation(entry, request.paths);
@@ -331,7 +357,7 @@ export function createGitBranchActions({ record = () => {}, nativeExecutable } =
       anchor = routingAnchor(before);
       const final = await observeGitMutation(entry, request.paths); assertBinding(final, { paths: request.paths, ...binding(prepared) }, prepared); assertNoLocks(final); anchor.assertOwned(); active(signal);
       const transaction = `start\noption no-deref\nverify ${request.targetBranch} ${request.expectedTargetHead}\noption no-deref\nsymref-update HEAD ${request.targetBranch} ${before.headRef ? 'ref ' + before.headRef : 'oid ' + before.headSha}\nprepare\ncommit\n`;
-      phase = 'head-pending'; attempted = true;
+      application?.assertAvailable?.(); phase = 'head-pending'; attempted = true;
       await gitRun(before.root, ['update-ref', '-m', 'CetaMesh approved branch switch', '--stdin'], { signal, input: transaction, repository: anchor.repository, referenceBackend: { format: before.refFormat, root: before.commonDir } });
       phase = 'head-written'; record(entry, actor ?? 'capability-broker', 'git.branch.switch', JSON.stringify({ ...evidence, phase }));
       const after = await observeGitMutation(entry, request.paths);
@@ -339,7 +365,7 @@ export function createGitBranchActions({ record = () => {}, nativeExecutable } =
       if (after.status.entries.length || await targetHead(after, request.targetBranch, signal) !== request.expectedTargetHead || await occupied(after, request.targetBranch, signal)) fail('GIT_WORKTREE_CHANGED', 'Branch state changed while completion was being confirmed');
       if (before.headRef && await targetHead(after, before.headRef, signal) !== before.headSha) fail('GIT_HEAD_CHANGED', 'The previous source branch changed during the switch');
       byteTransaction?.assertApplied(); active(signal); phase = 'completed';
-      return result = { ...evidence, switched: true, phase, indexIdentity: after.index.identity, ...(byteTransaction?.settle() ?? {}) };
+      return result = complete({ ...evidence, switched: true, phase, indexIdentity: after.index.identity });
     } catch (error) {
       if ((attempted || byteTransaction) && !(phase === 'tree-pending' && !byteTransaction && error.effectStatus === 'none')) {
         let observed; try { const meta = await observeGitMutation(entry, request.paths); observed = { head: meta.headSha, headRef: meta.headRef, indexIdentity: meta.index.identity, repositoryIdentity: meta.repositoryIdentity, hashes: hashes(meta) }; } catch (failure) { observed = { errorCode: typeof failure.code === 'string' ? failure.code : 'GIT_OBSERVATION_FAILED' }; }
@@ -360,5 +386,5 @@ export function createGitBranchActions({ record = () => {}, nativeExecutable } =
       }
     }
   }
-  return { reviewSwitch, switchBranch, isKnownBranchNoEffectError: error => knownNoEffect.has(error), async validateSwitch(entry, input, {signal} = {}) { await prepareSwitch(entry, input, signal); return {valid: true}; } };
+  return { reviewSwitch, switchBranch, isKnownBranchNoEffectError: error => knownNoEffect.has(error), async validateSwitch(entry, input, {signal,metadataRecovery} = {}) { await prepareSwitch(entry, input, signal,metadataRecovery); return {valid: true}; } };
 }
