@@ -263,12 +263,34 @@ export interface DshConfiguration {
   source: string; loadError: string | null; configFile: string | null; pendingConfigFile?: string | null; dataRoot: string | null; homeSource: string;
   active: DshSelection; pending: DshSelection | null;
 }
+export interface LifecycleCall {
+  capability: string; generation: number | null; current: boolean;
+  status: 'completed' | 'failed' | 'pending' | 'cancelled' | 'unknown';
+  startedAt: number | null; completedAt: number | null; code: string | null; effectStatus: string | null;
+}
+export interface PluginAvailability {
+  installed: boolean; enabled: boolean; loaded: boolean | null; blockedReason: string | null;
+  runtime: { state: string; generation: number | null };
+  connection: string; authentication: string; discoveredCapabilities: string[];
+  lastCall: LifecycleCall | null; error: { code: string; stage: string } | null;
+}
+export interface McpServer {
+  id: string; name: string; status: string; enabled: boolean; running: boolean; available: boolean;
+  toolCallable: boolean; eligible: boolean; configured: boolean; source: string; toolCount: number | null;
+  discoveredToolCount: number; transport: string; reason: string | null; lastError: string | null;
+  runtimeStatus?: string; generation?: number | null;
+  configurationRevision?: string | null; liveConfigurationRevision?: string | null; configurationCurrent?: boolean | null;
+  connection?: string; authentication?: string;
+  discovery?: { status: string; toolCount: number | null }; readiness?: { state: string; evidence: string };
+  lastCall?: LifecycleCall | null;
+}
 export interface Plugin {
   id: string; name: string; summary: string; description: string; developer: string; version: string;
   status: string; category: string; kind: string; featured: boolean; installed: boolean; enabled: boolean;
   available: boolean; configured: boolean; eligible: boolean; reason: string | null; lastError: string | null;
   icon: string; permissions: string[]; changelog: string[]; compatibility: { minimum: string | null; maximum: string | null };
   screenshotCount: number; warning: string | null;
+  availability?: PluginAvailability;
 }
 export type ApprovalStatus = 'pending' | 'approved' | 'rejected' | 'expired' | 'consumed';
 export interface Approval {
@@ -700,7 +722,7 @@ export const extensionSettingsClient = {
     uiCall<ExtensionSettingsSnapshot>('ui.extensions.settings.update', { id, values })
 };export const pluginClient = {
   catalog: (query = '', category = '', view = 'all') => uiCall<{ available: boolean; configured: boolean; offline: boolean; reason: string | null; plugins: Plugin[] }>('ui.plugins.catalog', { query, category, view }),
-  status: () => uiCall<{ catalogAvailable: boolean; configured: boolean; offline: boolean; developerMode: boolean; plugins: Plugin[]; installed: Plugin[]; integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null }[]; mcp: { id: string; name: string; status: string; enabled: boolean; running: boolean; available: boolean; toolCallable: boolean; eligible: boolean; configured: boolean; source: string; toolCount: number | null; discoveredToolCount: number; transport: string; reason: string | null; lastError: string | null }[] }>('ui.plugins.status', {}),
+  status: () => uiCall<{ catalogAvailable: boolean; configured: boolean; offline: boolean; developerMode: boolean; plugins: Plugin[]; installed: Plugin[]; integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null }[]; mcp: McpServer[] }>('ui.plugins.status', {}),
   detail: (id: string) => uiCall<{ available: boolean; offline: boolean; plugin: Plugin | null }>('ui.plugins.detail', { id }),
   refresh: () => uiCall<Record<string, unknown>>('ui.plugins.refresh', {}),
   stage: (id: string) => uiCall<{ stageId: string; plugin: Plugin; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string }>('ui.plugins.stage', { id }),
@@ -715,7 +737,7 @@ export const extensionSettingsClient = {
   manageIntegration: (id: string, action: 'enable' | 'disable') => uiCall<Record<string, unknown>>('ui.plugins.integration.manage', { id, action }),
   integrationAction: (localService: 'onebot' | 'qq' | 'bionic', action: 'health' | 'start' | 'stop' | 'reconnect', params: Record<string, unknown> = {}) => uiCall<Record<string, unknown>>('ui.plugins.integration.action', { localService, action, params }),
   toggleTool: (pluginId: string, toolId: string, enabled: boolean) => uiCall<Record<string, unknown>>('ui.plugins.integration.tool.toggle', { pluginId, toolId, enabled }),
-  mcp: () => uiCall<{ servers: { id: string; name: string; status: string; enabled: boolean; running: boolean; available: boolean; toolCallable: boolean; eligible: boolean; configured: boolean; source: string; toolCount: number | null; discoveredToolCount: number; transport: string; reason: string | null; lastError: string | null }[] }>('ui.mcp.list', {}),
+  mcp: () => uiCall<{ servers: McpServer[] }>('ui.mcp.list', {}),
   mcpTools: (id: string) => uiCall<{ serverId: string; tools: { id: string; name: string; description: string; enabled: boolean; discovered: boolean; callable: boolean }[] }>('ui.mcp.tools', { id }),
   manageMcp: (serverId: string, action: 'enable' | 'disable' | 'start' | 'stop' | 'restart') => uiCall<Record<string, unknown>>('ui.mcp.manage', { serverId, action }),
   mcpConfig: (serverId: string) => uiCall<{ id: string; enabled: boolean; hasArgs: boolean; hasEnvironment: boolean; timeoutMs: number | null; note: string;url:string;credentialRef:string;allowedTools:string[] }>('ui.mcp.config.get', { serverId }),

@@ -10,6 +10,42 @@ import { ForgeTools } from './ForgeTools';
 import { OneBotConnectionForm, type OneBotConnectionDraft } from './OneBotConnectionForm';
 import { ErrorNotice, Heading, EmptyNotice, StatusBadge, availabilityReasonLabel, messageOf } from './PagePresentation';
 import { ApprovalOperationSummary } from './StatusPresentation';
+import type { LifecycleCall, McpServer, PluginAvailability } from '../bridge/typed-client';
+
+const lifecycleLabels: Record<string, string> = {
+  unknown: '未知', 'not-applicable': '不适用', unsupported: '不支持', connected: '已连接', disconnected: '未连接',
+  connecting: '连接中', authenticated: '已认证', unauthenticated: '未认证', stopped: '已停止', starting: '启动中',
+  running: '运行中', healthy: '健康', unresponsive: '无响应', crashed: '已崩溃', stopping: '停止尚未确认',
+  'not-run': '尚未发现', pending: '等待结果', observed: '已发现', failed: '失败', completed: '成功', cancelled: '已取消',
+  ready: '协议与发现已通过', 'not-ready': '尚未就绪', revoked: '已撤销', incompatible: '版本不兼容',
+  'needs-review': '需要审批', 'not-installed': '未安装', disabled: '已停用', 'runtime-unavailable': '运行能力不可用'
+};
+const lifecycleLabel = (value?: string) => lifecycleLabels[value ?? 'unknown'] ?? value ?? '未知';
+function RecentLifecycleCall({ call }: { call?: LifecycleCall | null }) {
+  return <p>最近调用：{call ? <>{call.capability} · {lifecycleLabel(call.status)} · {call.current ? '本代次' : '历史记录，不能证明当前可用'}（代次 {call.generation ?? '未知'}）{call.code ? ` · ${call.code}` : ''}{call.effectStatus === 'unknown' ? ' · 副作用未知，需核验' : ''}</> : '尚无调用证据'}</p>;
+}
+export function PluginRuntimeFacts({ availability }: { availability?: PluginAvailability }) {
+  if (!availability) return <p>运行状态未验证。授权：声明权限不等于已授权；可调用：尚未验证，由 Core 在具体操作时判断。</p>;
+  const content = availability.connection === 'not-applicable' && availability.authentication === 'not-applicable';
+  return <>
+    {availability.blockedReason && <p role="status">当前能力：{lifecycleLabel(availability.blockedReason)}</p>}
+    <p>{content ? '内容能力' : '宿主加载'}：{content ? '无需执行宿主' : availability.loaded === null ? '未知' : availability.loaded ? '已加载' : '未加载'} · 运行：{lifecycleLabel(availability.runtime.state)} · 代次 {availability.runtime.generation ?? '未知'}</p>
+    <p>连接：{lifecycleLabel(availability.connection)} · 认证：{lifecycleLabel(availability.authentication)}</p>
+    <p>已发现能力：{availability.discoveredCapabilities.length ? availability.discoveredCapabilities.join('、') : '无当前能力证据'}</p>
+    <RecentLifecycleCall call={availability.lastCall} />
+    {availability.error && <p role="status">运行错误：{availability.error.code} · {availability.error.stage}</p>}
+    <p className="muted">授权：声明权限不等于已授权；可调用：由 Core 在具体操作时判断。安装、加载与历史成功均不代表业务已就绪。</p>
+  </>;
+}
+export function McpRuntimeFacts({ server }: { server: Pick<McpServer, 'generation' | 'connection' | 'authentication' | 'configurationCurrent' | 'discovery' | 'readiness' | 'lastCall' | 'runtimeStatus'> }) {
+  return <section aria-label="MCP 运行证据">
+    <p>连接：{lifecycleLabel(server.connection)} · 认证：{lifecycleLabel(server.authentication)} · 代次 {server.generation ?? '未知'}</p>
+    <p>当前配置：{server.configurationCurrent === true ? '已生效' : server.configurationCurrent === false ? '无当前连接证据' : '未知'} · 发现：{lifecycleLabel(server.discovery?.status)} · {server.discovery?.toolCount ?? '未知'} 个工具</p>
+    {server.runtimeStatus === 'stopping' && <p role="status">停止尚未确认；当前调用能力已撤销。</p>}
+    <RecentLifecycleCall call={server.lastCall} />
+    <p className="muted">协议与工具发现不代表外部账号已认证或业务可用；每次调用仍由 Core 核验权限。</p>
+  </section>;
+}
 
 type PluginReview = { id: string; stageId: string; action: 'install' | 'update' | 'enable'; installable: boolean; requiresReview: boolean; permissions: string[]; summary: string[]; trust: string };
 type ExtensionSettingsFormState = {
@@ -30,7 +66,15 @@ function extensionSettingsDraft(description: ExtensionSettingsDescription, value
   }));
 }
 type IntegrationRow = { kind?: string; id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null };
-type McpRow = { id: string; name: string; status: string; enabled: boolean; running: boolean; available: boolean; toolCallable: boolean; eligible: boolean; configured: boolean; source: string; toolCount: number | null; discoveredToolCount: number; transport: string; reason: string | null; lastError: string | null };
+type McpRow = McpServer;
+export function invalidateMcpObservation(server: McpServer, reason: string): McpServer {
+  return { ...server, status: 'not-checked', running: false, available: false, toolCallable: false, eligible: false, reason,
+    runtimeStatus: 'unknown', generation: null, connection: 'unknown', authentication: 'unknown',
+    configurationRevision: null, liveConfigurationRevision: null, configurationCurrent: null,
+    discoveredToolCount: 0, discovery: { status: 'unknown', toolCount: null },
+    readiness: { state: 'unknown', evidence: 'not-observed' },
+    lastCall: server.lastCall ? { ...server.lastCall, current: false } : null };
+}
 const isMcpCallable = (server: McpRow) => server.enabled === true && server.running === true && server.toolCallable === true;
 const mcpStatus = (server: McpRow) => isMcpCallable(server) ? 'ready' : !server.enabled ? 'disabled' : server.running ? 'needs-setup' : server.status === 'stopped' ? 'stopped' : 'not-checked';
 const mcpRuntimeStatus = (server: McpRow) => server.running ? 'running' : server.status === 'stopped' ? 'stopped' : 'not-checked';
@@ -77,7 +121,7 @@ export function PluginsPage() {
     setServers(next);
     setSelectedServer(current => {
       if (!current) return current;
-      const server = next.find(item => item.id === current.server.id) ?? { ...current.server, status: 'not-checked', running: false, available: false, toolCallable: false, eligible: false, reason: 'not-checked' };
+      const server = next.find(item => item.id === current.server.id) ?? invalidateMcpObservation(current.server, 'not-checked');
       const changed = forceStale || observation !== current.toolSnapshotObservation || server.status !== current.server.status || server.enabled !== current.server.enabled || server.running !== current.server.running || server.toolCallable !== current.server.toolCallable;
       return { ...current, server, toolSnapshotStale: current.toolSnapshotStale || changed, tools: changed ? current.tools.map(tool => ({ ...tool, discovered: false, callable: false })) : current.tools };
     });
@@ -92,6 +136,8 @@ export function PluginsPage() {
       ]);
       if (epoch !== lifetime.current || request !== catalogRequest.current || activeTab.current !== 'catalog') return;
       setCatalog(catalogResult);
+      setSelectedPlugin(current => current ? catalogResult.plugins.find(item => item.id === current.id)
+        ?? statusResult.plugins.find(item => item.id === current.id) ?? null : null);
       setDeveloperMode(statusResult.developerMode);
       if (connection === connectionsRequest.current) { setIntegrations(statusResult.integrations); applyMcpServers(statusResult.mcp, connection); }
       setError('');
@@ -109,7 +155,7 @@ export function PluginsPage() {
     } catch (cause) {
       if (epoch === lifetime.current && request === connectionsRequest.current) {
         setIntegrations(current => current.map(item => ({ ...item, available: false, eligible: false, reason: 'CHECK_FAILED' })));
-        applyMcpServers(latestMcpServers.current.map(item => ({ ...item, status: 'not-checked', running: false, available: false, toolCallable: false, eligible: false, reason: 'CHECK_FAILED' })), request, true);
+        applyMcpServers(latestMcpServers.current.map(item => invalidateMcpObservation(item, 'CHECK_FAILED')), request, true);
         setError(messageOf(cause));
       }
     }
@@ -314,6 +360,7 @@ export function PluginsPage() {
   }
   async function openPlugin(plugin: Plugin) {
     const request = ++extensionSettingsRequest.current;
+    const catalogObservation = catalogRequest.current;
     setError(''); setNotice('');
     setSelectedPlugin(plugin);
     setExtensionSettings(null);
@@ -322,7 +369,7 @@ export function PluginsPage() {
       const result = await pluginClient.detail(plugin.id);
       const selected = result.plugin ?? plugin;
       if (request !== extensionSettingsRequest.current) return;
-      setSelectedPlugin(selected);
+      if (catalogObservation === catalogRequest.current) setSelectedPlugin(selected);
       if (!selected.installed) return;
       const description = await extensionSettingsClient.describe(selected.id);
       if (request !== extensionSettingsRequest.current || !description.available || !description.fields.length) return;
@@ -439,7 +486,7 @@ export function PluginsPage() {
     </>}
     {(tab === 'connections' || tab === 'tools') && <><div className="plugin-section-heading"><h2>{tab === 'tools' ? '开发工具' : '服务连接'}</h2><p className="muted">{tab === 'tools' ? '查看工具的启用状态与调用条件，进入详情管理权限。' : '先连接账号或本地服务，再查看可用能力。'}</p></div>{tab === 'connections' && <section className="forge-connections-section" aria-label="开发平台连接">{forgeTasksError && <ErrorNotice error={'任务列表读取失败：' + forgeTasksError} onRetry={() => void refreshForgeTasks()} />}<ForgeTools call={productToolsClient.call} tasks={forgeTasks}/></section>}<div className="connection-list">{connectionRows.length ? connectionRows.map(item => <Surface className="connection-row" key={item.id}><span className="connection-icon"><Icon name="plug" size={20} /></span><span className="grow"><strong>{item.name}</strong><small>{item.id} · {availabilityReasonLabel(item.reason) || item.lastError || (item.available ? item.status : '当前不可用')}</small></span><StatusBadge value={!item.enabled ? 'disabled' : item.available ? item.status : (item.reason === 'needs-setup' ? 'needs-setup' : item.reason === 'not-installed' ? 'not-installed' : 'unavailable')} available={item.enabled && item.eligible} /><Button compact onClick={() => void openIntegration(item)}>详情与设置</Button><Button compact variant={item.enabled ? 'default' : 'primary'} disabled={busy === item.id} onClick={() => void toggleIntegration(item)}>{item.enabled ? '停用' : '启用'}</Button></Surface>) : !error && <EmptyNotice icon="plug" title="没有已注册的集成" detail="Integration 状态由本机 Core 提供。安装扩展请前往插件中心。" />}</div></>}
     {tab === 'mcp' && <div className="connection-list">{servers.length ? servers.map(item => <Surface className="connection-row" key={item.id}><span className="connection-icon mcp-icon"><Icon name="layers" size={20} /></span><span className="grow"><strong>{item.name}</strong><small>{item.source === 'builtin' ? '内置服务 · 默认启动入口' : item.transport || '本机连接'} · {item.discoveredToolCount}/{item.toolCount ?? '?'} 个工具已发现{item.reason ? ` · ${availabilityReasonLabel(item.reason) || item.reason}` : ''}</small></span><StatusBadge value={mcpStatus(item)} available={isMcpCallable(item)} /><Button compact onClick={() => void openServer(item)}>查看工具</Button><Button compact variant={item.enabled ? 'default' : 'primary'} disabled={busy === item.id} onClick={() => void manageServer(item, item.enabled ? 'disable' : 'enable')}>{item.enabled ? '禁用' : '启用'}</Button><Button compact disabled={busy === item.id || !item.enabled || item.status === 'unsupported'} onClick={() => void manageServer(item, item.running ? 'stop' : 'start')}>{item.running ? '停止' : '启动'}</Button></Surface>) : !error && <EmptyNotice icon="layers" title="没有配置 MCP 服务" detail="MCP 服务与凭据由本机 Core 配置和管理。" />}</div>}
-    <Sheet open={Boolean(selectedPlugin)} title={selectedPlugin?.name ?? '插件详情'} onClose={() => { extensionSettingsRequest.current += 1; extensionSaveRequest.current += 1; setSelectedPlugin(null); setExtensionSettings(null); setExtensionSettingsLoading(false); setBusy(current => current === 'extension-settings' ? '' : current); }}>{selectedPlugin && <div className="plugin-detail">{error && <ErrorNotice error={error} />}<p className="eyebrow">{selectedPlugin.developer} · {selectedPlugin.kind}</p><h3>{selectedPlugin.summary}</h3><p>{selectedPlugin.description || '暂无详细说明。'}</p><section aria-label="插件运行状态"><h3>安装与运行状态</h3><p>安装：{selectedPlugin.installed ? '已安装' : '未安装'} · 启用：{!selectedPlugin.installed && selectedPlugin.enabled ? '状态不一致，请刷新' : selectedPlugin.enabled ? '已启用' : '未启用'}</p><p>运行状态未验证。授权：声明权限不等于已授权；可调用：尚未验证，由 Core 在具体操作时判断。</p></section><div className="detail-facts"><span>版本 <strong>{selectedPlugin.version || '—'}</strong></span><span>分类 <strong>{selectedPlugin.category || '未分类'}</strong></span><span>最低版本 <strong>{selectedPlugin.compatibility.minimum || '未说明'}</strong></span></div><section><h3>权限</h3>{selectedPlugin.permissions.length ? <ul>{selectedPlugin.permissions.map(permission => <li key={permission}>{permission}</li>)}</ul> : <p className="muted">该插件没有声明权限。</p>}</section>{selectedPlugin.warning && <Banner>{selectedPlugin.warning}</Banner>}
+    <Sheet open={Boolean(selectedPlugin)} title={selectedPlugin?.name ?? '插件详情'} onClose={() => { extensionSettingsRequest.current += 1; extensionSaveRequest.current += 1; setSelectedPlugin(null); setExtensionSettings(null); setExtensionSettingsLoading(false); setBusy(current => current === 'extension-settings' ? '' : current); }}>{selectedPlugin && <div className="plugin-detail">{error && <ErrorNotice error={error} />}<p className="eyebrow">{selectedPlugin.developer} · {selectedPlugin.kind}</p><h3>{selectedPlugin.summary}</h3><p>{selectedPlugin.description || '暂无详细说明。'}</p><section aria-label="插件运行状态"><h3>安装与运行状态</h3><p>安装：{selectedPlugin.installed ? '已安装' : '未安装'} · 启用：{!selectedPlugin.installed && selectedPlugin.enabled ? '状态不一致，请刷新' : selectedPlugin.enabled ? '已启用' : '未启用'}</p><PluginRuntimeFacts availability={selectedPlugin.availability} /></section><div className="detail-facts"><span>版本 <strong>{selectedPlugin.version || '—'}</strong></span><span>分类 <strong>{selectedPlugin.category || '未分类'}</strong></span><span>最低版本 <strong>{selectedPlugin.compatibility.minimum || '未说明'}</strong></span></div><section><h3>权限</h3>{selectedPlugin.permissions.length ? <ul>{selectedPlugin.permissions.map(permission => <li key={permission}>{permission}</li>)}</ul> : <p className="muted">该插件没有声明权限。</p>}</section>{selectedPlugin.warning && <Banner>{selectedPlugin.warning}</Banner>}
       {selectedPlugin.installed && extensionSettingsLoading && <p className="muted">正在读取扩展设置…</p>}
       {selectedPlugin.installed && extensionSettings && extensionSettings.description.fields.length > 0 && <section className="extension-settings">
         <div><h3>扩展设置</h3><p className="muted">设置由本机 Core 保存；敏感值只显示是否已配置。</p></div>
@@ -507,6 +554,7 @@ export function PluginsPage() {
       <div className="row between"><p>工具可调用状态来自运行时发现与 Core 权限策略。调用仍由 Capability Broker 审核。</p><Button compact onClick={() => void manageServer(selectedServer.server, 'restart')}>重启</Button></div>
       <Surface className="mcp-settings-card"><div className="row between"><strong>服务器状态</strong><StatusBadge value={mcpRuntimeStatus(selectedServer.server)} /></div><p>传输方式：{selectedServer.server.transport || '未检查'} · {selectedServer.server.source === 'builtin' ? '内置启动配置' : '外部启动配置'}</p><p>{selectedServer.server.source === 'builtin' ? `启动参数覆盖：${selectedServer.config.hasArgs ? '已设置' : '未设置，使用内置入口'} · 环境变量覆盖：${selectedServer.config.hasEnvironment ? '已设置' : '未设置'}` : `启动参数：${selectedServer.config.hasArgs ? '已配置' : '未配置'} · 环境变量：${selectedServer.config.hasEnvironment ? '已配置' : '未配置'}`}</p><p className="muted">凭据和原始环境值不会传入界面。</p><details className="plugin-advanced-settings"><summary>高级连接设置</summary><div className="plugin-advanced-fields"><>{selectedServer.server.transport==='streamable-http'&&<><label>服务地址（HTTPS）<Input disabled={busy==='mcp-config'} value={mcpConfigDraft.url} onChange={e=>setMcpConfigDraft(d=>({...d,url:e.target.value}))}/></label><label>凭据引用（可选）<Input disabled={busy==='mcp-config'} value={mcpConfigDraft.credentialRef} onChange={e=>setMcpConfigDraft(d=>({...d,credentialRef:e.target.value}))}/></label><label>允许的工具名称（逗号分隔）<Input disabled={busy==='mcp-config'} value={mcpConfigDraft.allowedTools} onChange={e=>setMcpConfigDraft(d=>({...d,allowedTools:e.target.value}))}/></label></>}</><label>启动超时（毫秒，留空保持现有值）<Input disabled={busy==='mcp-config'} type="number" min={100} max={300000} value={mcpConfigDraft.timeoutMs} onChange={event => setMcpConfigDraft(current => ({ ...current, timeoutMs: event.target.value }))} /></label><label>备注<Input disabled={busy==='mcp-config'} value={mcpConfigDraft.note} onChange={event => setMcpConfigDraft(current => ({ ...current, note: event.target.value }))} maxLength={500} /></label><Button compact disabled={busy === 'mcp-config'} onClick={() => void saveMcpConfig()}>保存 MCP 设置</Button></div></details></Surface>
       {selectedServer.toolSnapshotStale && <p role="status">服务状态已变化；工具状态需重新读取，请关闭后重新打开详情。</p>}
+      <McpRuntimeFacts server={selectedServer.server} />
       <SearchInput label="搜索 MCP 工具" placeholder="搜索工具名称或说明" value={mcpToolQuery} onChange={event=>{setMcpToolQuery(event.target.value);setMcpToolPage(0);}}/>
       <nav className="row between" aria-label="MCP 工具分页"><Button compact disabled={!mcpToolPage} onClick={()=>setMcpToolPage(value=>Math.max(0,value-1))}>上一页</Button><small>第 {mcpToolPage+1} 页 · {selectedServer.tools.filter(tool=>(tool.name+' '+tool.description).toLocaleLowerCase().includes(mcpToolQuery.toLocaleLowerCase())).length} 个工具 · 每页 50</small><Button compact disabled={(mcpToolPage+1)*50>=selectedServer.tools.filter(tool=>(tool.name+' '+tool.description).toLocaleLowerCase().includes(mcpToolQuery.toLocaleLowerCase())).length} onClick={()=>setMcpToolPage(value=>value+1)}>下一页</Button></nav>
       {selectedServer.tools.length ? selectedServer.tools.filter(tool=>(tool.name+' '+tool.description).toLocaleLowerCase().includes(mcpToolQuery.toLocaleLowerCase())).slice(mcpToolPage*50,mcpToolPage*50+50).map(tool => <article className="mcp-tool-row" key={tool.id}><div className="row between"><strong>{tool.name}</strong><StatusBadge value={tool.callable && isMcpCallable(selectedServer.server) ? 'ready' : tool.enabled && tool.discovered ? 'unavailable' : tool.enabled ? 'not-checked' : 'disabled'} /></div><p>{tool.description || '没有描述。'}</p></article>) : <EmptyNotice icon="layers" title="没有发现工具" detail="服务可能尚未启动，或当前没有注册工具。" />}

@@ -11,6 +11,7 @@ import { createPluginCenterService } from '../src/plugin-center/service.js';
 import { createExtensionRuntime, createExtensionStore } from '../src/extension/index.js';
 import { writeJsonAtomic } from '../src/storage/json-file.js';
 import { createPluginCatalogFixture } from './test-support/plugin-catalog-fixture.mjs';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 let passed = 0;
@@ -714,18 +715,38 @@ await check('Catalog package uses real Extension Store and Worker through invoke
       return fetch(new URL(requested.pathname, fixture.loopbackOrigin), init);
     } });
   const id = plugin.id;
+  const ui = createDesktopUiService({ services: { pluginCenterService: service,
+    integrationService: { execute: async () => ({ integrations: [], servers: [] }) } } });
+  const projected = async () => (await ui.execute({ method: 'ui.plugins.detail', params: { id } })).plugin;
   try {
     const staged = await service.execute({ method: 'plugin-center.package.stage', params: { id } });
     assert.equal(staged.trust.verifiedPublisher, false);
     const installed = await service.execute({ method: 'plugin-center.package.install', params: { stageId: staged.stageId, reviewed: true } });
     assert.equal(installed.enabled, false);
     assert.equal(runtime.get({ id }).loaded, false);
+    const installedDto = await projected();
+    assert.ok(installedDto.availability, 'Plugin Center must project the existing Runtime lifecycle facts');
+    assert.equal(installedDto.availability.loaded, false, 'installation cannot imply a loaded Worker');
+    assert.equal(installedDto.availability.enabled, false);
+    assert.equal(installedDto.availability.lastCall, null);
+    assert.equal(installedDto.available, false, 'installed alone is not business readiness');
     const managed = store.get(id).sourceRoot;
     assert.equal(fs.existsSync(path.join(managed, 'index.js')), true, 'managed files survive stage cleanup');
     await assert.rejects(runtime.invoke({ id, capability: 'hello', input: { name: 'Owner' } }), { code: 'EXTENSION_DISABLED' });
     await service.execute({ method: 'plugin-center.plugin.enable', params: { id } });
     assert.equal(runtime.get({ id }).health.provider, 'process-child');
     assert.deepEqual((await runtime.invoke({ id, capability: 'hello', input: { name: 'Owner' } })).result, { greeting: 'Hello, Owner' });
+    const activeDto = await projected();
+    assert.equal(activeDto.availability.loaded, true);
+    assert.equal(activeDto.availability.connection, 'unknown', 'a Worker is not evidence of an external connection');
+    assert.equal(activeDto.availability.authentication, 'unknown');
+    assert.deepEqual(activeDto.availability.discoveredCapabilities, ['hello']);
+    assert.equal(activeDto.availability.lastCall.status, 'completed');
+    assert.equal(activeDto.availability.lastCall.current, true);
+    assert.equal(activeDto.availability.lastCall.generation, activeDto.availability.runtime.generation);
+    const installedSummary = (await ui.execute({ method: 'ui.plugins.status' })).installed[0];
+    assert.equal(installedSummary.installed, true, 'aggregate installed rows obtain installation from observed Runtime facts');
+    assert.equal(installedSummary.enabled, true);
     plugin = record('1.1.0', bytesV2);
     const update = await service.execute({ method: 'plugin-center.package.stage', params: { id } });
     const updated = await service.execute({ method: 'plugin-center.package.install', params: { stageId: update.stageId, reviewed: true } });
@@ -736,6 +757,10 @@ await check('Catalog package uses real Extension Store and Worker through invoke
     assert.equal(store.get(id).version, '1.0.0');
     assert.deepEqual((await runtime.invoke({ id, capability: 'hello', input: { name: 'Rollback' } })).result, { greeting: 'Hello, Rollback' });
     await service.execute({ method: 'plugin-center.plugin.disable', params: { id } });
+    const disabledDto = await projected();
+    assert.equal(disabledDto.availability.loaded, false);
+    assert.deepEqual(disabledDto.availability.discoveredCapabilities, []);
+    assert.equal(disabledDto.availability.lastCall.current, false, 'prior-generation success remains history after disable');
     await assert.rejects(runtime.invoke({ id, capability: 'hello', input: {} }), { code: 'EXTENSION_DISABLED' });
     await service.execute({ method: 'plugin-center.plugin.uninstall', params: { id } });
     assert.equal(store.get(id), null);
@@ -746,6 +771,37 @@ await check('Catalog package uses real Extension Store and Worker through invoke
     await fixture.close();
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+await check('Plugin DTO preserves type-specific unknowns, revoked and unconfirmed cleanup without exposing runtime payloads', async () => {
+  let row = { id: 'fixture.skill', type: 'skill', installed: true, enabled: true,
+    availability: { installed: true, enabled: true, loaded: false, runtime: { state: 'stopped', generation: 4 },
+      connection: 'not-applicable', authentication: 'not-applicable', discoveredCapabilities: ['content.read'],
+      lastCall: { capability: 'content.read', status: 'completed', generation: 4, completedAt: 10, result: 'private body' } } };
+  const ui = createDesktopUiService({ services: { pluginCenterService: { execute: async () => ({ plugin: row }) } } });
+  const get = async () => (await ui.execute({ method: 'ui.plugins.detail', params: { id: row.id } })).plugin;
+  let dto = await get();
+  assert.equal(dto.availability.connection, 'not-applicable');
+  assert.equal(dto.availability.authentication, 'not-applicable');
+  assert.equal(dto.availability.lastCall.current, true, 'content Skill reads have evidence without a Worker');
+  assert.equal(JSON.stringify(dto).includes('private body'), false);
+  row = { ...row, status: 'Revoked' };
+  dto = await get();
+  assert.equal(dto.availability.lastCall.current, false);
+  assert.equal(dto.availability.blockedReason, 'revoked', 'revocation must be explicit even if the prior host remains loaded');
+  assert.deepEqual(dto.availability.discoveredCapabilities, []);
+  row = { ...row, status: 'Installed', availability: { ...row.availability, loaded: true,
+    runtime: { state: 'stopping', generation: 5 }, error: { code: 'EXTENSION_STOP_UNCONFIRMED', stage: 'stop', message: 'private error' } } };
+  dto = await get();
+  assert.equal(dto.availability.loaded, true, 'retained host is not a confirmed stop');
+  assert.equal(dto.availability.runtime.state, 'stopping');
+  assert.equal(dto.availability.lastCall.current, false);
+  assert.equal(dto.availability.error.code, 'EXTENSION_STOP_UNCONFIRMED');
+  assert.equal(JSON.stringify(dto).includes('private error'), false);
+  row = { id: 'unknown' };
+  dto = await get();
+  assert.equal(dto.availability.loaded, null, 'missing observation is not an observed stopped Worker');
+  assert.equal(dto.availability.authentication, 'unknown');
 });
 
 process.stdout.write(`PASS ${passed} Plugin Center checks\n`);

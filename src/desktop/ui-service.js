@@ -558,24 +558,64 @@ function projectExtensionSettingsValues(value, fields) {
   }
   return { id: string(row.id, 160), values };
 }
+function lifecycleValue(value, allowed, fallback = 'unknown') {
+  return allowed.includes(value) ? value : fallback;
+}
+function lifecycleGeneration(value) {
+  return Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+function projectLifecycleCall(value, generation, active) {
+  if (!value || typeof value !== 'object') return null;
+  const row = record(value), callGeneration = lifecycleGeneration(row.generation);
+  return {
+    capability: string(row.capability ?? row.toolName, 160),
+    generation: callGeneration, current: active && generation !== null && callGeneration === generation,
+    status: lifecycleValue(row.status, ['completed', 'failed', 'pending', 'cancelled', 'unknown']),
+    startedAt: Number.isFinite(row.startedAt) ? row.startedAt : null,
+    completedAt: Number.isFinite(row.completedAt) ? row.completedAt : null,
+    code: /^[A-Z0-9_]{1,80}$/.test(row.code ?? '') ? row.code : null,
+    effectStatus: lifecycleValue(row.effectStatus, ['none', 'completed', 'unknown'], null)
+  };
+}
+function projectPluginAvailability(row, installed, enabled) {
+  const facts = record(row.availability), runtime = record(facts.runtime), error = record(facts.error);
+  const state = lifecycleValue(runtime.state ?? row.runtimeState, ['stopped', 'starting', 'running', 'healthy', 'unresponsive', 'crashed', 'stopping', 'unsupported']);
+  const generation = lifecycleGeneration(runtime.generation);
+  const blockedReason = row.status === 'Revoked' ? 'revoked' : row.status === 'Incompatible' ? 'incompatible'
+    : row.status === 'Needs Review' ? 'needs-review' : !installed ? 'not-installed' : !enabled ? 'disabled'
+    : row.status === 'Crashed' || ['stopping', 'crashed', 'unresponsive', 'unsupported'].includes(state) || facts.error ? 'runtime-unavailable' : null;
+  const blocked = blockedReason !== null;
+  return {
+    installed, enabled, blockedReason,
+    loaded: typeof facts.loaded === 'boolean' ? facts.loaded : typeof row.loaded === 'boolean' ? row.loaded : null,
+    runtime: { state, generation },
+    connection: lifecycleValue(facts.connection, ['connected', 'disconnected', 'connecting', 'stopping', 'not-applicable', 'unsupported']),
+    authentication: lifecycleValue(facts.authentication, ['authenticated', 'unauthenticated', 'not-applicable', 'unsupported']),
+    discoveredCapabilities: blocked ? [] : boundedStrings(facts.discoveredCapabilities, 100, 160),
+    lastCall: projectLifecycleCall(facts.lastCall, generation, !blocked),
+    error: facts.error ? { code: /^[A-Z0-9_]{1,80}$/.test(error.code ?? '') ? error.code : 'EXTENSION_RUNTIME_ERROR', stage: string(error.stage, 60) || 'runtime' } : null
+  };
+}
 function projectPlugin(value) {
   const row = record(value);
   const extension = record(row.installedEntry);
   const permissions = Array.isArray(row.permissions) ? row.permissions : record(row.review).permissions;
   const screenshotCount = Array.isArray(row.screenshots) ? Math.min(row.screenshots.length, 8) : 0;
   const status = string(row.status, 60);
+  const installed = Boolean(row.installedEntry || row.installed === true || record(row.availability).installed === true);
+  const enabled = extension.status === 'enabled' || row.enabled === true || record(row.availability).enabled === true;
   return {
     id: string(row.id, 160), name: string(row.name, 200), summary: string(row.summary, 500),
     description: string(row.description, 8000), developer: string(row.publisher ?? row.developer ?? 'CetaMesh', 160),
     version: string(row.version ?? extension.version, 80), status: status === 'Update Available' ? 'update' : status,
-    category: string(row.category, 80), kind: string(row.kind ?? row.type, 60),
-    available: typeof row.available === 'boolean' ? row.available : Boolean(row.installedEntry || row.installed === true),
+    category: string(row.category, 80), kind: string(row.kind ?? row.type ?? extension.type, 60),
+    available: installed && enabled && row.available === true,
     configured: row.configured === true,
-    eligible: typeof row.eligible === 'boolean' ? row.eligible : Boolean((row.installedEntry || row.installed === true) && row.enabled !== false),
+    eligible: installed && enabled && row.eligible === true,
     reason: string(row.reason ?? row.warning, 500) || null,
     lastError: string(row.lastError, 500) || null,
-    featured: row.featured === true, installed: Boolean(row.installedEntry || row.installed === true),
-    enabled: extension.status === 'enabled' || row.enabled === true,
+    featured: row.featured === true, installed, enabled,
+    availability: projectPluginAvailability(row, installed, enabled),
     icon: ['sparkles', 'plug', 'music', 'code', 'globe', 'image', 'bot', 'layers'].includes(row.icon) ? row.icon : 'layers',
     permissions: boundedStrings(permissions, 40, 250), changelog: boundedStrings(row.changelog, 30, 500),
     compatibility: { minimum: string(row.minCetaMeshVersion, 80) || null, maximum: string(row.maxCetaMeshVersion, 80) || null },
@@ -586,14 +626,26 @@ function projectPlugin(value) {
 function projectMcpServer(value) {
   const row = record(value);
   const enabled = row.enabled === true;
-  const running = row.status === 'running';
+  const running = row.runtimeStatus === 'running' || row.status === 'running';
   const toolCount = Number.isFinite(row.toolCount) ? Math.max(0, row.toolCount) : null;
   const discoveredToolCount = Number.isFinite(row.discoveredToolCount) ? Math.max(0, row.discoveredToolCount) : 0;
-  const available = enabled && running && row.callable === true && discoveredToolCount > 0;
+  const available = enabled && running && row.callable === true && discoveredToolCount > 0 && row.configurationCurrent !== false;
+  const generation = lifecycleGeneration(row.generation);
   return {
     id: string(row.id ?? row.serverId, 160), name: string(row.name ?? row.displayName ?? row.id, 200),
     status: string(row.status, 60), enabled, running, available, toolCallable: available,
     toolCount, discoveredToolCount,
+    runtimeStatus: string(row.runtimeStatus ?? row.status, 60), generation,
+    configurationRevision: /^[a-f0-9]{64}$/.test(row.configurationRevision ?? '') ? row.configurationRevision : null,
+    liveConfigurationRevision: /^[a-f0-9]{64}$/.test(row.liveConfigurationRevision ?? '') ? row.liveConfigurationRevision : null,
+    configurationCurrent: typeof row.configurationCurrent === 'boolean' ? row.configurationCurrent : null,
+    connection: lifecycleValue(row.connection, ['connected', 'disconnected', 'connecting', 'stopping', 'not-applicable', 'unsupported']),
+    authentication: lifecycleValue(row.authentication, ['authenticated', 'unauthenticated', 'not-applicable', 'unsupported']),
+    discovery: { status: lifecycleValue(record(row.discovery).status, ['not-run', 'pending', 'observed', 'failed']),
+      toolCount: Number.isSafeInteger(record(row.discovery).toolCount) ? Math.max(0, row.discovery.toolCount) : null },
+    readiness: { state: lifecycleValue(record(row.readiness).state, ['ready', 'starting', 'not-ready', 'unsupported']),
+      evidence: lifecycleValue(record(row.readiness).evidence, ['initialize-and-tool-discovery', 'not-observed']) },
+    lastCall: projectLifecycleCall(row.lastCall, generation, enabled && running && row.configurationCurrent === true),
     transport: string(row.transport, 40),
     source: string(row.source, 40) || 'external',
     configured: record(row.config).hasArgs === true || record(row.config).hasEnvironment === true,

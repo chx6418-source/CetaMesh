@@ -239,6 +239,13 @@ async function phase5Regressions() {
       assert.equal(report.ok, false);
       assert.equal(released, false, 'unknown child must retain StateDir ownership');
       assert.equal(runtime.status('onebot').pid, 4242);
+      const ui = createDesktopUiService({ services: { integrationService: { execute: async () => ({
+        servers: [{ ...runtime.status('onebot'), enabled: true, callable: false, toolCount: 1, discoveredToolCount: 0 }]
+      }) } } });
+      const dto = (await ui.execute({ method: 'ui.mcp.list' })).servers[0];
+      assert.equal(dto.runtimeStatus, 'stopping', 'unconfirmed owned transport is not a confirmed stopped process');
+      assert.equal(dto.connection, 'stopping');
+      assert.equal(dto.toolCallable, false);
       await assert.rejects(runtime.start('onebot'));
       assert.equal(connections.length, 1);
       allowClose = true;
@@ -521,9 +528,36 @@ try {
     assert.equal(firstPayload.configuredSecretMatches, true, 'saved MCP env config must reach only its child process');
     assert.deepEqual(firstPayload.args, ['fixture-arg']);
     assert.equal(path.resolve(firstPayload.cwd), path.resolve(localTmp));
+    const projectedServer = async () => (await ui.execute({ method: 'ui.mcp.list' })).servers[0];
+    const firstDto = await projectedServer();
+    assert.equal(firstDto.connection, 'connected', 'typed DTO must preserve actual MCP initialize/discovery evidence');
+    assert.equal(firstDto.authentication, 'unknown', 'stdio handshake does not establish business account authentication');
+    assert.equal(firstDto.discovery.status, 'observed');
+    assert.equal(firstDto.configurationCurrent, true);
+    assert.equal(firstDto.lastCall.status, 'completed');
+    assert.equal(firstDto.lastCall.current, true);
+    assert.equal(firstDto.lastCall.generation, firstDto.generation);
+    await localService.execute({ method: 'mcp.config.update', params: { id: 'onebot', approved: true,
+      config: { note: 'display-only fixture note' } } });
+    const sameConfig = await localService.execute({ method: 'mcp.get', params: { id: 'onebot' } });
+    assert.equal(sameConfig.pid, started.pid, 'display-only configuration retains the actual owned transport');
+    assert.equal((await projectedServer()).generation, firstDto.generation);
+    await localService.execute({ method: 'mcp.config.update', params: { id: 'onebot', approved: true,
+      config: { timeoutMs: 12000 } } });
+    const reconfigured = await localService.execute({ method: 'mcp.get', params: { id: 'onebot' } });
+    const reconfiguredDto = await projectedServer();
+    assert.notEqual(reconfigured.pid, started.pid, 'effective configuration closes and replaces only this fixture transport');
+    assert.throws(() => process.kill(started.pid, 0), { code: 'ESRCH' });
+    assert.ok(reconfiguredDto.generation > firstDto.generation);
+    assert.equal(reconfiguredDto.lastCall, null, 'retired call success cannot certify the new configuration');
+    assert.equal(reconfiguredDto.configurationCurrent, true);
     const disabled = await localService.execute({ method: 'mcp.disable', params: { id: 'onebot', approved: true } });
     assert.equal(disabled.enabled, false);
     assert.equal(disabled.status, 'disabled');
+    const disabledDto = await projectedServer();
+    assert.equal(disabledDto.connection, 'disconnected');
+    assert.equal(disabledDto.toolCallable, false);
+    assert.equal(disabledDto.configurationCurrent, false);
     await assert.rejects(() => localService.execute({ method: 'tools.invoke', params: { id: 'mcp__onebot__qq_status' } }));
     const enabled = await localService.execute({ method: 'mcp.enable', params: { id: 'onebot', approved: true } });
     assert.equal(enabled.enabled, true);
