@@ -316,12 +316,6 @@ function compactContext(context, maxChars) {
     delete context.skills;
     context.omissions.skills = 1;
   }
-  // These are optional read-only projections, not the parent's Task or approval
-  // state. Omit complete child records rather than break their source IDs.
-  while (!fits() && context.task?.childResults?.length) {
-    context.task.childResults.pop();
-    context.omissions.childResults = (context.omissions.childResults ?? 0) + 1;
-  }
   if (fits()) return context;
   for (const key of ['extensions', 'agentProviders', 'memoryReferences']) {
     if (context[key].length) {
@@ -356,6 +350,15 @@ function compactContext(context, maxChars) {
       context.skills.text = original.slice(0, low);
       context.skills.truncated = true;
     }
+  }
+  // The parent's completed child facts take priority over optional discovery
+  // descriptors and status catalog entries. Otherwise a growing tool catalog
+  // can erase every actual result before the parent gets to synthesize them.
+  // Mandatory Task, approval and granted execution controls stay above these
+  // read-only facts; omit whole records if even that minimum cannot fit.
+  while (!fits() && context.task?.childResults?.length) {
+    context.task.childResults.pop();
+    context.omissions.childResults = (context.omissions.childResults ?? 0) + 1;
   }
   for (const descriptor of candidates) {
     if (controls.includes(descriptor)) continue;

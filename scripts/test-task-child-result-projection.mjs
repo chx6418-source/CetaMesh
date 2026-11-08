@@ -70,9 +70,13 @@ for (const order of [['b', 'a'], ['a', 'b']]) {
     const parent = { ...f.parent, children: f.list() };
     const product = createProductContextService({ taskRuntime: f.rt, workspaceService: f.workspaceService,
       capabilityService: f.capabilities, memorySettings: () => ({ enabled: false }) });
-    const modelView = JSON.parse((await product.buildForChatTurn({ record: { id: 'owner-child-facts',
+    const modelProjection = await product.buildForChatTurn({ record: { id: 'owner-child-facts',
       taskId: parent.id, config: { workspaceId: f.workspace.id, mode: 'chat' },
-      children: [{ id: 'FORGED_RENDERER_CHILD' }] }, toolCalling: 'supported' })).context);
+      children: [{ id: 'FORGED_RENDERER_CHILD' }] }, toolCalling: 'supported' });
+    const modelView = JSON.parse(modelProjection.context);
+    assert.ok(modelProjection.context.length <= 12000, 'retaining results does not increase the existing context budget');
+    assert.deepEqual(modelView.capabilities.requestable, modelProjection.manifest.map(row => row.id),
+      'compacted capability advertisements still match the actual model tool transport');
     assert.deepEqual(new Set(modelView.task.childResults?.map(row => row.childId)), new Set(f.list().map(row => row.id)),
       'ordinary parent Chat context resolves children from Task Runtime, not a caller-supplied snapshot');
     const ui = createDesktopUiService({ services: { taskService: f.service, capabilityService: f.capabilities } });
