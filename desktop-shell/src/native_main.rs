@@ -23,6 +23,8 @@ mod theme;
 mod supervisor;
 #[cfg(windows)]
 mod agent_supervisor;
+#[cfg(windows)]
+mod workspace_transaction;
 mod tray;
 mod ui_prefs;
 mod webview_policy;
@@ -486,6 +488,22 @@ fn run_native_ui(paths: DesktopPaths) -> Result<(), String> {
 }
 
 fn main() {
+    #[cfg(windows)]
+    {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        if args.iter().any(|arg| arg.starts_with("--workspace-byte-")) {
+            let requests: Vec<_> = args.iter().filter_map(|arg| arg.strip_prefix("--workspace-byte-transaction=")).collect();
+            let digests: Vec<_> = args.iter().filter_map(|arg| arg.strip_prefix("--workspace-byte-sha256=")).collect();
+            if args.len() != 2 || requests.len() != 1 || digests.len() != 1 {
+                eprintln!("INVALID_BYTE_TRANSACTION_ARGUMENTS");
+                std::process::exit(78);
+            }
+            match workspace_transaction::run(Path::new(requests[0]), digests[0]) {
+                Ok(code) => std::process::exit(code as i32),
+                Err(code) => { eprintln!("{code}"); std::process::exit(78); }
+            }
+        }
+    }
     #[cfg(windows)]
     if let Some(config) = std::env::args().find_map(|arg| arg.strip_prefix("--agent-supervisor=").map(PathBuf::from)) {
         match agent_supervisor::run(&config) {
