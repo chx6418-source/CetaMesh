@@ -67,6 +67,29 @@ try {
     assert.equal(live.loaded, true); assert.equal(live.availability.connection, 'not-applicable');
     assert.equal(live.availability.authentication, 'not-applicable');
   });
+  await test('content-only enable binds the Runtime package fingerprint before an existing-host return', () => {
+    const before = runtime.get({ id: 'owned-skill' });
+    assert.throws(() => runtime.enable({ id: 'owned-skill', expectedSkillPackage: { version: '1.0.0', packageRevision: '0'.repeat(64) } }), { code: 'REVIEW_MISMATCH' });
+    const expected = { version: before.extension.version, packageRevision: before.extension.packageFingerprint };
+    const unchanged = runtime.enable({ id: 'owned-skill', expectedSkillPackage: expected });
+    assert.equal(unchanged.changed, false);
+    assert.equal(runtime.get({ id: 'owned-skill' }).extension.contentGeneration, before.extension.contentGeneration);
+    assert.equal(executableHosts, 0);
+  });
+  await test('a content-only enable refuses an actual reviewed executable before host selection', () => {
+    const raw = { ...manifest('owned-executable-refusal'), entry: 'index.js', permissions: [],
+      capabilities: [{ id: 'reference', kind: 'workflow', requires: [] }] };
+    delete raw.contentProfile;
+    const sourceDir = packageAt('executable-refusal', { raw, files: { 'index.js': 'throw Error("This controlled fixture must never execute");' } });
+    const reviewed = runtime.review({ sourceDir });
+    runtime.install({ sourceDir, approval: { approved: true, token: reviewed.review.token } });
+    // Even the executable's exact hash and version cannot satisfy a review
+    // constrained to the strict reference-only profile.
+    assert.throws(() => runtime.enable({ id: raw.id, expectedSkillPackage: { version: raw.version, packageRevision: reviewed.review.packageFingerprint } }), { code: 'REVIEW_MISMATCH' });
+    assert.equal(executableHosts, 0, 'no executable host was constructed');
+    assert.equal(runtime.get({ id: raw.id }).loaded, false);
+    assert.equal(runtime.get({ id: raw.id }).availability.enabled, false);
+  });
   await test('ordinary Extension invocation cannot silently replace a stale content reference', async () => {
     await assert.rejects(runtime.invoke({ id: 'owned-skill', capability: 'reference', input: { sourceRevision: '0'.repeat(64) } }), { code: 'SKILL_SOURCE_STALE' });
     const reference = runtime.listSkillSources().find(row => row.extensionId === 'owned-skill');

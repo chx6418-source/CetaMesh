@@ -710,11 +710,19 @@ export function createExtensionRuntime({
       return result;
     },
 
-    enable({ id } = {}) {
+    enable({ id, expectedSkillPackage } = {}) {
       if (closed) throw extensionError('PROVIDER_UNAVAILABLE','Extension runtime is closed');
       if (runtimeRecord(id).stopping && !runtimeRecord(id).stopPromise) throw extensionError('EXTENSION_STOP_UNCONFIRMED','Retry stopping the retained Extension before enabling');
       if (runtimeRecord(id).stopping || runtimeRecord(id).switching) throw extensionError('EXTENSION_UPDATE_IN_PROGRESS','Wait for the plugin lifecycle operation to finish');
       const entry = entryOrThrow(id);
+      // A reference-only review authorizes this exact content package. Keep
+      // this fence beside entry selection, before any existing-host return or
+      // host creation; an earlier asynchronous observation can be stale.
+      if (expectedSkillPackage !== undefined && (!isSkillDataManifest(entry.manifest)
+        || entry.version !== expectedSkillPackage?.version
+        || entry.packageFingerprint !== expectedSkillPackage?.packageRevision)) {
+        throw extensionError('REVIEW_MISMATCH', 'Installed Skill package changed after review; review its current content version again');
+      }
       if (entry.status === 'disabled_due_to_crash') {
         throw extensionError('EXTENSION_CRASH_LOOP_DISABLED', 'Use explicit Restart to start this Extension again');
       }

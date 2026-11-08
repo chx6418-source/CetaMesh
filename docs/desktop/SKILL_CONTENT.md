@@ -115,6 +115,36 @@ omissions, shadowing and bounded body pages; replacing a stale version requires
 an explicit new selection. These UI selections do not change Task grants,
 approval mode or execution identity.
 
+The picker can explicitly browse the configured Plugin Center catalog for
+not-installed reference candidates. Opening the picker or browsing the catalog
+does not download a package. Selecting a candidate to review uses the existing
+catalog stage command; catalog labels are discovery hints, not proof of content
+type. Only the actual validated manifest and Runtime review can identify an
+installable `skill-reference-v1` package. Executable packages must use the ordinary
+Plugin Center review and cannot be installed through the reference shortcut.
+
+One explicit Owner review approves installation, enablement and selection of that
+strict content package. The review displays the actual manifest identity, version,
+`skill.read` scope and complete reviewed package fingerprint. The existing
+Plugin Center and Extension Installer own installation and enablement. The picker
+passes the reviewed version and package fingerprint to the existing enable call;
+Extension Runtime checks its current installed entry synchronously before any
+existing-host return or host selection. A replacement package cannot inherit the
+earlier content-only consent. The picker
+then rereads the current authorized Skill index, matches the installed source ID,
+package version and package fingerprint, and reads the exact source revision before
+adding its reference. Installed, enabled and source-ready remain separate facts;
+none imply transport connection, account authentication or executable tool access.
+
+Cancelling or failing the review leaves existing selections and grants intact.
+Closing the picker or switching Chat prevents late results from issuing a new
+enable request or adding a reference to another message. An install or enable
+already accepted by Core can still complete; its actual state remains visible in
+Plugin Center. Disabled, uninstalled, changed or revoked sources retain the existing
+exact-version invalidation behavior. An unavailable or offline catalog reports
+that state while existing local sources remain usable. Clients without the
+optional installer still support reference selection and reading.
+
 Inactive source configuration is omitted from disk for historical strict v1
 readers. Before the first enabled source write, Settings retains the prior
 configuration as described in [Settings compatibility](SETTINGS_COMPATIBILITY.md).
@@ -155,3 +185,10 @@ Installer/Runtime/ProductContext/Plugin Center/Integration entries, injected loc
 transports and an actual owned stdio peer. These source and fixture checks do not
 substitute for native picker interaction, an installed release, paid models or a
 real remote MCP service.
+
+The registered `test-skill-picker-ui` suite additionally drives the production
+React picker in isolated Chromium against composed Core services, controlled
+reviewed archives, an allowlisted loopback catalog and a local synthetic model.
+Its install-to-reference and serialized model-request evidence remains source and
+fixture evidence; it does not establish installed-native or external-account
+acceptance.

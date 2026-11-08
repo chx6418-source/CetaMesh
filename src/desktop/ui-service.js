@@ -1874,7 +1874,17 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.plugins.stage': async p => {
       const result = await plugins('plugin-center.package.stage', { id: idParam(p) });
+      // The catalog is a discovery hint. Only the validated package's Runtime
+      // review identifies content that can use the reference-only shortcut.
+      const manifest = record(result.review?.manifest), reviewed = record(result.review?.review);
+      const contentReview = manifest.contentProfile === 'skill-reference-v1' && reviewed.contentProfile === 'skill-reference-v1'
+        && reviewed.executionBoundary?.codeExecution === false && reviewed.installable === true
+        && /^[a-f0-9]{64}$/.test(reviewed.packageFingerprint ?? '')
+        ? { id: string(manifest.id, 64), name: string(manifest.name, 120), version: string(manifest.version, 40),
+          contentProfile: 'skill-reference-v1', entry: 'SKILL.md', permissions: ['skill.read'], codeExecution: false,
+          packageRevision: reviewed.packageFingerprint } : null;
       return { stageId: string(result.stageId, 128), plugin: projectPlugin(result.entry), requiresReview: result.requiresReview === true,
+        contentReview,
         installable: record(result.review?.review).installable === true,
         permissions: boundedStrings(result.review?.permissions ?? result.review?.review?.permissions, 40, 250),
         summary: boundedStrings(result.review?.summary, 30, 400), trust: string(result.trust?.level, 60) };
@@ -1919,11 +1929,19 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.plugins.enable': async p => {
       const id = idParam(p);
       if (p.reviewed !== true) throw uiError('PERMISSION_REVIEW_REQUIRED', '启用前请完成权限复核');
+      let expectedSkillPackage;
+      if (p.expectedSkillPackage !== undefined) {
+        const expected = record(p.expectedSkillPackage);
+        expectedSkillPackage = { version: boundedText(expected.version, 'version', 40),
+          packageRevision: boundedText(expected.packageRevision, 'packageRevision', 64) };
+        if (!/^[a-f0-9]{64}$/.test(expectedSkillPackage.packageRevision)) throw uiError('REVIEW_MISMATCH', '内容包指纹无效，请重新审查当前包');
+      }
       const stageId = string(p.stageId, 128);
       const review = enableReviewTokens.get(stageId);
       if (stageId && (!review || review.id !== id)) throw uiError('REVIEW_MISMATCH', '权限复核已失效，请重新查看权限清单');
       const result = await plugins('plugin-center.plugin.enable', {
-        id, ...(stageId ? { stageId, reviewToken: review.token } : {}), reviewed: true
+        id, ...(stageId ? { stageId, reviewToken: review.token } : {}), reviewed: true,
+        ...(expectedSkillPackage ? { expectedSkillPackage } : {})
       });
       if (stageId) enableReviewTokens.delete(stageId);
       emit('plugin.updated', { pluginId: id });

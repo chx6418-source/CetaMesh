@@ -636,6 +636,12 @@ export const chatClient = {
   reconcileConfig: (id: string) => uiCall<ChatSession>('ui.chat.config.reconcile', { id })
 };
 export const skillsClient = {
+  installer: {
+    catalog: () => pluginClient.catalog(),
+    stage: (id: string) => pluginClient.stage(id),
+    install: (stageId: string) => pluginClient.install(stageId),
+    enable: (id: string, expectedSkillPackage: { version: string; packageRevision: string }) => pluginClient.enable(id, '', expectedSkillPackage)
+  },
   listSkills: (input: { chatId: string }) => uiCall<SkillIndex>('ui.skills.list', input),
   readSkill: (input: { chatId: string; skillId: string; sourceRevision: string; offset?: number; maxBytes?: number }) =>
     uiCall<SkillContentPage>('ui.skills.read', input),
@@ -725,11 +731,11 @@ export const extensionSettingsClient = {
   status: () => uiCall<{ catalogAvailable: boolean; configured: boolean; offline: boolean; developerMode: boolean; plugins: Plugin[]; installed: Plugin[]; integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null }[]; mcp: McpServer[] }>('ui.plugins.status', {}),
   detail: (id: string) => uiCall<{ available: boolean; offline: boolean; plugin: Plugin | null }>('ui.plugins.detail', { id }),
   refresh: () => uiCall<Record<string, unknown>>('ui.plugins.refresh', {}),
-  stage: (id: string) => uiCall<{ stageId: string; plugin: Plugin; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string }>('ui.plugins.stage', { id }),
+  stage: (id: string) => uiCall<{ stageId: string; plugin: Plugin; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string; contentReview?: import('../app/SkillPicker').SkillContentReview | null }>('ui.plugins.stage', { id }),
   stageLocal: (file: string) => uiCall<{ stageId: string; plugin: Plugin; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string }>('ui.plugins.stage-local', { file }),
   install: (stageId: string) => uiCall<{ installed: boolean; plugin: Plugin }>('ui.plugins.install', { stageId, reviewed: true }),
   reviewEnable: (id: string) => uiCall<{ id: string; stageId: string; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string }>('ui.plugins.enable.review', { id }),
-  enable: (id: string, stageId = '') => uiCall<Record<string, unknown>>('ui.plugins.enable', { id, stageId, reviewed: true }),
+  enable: (id: string, stageId = '', expectedSkillPackage?: { version: string; packageRevision: string }) => uiCall<Record<string, unknown>>('ui.plugins.enable', { id, stageId, reviewed: true, ...(expectedSkillPackage ? { expectedSkillPackage } : {}) }),
   disable: (id: string) => uiCall<Record<string, unknown>>('ui.plugins.disable', { id }),
   uninstall: (id: string) => uiCall<Record<string, unknown>>('ui.plugins.uninstall', { id }),
   integrations: () => uiCall<{ integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null }[] }>('ui.plugins.integration.list', {}),

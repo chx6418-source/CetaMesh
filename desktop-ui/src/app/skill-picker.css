@@ -25,6 +25,13 @@
 .skill-source-form>label{display:grid;gap:4px;font-size:12px}
 .skill-source-form>.skill-source-consent{display:flex;align-items:flex-start;gap:7px}
 .skill-source-form>.cm-button{justify-self:start}
+.skill-install{border-block:1px solid var(--border-color,#e0e4dd);padding-block:10px;margin-block:10px;font-size:12px;line-height:1.5}
+.skill-install-candidates{list-style:none;padding:0;max-height:220px;overflow:auto}
+.skill-install-candidates>li{padding-block:8px;border-top:1px solid var(--border-color,#e0e4dd)}
+.skill-install-candidates p{margin-block:4px}
+.skill-install-review{padding:10px;border:1px solid var(--border-color,#d3d8d1);border-radius:8px;margin-top:8px}
+.skill-install-review code{white-space:pre-wrap;word-break:break-all}
+.skill-install-review>.cm-button{margin:4px 6px 0 0}
 .composer-skill-selection { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 4px 0; }
 .composer-skill-selection small { color: var(--text-muted); }
 .message-skill-references { margin-block: 10px; max-width: 100%; }

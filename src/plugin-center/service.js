@@ -591,13 +591,13 @@ export function createPluginCenterService({
       if (!entry || entry.version !== reviewed.version) throw pluginCenterError('PLUGIN_TRUST_STATE_STALE', 'installed plugin changed after review');
       const latest = await extensionRuntime.review({ sourceDir: entry.sourceRoot });
       if (latest.review?.token !== reviewed.token) throw pluginCenterError('REVIEW_MISMATCH', 'plugin changed after Owner Review; review it again');
-      const result = await extensionRuntime.enable({ id });
+      const result = await extensionRuntime.enable({ id, ...(params.expectedSkillPackage !== undefined ? { expectedSkillPackage: params.expectedSkillPackage } : {}) });
       enableReviews.delete(stageId);
       trust.firstEnableReviewed = true;
       persistTrustState();
       return result;
     }
-    return extensionRuntime.enable({ id });
+    return extensionRuntime.enable({ id, ...(params.expectedSkillPackage !== undefined ? { expectedSkillPackage: params.expectedSkillPackage } : {}) });
   }
 
   async function icon(params = {}) {
