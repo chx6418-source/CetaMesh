@@ -45,6 +45,10 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
   }
   const registry = createWorkspaceRegistry({ file: workspaceRegistryFile(stateDir), now });
   const recovery = new Map();
+  const knownGitNoEffect = new WeakSet();
+  // One settlement may consume this exact Core error; copied fields or reuse
+  // by a later executor cannot clear that later dispatch's effect fence.
+  function isKnownGitNoEffect(error) { return knownGitNoEffect.delete(error); }
   function retainRecovery(workspace, error, verifiedBatches = []) {
       let retained = recovery.get(workspace.root);
       if (!retained) {
@@ -95,6 +99,22 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
   function assertWritable(entry, { pendingId = null } = {}) {
     if (importRecoveryState(entry).status !== 'blocked') recoverEntry(entry);
     if (importRecoveryState(entry).status === 'blocked' || pendingRecoveryState(entry, pendingId)) fail('WORKSPACE_RECOVERY_REQUIRED', '项目存在执行中或未核实的恢复记录；原文件与日志已保留，核对前暂停执行');
+    return entry;
+  }
+
+  // Git validation runs before approval and again before dispatch. Inspect the
+  // existing import owner without executing its rollback or private cleanup.
+  // Settlement remains in the existing Workspace recovery path.
+  function assertGitWritable(entry) {
+    const refuse = () => fail('WORKSPACE_RECOVERY_REQUIRED', '项目有未核实的导入记录，请先完成工作区恢复；Git 校验不会改写文件');
+    if (importRecoveryState(entry).status === 'blocked' || pendingRecoveryState(entry)) refuse();
+    let batches;
+    try { batches = workspaceImportEvidence(entry.root); }
+    catch (error) { retainRecovery(entry, error); refuse(); }
+    if (batches.length) {
+      retainRecovery(entry, {code: 'IMPORT_RECONCILIATION_REQUIRED'}, batches);
+      refuse();
+    }
     return entry;
   }
 
@@ -321,6 +341,13 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     },
 
     'workspace.git.overview': async p => gitProduct.overview(requireWorkspace(p)),
+    'workspace.git.index.review': async p => gitProduct.reviewStaged(requireWorkspace(p), {paths: p.paths}),
+    ...Object.fromEntries(['stage', 'unstage', 'commit.staged'].map(action => ['workspace.git.' + action,
+      async () => fail('GIT_APPROVAL_REQUIRED', 'Exact Git index mutations must use Capability Broker approval')])),
+    ...Object.fromEntries([['status.page', 'status'], ['history', 'history'], ['branches', 'branches'],
+      ['commit.detail', 'commitDetail'], ['preview', 'preview'], ['review', 'reviewPaths']].map(([action, read]) => [
+      'workspace.git.' + action, (p, context) => gitProduct[read](requireWorkspace(p), { ...p, signal: context.signal })
+    ])),
     'workspace.git.branch.create': async () => fail('GIT_APPROVAL_REQUIRED', 'Git branch creation must use Capability Broker approval'),
     'workspace.git.worktree.create': async () => fail('GIT_APPROVAL_REQUIRED', 'Git worktree creation must use Capability Broker approval'),
 
@@ -452,7 +479,27 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
   }
 
   // Trusted in-process entry only. Transport approval flags cannot call this path.
+  async function validateApprovedGit({method, params = {}} = {}) {
+    const action = {'workspace.git.stage': 'stage', 'workspace.git.unstage': 'unstage', 'workspace.git.commit.staged': 'commit'}[method];
+    if (!action) fail('METHOD_NOT_FOUND', 'Unknown exact Git index action');
+    const entry = assertGitWritable(requireWorkspace(params));
+    if (entry.settings?.policies?.gitCommit === 'deny') fail('GIT_COMMIT_DENIED', 'Workspace policy denies Git mutations');
+    return gitProduct.validateIndexAction(entry, params, action);
+  }
   async function executeApprovedGit({ method, params = {} } = {}) {
+    const action = {'workspace.git.stage': 'stage', 'workspace.git.unstage': 'unstage', 'workspace.git.commit.staged': 'commitStaged'}[method];
+    if (action) {
+      const entry = assertGitWritable(requireWorkspace(params));
+      if (entry.settings?.policies?.gitCommit === 'deny') fail('GIT_COMMIT_DENIED', 'Workspace policy denies Git mutations');
+      try {
+        const result = await gitProduct[action](entry, params, params.actor); gitInfoCache.delete(entry.id); return result;
+      } catch (error) {
+        // Admission belongs to Workspace. Only the Git domain's own proof
+        // after successful admission can classify this Git attempt.
+        if (gitProduct.isKnownIndexNoEffectError(error)) knownGitNoEffect.add(error);
+        throw error;
+      }
+    }
     if (method === 'workspace.git.commit') {
       const entry = assertWritable(requireWorkspace(params));
       if (entry.settings?.policies?.gitCommit === 'deny') fail('GIT_COMMIT_DENIED', 'Workspace policy denies commits');
@@ -525,7 +572,7 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     return contentProof(assertWritable(entry), [], signal);
   }
 
-  return { execute, executeApprovedGit, describeWorkspace, applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof, readPostWriteVerificationConfig, resolvePostWriteVerification };
+  return { execute, executeApprovedGit, validateApprovedGit, isKnownGitNoEffect, describeWorkspace, applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof, readPostWriteVerificationConfig, resolvePostWriteVerification };
 }
 
 export { WorkspaceBoundaryError, WorkspaceRegistryError, WorkspaceToolError };

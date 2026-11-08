@@ -549,6 +549,17 @@ export async function fileSearchAsync(rootReal, { query = '', glob = '', searchP
 
 // ── Git（只读直接执行；commit 由 service 层按策略审批后调用） ────────────────
 
+function execGitDrained(args, options, callback) {
+  // execFile invokes its Abort callback before the owned child has closed.
+  // Keep the existing bounded output, but release no caller or recovery phase
+  // until both the result and the actual child-close event are available.
+  let closed = false, result;
+  const finish = () => { if (closed && result) { const value = result; result = null; callback(...value); } };
+  const child = execFile('git', args, options, (...value) => { result = value; finish(); });
+  child.once('close', () => { closed = true; finish(); });
+  return child;
+}
+
 export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile, literalPaths = false, signal, input, repository, referenceBackend,
   binaryOutput = false, maxOutputBytes = GIT_MAX_BUFFER } = {}) {
   if (typeof binaryOutput !== 'boolean' || !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1
@@ -593,7 +604,7 @@ export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile,
   // Git's clean/process filters execute commands even for status/diff. Enumerate
   // configuration without running worktree conversions, then disable every driver.
   const keys = await new Promise((resolve, reject) => {
-    execFile('git', ['config', '--null', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process|required)$'],
+    execGitDrained(['config', '--null', '--name-only', '--get-regexp', '^filter\\..*\\.(clean|smudge|process|required)$'],
       { cwd, env, windowsHide: true, timeout: timeoutMs, maxBuffer: GIT_MAX_BUFFER, signal }, (error, stdout) => {
         if (error && error.code !== 1) { reject(error); return; }
         resolve(String(stdout ?? '').split('\0').filter(Boolean));
@@ -603,8 +614,7 @@ export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile,
   const filters = keys.flatMap(key => ['-c', key + (key.endsWith('.required') ? '=false' : '=')]);
   return new Promise((resolve, reject) => {
     let inputError = null;
-    const child = execFile(
-      'git',
+    const child = execGitDrained(
       [...(literalPaths?['--literal-pathspecs']:[]), '-c', 'commit.gpgSign=false', '-c', 'core.fsmonitor=false', '-c', `core.hooksPath=${process.platform === 'win32' ? 'NUL' : '/dev/null'}`, ...filters, ...args],
       {
         cwd,

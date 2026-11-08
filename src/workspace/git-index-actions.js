@@ -133,7 +133,12 @@ function repositoryFacts(entry) {
       } catch { fail('GIT_REPOSITORY_CHANGED', 'Git metadata ownership changed; refresh the Workspace Git review'); }
     };
     assertUnchanged();
-    return { root, gitDir, commonDir, repository: { gitDir, commonDir, workTree: root }, repositoryIdentity: digest(JSON.stringify([entry.id, facts])), assertRepositoryUnchanged: assertUnchanged };
+    // Recovery is a fresh review, not reuse of the old attempt's config/marker
+    // timestamps. Current observe() still validates all reverse pointers and
+    // facts; this narrower identity proves the same physical directory owners.
+    const recoveryIdentity = digest(JSON.stringify([entry.id, captured.filter(item => item.directory)
+      .map(item => [item.location, item.identity.slice(0, 2)])]));
+    return { root, gitDir, commonDir, repository: { gitDir, commonDir, workTree: root }, repositoryIdentity: digest(JSON.stringify([entry.id, facts])), recoveryIdentity, assertRepositoryUnchanged: assertUnchanged };
   } catch (error) {
     if (['GIT_ROOT_REQUIRED', 'GIT_REPOSITORY_CHANGED'].includes(error.code)) throw error;
     fail('GIT_REPOSITORY_UNVERIFIED', 'Git metadata ownership is not a verified repository or native linked-worktree relation');
@@ -214,6 +219,7 @@ async function observe(entry, paths) {
   if (!['files', 'reftable'].includes(refFormat)) fail('GIT_REPOSITORY_UNVERIFIED', 'Custom Git reference storage needs a proven metadata owner before G1 actions');
   source.refFormat = refFormat;
   source.repositoryIdentity = digest(JSON.stringify([source.repositoryIdentity, refFormat]));
+  source.recoveryIdentity = digest(JSON.stringify([source.recoveryIdentity, refFormat]));
   const status = await gitStatus(root, { completeFiles: true, repository: source.repository });
   if (!status.isRepo) fail('GIT_NOT_REPOSITORY', 'Git index actions require an existing repository');
   if (!samePath(status.repoRoot, root)) fail('GIT_ROOT_REQUIRED', 'Git index actions require the registered repository root');
@@ -234,7 +240,7 @@ async function observe(entry, paths) {
   const content = observeFiles(root, paths);
   if (!samePath(fs.realpathSync.native(entry.root), root) || !sameNode(rootStat, fs.lstatSync(root)) || !sameNode(gitDirStat, fs.lstatSync(gitDir)) || indexBytes(indexPath).identity !== index.identity) fail('GIT_INDEX_CHANGED', 'Git repository changed during review');
   source.assertRepositoryUnchanged();
-  return { ...source, rootStat, gitDirStat, indexPath, index, entries, headSha: status.headSha, headRef, ...content };
+  return { ...source, rootStat, gitDirStat, indexPath, index, entries, status, headSha: status.headSha, headRef, ...content };
 }
 
 function assertExpected(meta, request, original) {
@@ -259,6 +265,11 @@ function assertExpected(meta, request, original) {
   }
   if (original && (!samePath(original.root, meta.root) || !samePath(original.gitDir, meta.gitDir) || !sameNode(original.rootStat, meta.rootStat) || !sameNode(original.gitDirStat, meta.gitDirStat))) fail('GIT_INDEX_CHANGED', 'Repository ownership changed during dispatch');
 }
+
+// Internal Workspace facts shared by exact Git mutations. Callers still own
+// their operation-specific review, authorization, effect and recovery contract.
+export { observe as observeGitMutation, assertExpected as assertGitMutationExpected,
+  acquireIndexLock as acquireGitMutationIndexLock, indexBytes as readGitMutationIndex };
 
 function acquireIndexLock(meta) {
   const location = meta.indexPath + '.lock';
@@ -297,6 +308,12 @@ async function headEntries(meta, paths) {
 /** Trusted executors behind the existing Capability Broker. No RPC approval
  * flag, repository store, shell, remote operation or working-file write. */
 export function createGitIndexActions({ record = () => {} } = {}) {
+  const knownNoEffect = new WeakSet();
+  function noEffect(error) {
+    if (error?.effectStatus === 'unknown') return error;
+    const failure = Object.assign(new Error(error?.message ?? 'Git preparation failed'), error, {effectStatus: 'none'});
+    knownNoEffect.add(failure); return failure;
+  }
   async function reviewStaged(entry, { paths } = {}) {
     const selected = pathsOf(paths), meta = await observe(entry, selected);
     const request = { paths: selected, expectedHead: meta.headSha, expectedHeadRef: meta.headRef, indexIdentity: meta.index.identity, expectedRepositoryIdentity: meta.repositoryIdentity,
@@ -305,7 +322,7 @@ export function createGitIndexActions({ record = () => {} } = {}) {
     return { workspaceId: entry.id, ...request, headSha: meta.headSha, reviewedBytes: meta.total };
   }
 
-  async function execute(entry, input, actor, action) {
+  async function prepareAction(entry, input, action) {
     const staged = action === 'commit', request = requireRequest(input, staged), before = await observe(entry, request.paths);
     assertExpected(before, request);
     if (staged && before.headRef === null) fail('GIT_DETACHED_COMMIT_UNSUPPORTED', 'Create or switch to a reviewed local branch before committing staged content');
@@ -313,8 +330,14 @@ export function createGitIndexActions({ record = () => {} } = {}) {
       const version = /^git version (\d+)\.(\d+)\.(\d+)(?:[.\-+ ].*)?$/.exec((await run(before, ['version'])).stdout.trim());
       if (!version || Number(version[1]) !== 2 || Number(version[2]) < 55) fail('GIT_REFERENCE_BACKEND_UNSUPPORTED', 'Pinned Git reference effects require a supported Git 2.x release at version 2.55 or later');
     }
-    const lock = acquireIndexLock(before);
-    let temporary, temporaryIdentity, result, outcomeError, effect = false, sha;
+    return {staged, request, before};
+  }
+  async function execute(entry, input, actor, action) {
+    let prepared, lock;
+    try { prepared = await prepareAction(entry, input, action); lock = acquireIndexLock(prepared.before); }
+    catch (error) { throw noEffect(error); }
+    const {staged, request, before} = prepared;
+    let temporary, temporaryIdentity, result, outcomeError, attempted = false, sha;
     const recheck = async () => { lock.assertOwned(); assertExpected(await observe(entry, request.paths), request, before); lock.assertOwned(); };
     try {
       await recheck();
@@ -372,15 +395,15 @@ export function createGitIndexActions({ record = () => {} } = {}) {
         // GIT_COMMON_DIR is a repository projection, not a ref-backend pin:
         // Git 2.55 resolves commondir again inside refs. The validated native
         // backend URI overrides both that marker and config payload at launch.
+        attempted = true;
         try { await run(before, ['update-ref', '-m', 'CetaMesh approved staged commit', '--stdin'], { input: transaction, referenceBackend: { format: before.refFormat, root: before.commonDir } }); }
         catch (error) {
           if (!Number.isInteger(error.exitCode) || error.killed) {
             try { record(entry, actor ?? 'capability-broker', 'git.commit.staged.unknown', `sha=${sha};ref=${before.headRef}`); } catch {}
             fail('GIT_COMMIT_REVIEW_REQUIRED', 'Commit reference outcome is unconfirmed; retain this operation and inspect Git history before another action', { effectStatus: 'unknown', sha, ref: before.headRef });
           }
-          fail('GIT_REF_CHANGED', 'The reviewed HEAD reference is locked or changed; existing refs and index were retained');
+          fail('GIT_REF_CHANGED', 'The native reference attempt failed; retain the operation and inspect its actual outcome before retrying', { effectStatus: 'unknown', sha, ref: before.headRef });
         }
-        effect = true;
         try { record(entry, actor ?? 'capability-broker', 'git.commit.staged', `sha=${sha};ref=${before.headRef};base=${before.headSha ?? 'unborn'}`); }
         catch { fail('GIT_AUDIT_REVIEW_REQUIRED', 'Commit exists but its Workspace receipt could not be saved; retain the operation for review', { effectStatus: 'unknown', sha, ref: before.headRef }); }
         // Exact staged entries already equal the new commit. Keeping the normal
@@ -393,16 +416,17 @@ export function createGitIndexActions({ record = () => {} } = {}) {
         // the synchronous replacement through our owned normal Git lock.
         const files = observeFiles(before.root, request.paths);
         assertExpected({ ...before, ...files, index: indexBytes(before.indexPath) }, request, before);
-        before.assertRepositoryUnchanged(); lock.replace(bytes); effect = true;
+        before.assertRepositoryUnchanged(); attempted = true; lock.replace(bytes);
         result = { [action === 'stage' ? 'staged' : 'unstaged']: true, paths: request.paths, indexIdentity: digest(bytes), headSha: before.headSha };
       }
       try { if (!staged) record(entry, actor ?? 'capability-broker', 'git.' + action, request.paths.join(', ').replace(/[\x00-\x1f\x7f]/g, ' ')); }
       catch { fail('GIT_AUDIT_REVIEW_REQUIRED', 'Git changed but its audit record could not be saved; inspect the retained operation before retrying', { effectStatus: 'unknown', ...(sha ? { sha } : {}) }); }
       return result;
     } catch (error) {
-      outcomeError = effect && error.effectStatus !== 'unknown'
-        ? Object.assign(new Error('Git changed but completion could not be confirmed; retain and inspect the operation before retrying'), { code: 'GIT_OPERATION_REVIEW_REQUIRED', effectStatus: 'unknown', ...(sha ? { sha, ref: before.headRef } : {}) })
+      outcomeError = attempted && error.effectStatus !== 'unknown'
+        ? Object.assign(new Error('Git mutation was attempted but completion could not be confirmed; retain and inspect the operation before retrying'), { code: 'GIT_OPERATION_REVIEW_REQUIRED', effectStatus: 'unknown', causeCode: error.code ?? 'GIT_FAILED', ...(sha ? { sha, ref: before.headRef } : {}) })
         : typeof error.code === 'string' ? error : Object.assign(new Error('Git index action could not complete; existing files and history were retained'), { code: 'GIT_FAILED' });
+      if (!attempted) outcomeError = noEffect(outcomeError);
       throw outcomeError;
     } finally {
       const pending = [];
@@ -429,6 +453,9 @@ export function createGitIndexActions({ record = () => {} } = {}) {
       }
     }
   }
-  return { reviewStaged, stage: (entry, request, actor) => execute(entry, request, actor, 'stage'),
+  return { reviewStaged, isKnownIndexNoEffectError: error => knownNoEffect.has(error), async validateIndexAction(entry, input, action) {
+      if (!['stage', 'unstage', 'commit'].includes(action)) fail('METHOD_NOT_FOUND', 'Unknown exact Git index action');
+      await prepareAction(entry, input, action); return {valid: true};
+    }, stage: (entry, request, actor) => execute(entry, request, actor, 'stage'),
     unstage: (entry, request, actor) => execute(entry, request, actor, 'unstage'), commitStaged: (entry, request, actor) => execute(entry, request, actor, 'commit') };
 }

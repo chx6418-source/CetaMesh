@@ -5,6 +5,24 @@ and `commitStaged` for trusted Core executors. Production mutations must pass
 through the existing Capability Broker authorization and approval boundary.
 These methods do not provide an approval flag or a second execution service.
 
+The Desktop `workspace.git.index.review` route exposes the current exact review.
+`workspace.git.stage`, `workspace.git.unstage` and `workspace.git.commit.staged`
+go through the existing Capability Broker, with high-risk, single-call Owner
+approval. The ordinary Workspace RPC refuses mutation flags. The trusted
+`validateApprovedGit` entry reuses the Git domain's read-only preparation both
+before approval and at dispatch; the executor retains its final lock/CAS checks.
+No separate index state or approval queue is maintained. Non-Owner Agents need
+explicit grants for these new capability IDs; old grants do not expand. Extension
+index mutations remain refused until their exact path-scope contract is supported.
+
+Git Workspace offers complete-file or staged-only submission. Staged-only review
+binds the index objects, preserving later working edits. The UI obtains a fresh
+Core review and awaits the existing approval result; acceptance of a request does
+not imply completion. Workspace/message generations reject stale review replies,
+and failed requests retain drafts. Registered `test-git-core-actions` and
+`test-git-workspace-ui` exercise actual Git, Core approval and Chromium, separately
+from native WebView2 or installed-product acceptance.
+
 A review binds exact normalized relative paths, current file SHA-256 or absence,
 complete normal-index identity, HEAD SHA and full local HEAD ref, and
 `expectedRepositoryIdentity`. A staged commit additionally binds every selected

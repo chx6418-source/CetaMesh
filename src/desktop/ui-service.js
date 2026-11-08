@@ -1679,8 +1679,18 @@ export function createDesktopUiService({ services = {}, system = services.system
       return { task: projectTaskWithUsage(updated), handoff: { success: Boolean(result.to?.sessionId), from: result.from, to: result.to } };
     },
     'ui.workspace.git.overview':p=>workspace('workspace.git.overview',{id:idParam(p)}),
+    'ui.workspace.git.index.review': p => workspace('workspace.git.index.review', {id: idParam(p), paths: p.paths}),
+    ...Object.fromEntries(['status.page', 'history', 'branches', 'commit.detail', 'preview', 'review'].map(action => [
+      'ui.workspace.git.' + action, async (p, { signal } = {}) => {
+        if (!services.workspaceService) throw uiError('SERVICE_UNAVAILABLE', 'Workspace is unavailable');
+        const result = await services.workspaceService.execute({ method: 'workspace.git.' + action,
+          params: { ...p, id: idParam(p) } }, { signal });
+        requireIpcItem(result);
+        return result;
+      }
+    ])),
     'ui.workspace.git.diff':p=>workspace('workspace.git.diff',{id:idParam(p),cached:p.cached===true,...(p.path!==undefined?{path:p.path}:{})}),
-    ...Object.fromEntries(['commit','branch.create','worktree.create'].map(action=>['ui.workspace.git.'+action,async(p,{signal}={})=>{
+    ...Object.fromEntries(['commit','branch.create','worktree.create','stage','unstage','commit.staged'].map(action=>['ui.workspace.git.'+action,async(p,{signal}={})=>{
       const {id,taskId,operationId,...input}=p;const capability='git.'+action;
       const result=await services.capabilityService.broker.execute({capability,actor:OWNER_ACTOR,approved:false,workspaceId:id,taskId,
         ...(operationId?{operationId}:{}),input,reason:'Owner requested scoped Git action; await explicit approval'},{signal});

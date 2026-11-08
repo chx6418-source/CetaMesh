@@ -270,7 +270,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    };
    const providerRequest=cooperativeRead?{...request,...(signal?{signal}:{}),assertAuthorized,
     consumeReadBytes:typeof consumeReadBytes==='function'?consumeReadBytes:undefined}:signal?{...request,signal}:request;
-   let executorEntered=false;
+   let executorEntered=false,knownNoEffect=false;
    const providerPromise=Promise.resolve().then(async()=>{
     if(signal?.aborted)throw abortError(signal);
     if(registry.require(request.capability)!==entry)throw capabilityError('APPROVAL_EXPIRED','Capability changed before dispatch');
@@ -283,6 +283,14 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
       if(parent){try{await validatePluginParent(request);}catch(error){error.effectStatus='unknown';throw error;}return parent.descriptor.projectChildResult(parent.parent,result);}
       return result;}
     catch(error){
+     // Only an in-process Core descriptor can attest to the exact error.
+     // Provider status/code fields and asynchronous guesses are not receipts.
+     try{
+      const proof=entry.isKnownNoEffectError?.(error);
+      if(proof&&typeof proof.then==='function')Promise.resolve(proof).catch(()=>{});
+      knownNoEffect=proof===true;
+     }catch{knownNoEffect=false;}
+     if(knownNoEffect)throw error;
      // Once a declared effect reaches its executor, a rejected response is not
      // proof that nothing happened. Do not let the model recover by replaying it.
      if((entry.effect&&entry.effect!=='read-only')||['message.send','filesystem.write','git.commit','test.run','publish'].includes(entry.permission??entry.id)
@@ -292,7 +300,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
      }
      throw error;
     }
-   }).then(result=>{settleDispatch(request,'completed',entry,result,claim);return result;},error=>{settleDispatch(request,!executorEntered?'failed-no-effect':error.effectStatus==='unknown'?'outcome-unknown':'failed',entry,undefined,claim);throw error;});
+   }).then(result=>{settleDispatch(request,'completed',entry,result,claim);return result;},error=>{settleDispatch(request,!executorEntered||knownNoEffect?'failed-no-effect':error.effectStatus==='unknown'?'outcome-unknown':'failed',entry,undefined,claim);throw error;});
    const result=await (entry.cancellationAware===true&&(request.actor.kind==='agent'||cooperativeRead)?providerPromise:awaitWithAbort(providerPromise,signal));
    audit({requestId:request.requestId,capability:entry.id,status:'completed',actor:request.actor.id});
    return {requestId:request.requestId,status:'completed',capability:entry.id,result};

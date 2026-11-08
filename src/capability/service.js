@@ -34,6 +34,8 @@ export const WORKSPACE_CAPABILITIES = Object.freeze({
   'workspace.file.search': 'filesystem.search', 'workspace.git.status': 'git.status',
   'workspace.git.diff': 'git.diff', 'workspace.git.commit': 'git.commit',
   'workspace.git.overview':'git.overview','workspace.git.branch.create':'git.branch.create','workspace.git.worktree.create':'git.worktree.create',
+  'workspace.git.index.review': 'git.index.review', 'workspace.git.stage': 'git.stage',
+  'workspace.git.unstage': 'git.unstage', 'workspace.git.commit.staged': 'git.commit.staged',
   'workspace.test.run': 'test.run', 'workspace.create': 'workspace.create',
   'workspace.apply': 'workspace.apply'
 });
@@ -51,6 +53,15 @@ const stringField = description => ({ type: 'string', description });
 const objectInput = (properties = {}, required = []) => ({
   type: 'object', properties, required, additionalProperties: false
 });
+const GIT_INDEX_MUTATIONS = ['git.stage', 'git.unstage', 'git.commit.staged'];
+const gitIndexInput = (commit = false) => objectInput({
+  paths: {type: 'array', items: stringField('Exact Workspace-relative regular file.'), minItems: 1, maxItems: 100},
+  expectedHead: {type: ['string', 'null']}, expectedHeadRef: {type: ['string', 'null']},
+  indexIdentity: {type: ['string', 'null']}, expectedRepositoryIdentity: stringField('Exact reviewed repository ownership digest.'),
+  expectedHashes: {type: 'object', additionalProperties: {type: ['string', 'null']}},
+  expectedIndexEntries: {type: 'array', maxItems: 100, items: objectInput({path: {type: 'string'}, mode: {type: ['string', 'null']}, oid: {type: ['string', 'null']}}, ['path', 'mode', 'oid'])},
+  ...(commit ? {message: stringField('Commit message for the exact reviewed staged objects.')} : {})
+}, ['paths', 'expectedHead', 'expectedHeadRef', 'indexIdentity', 'expectedRepositoryIdentity', 'expectedHashes', ...(commit ? ['expectedIndexEntries', 'message'] : [])]);
 const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
   'filesystem.read': ['Read a page of a file inside the authorized Workspace.', objectInput({ path: stringField('Workspace-relative file path.'),
     offset: { type: 'integer', minimum: 0 }, maxBytes: { type: 'integer', minimum: 1, maximum: 50000 },
@@ -60,6 +71,10 @@ const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
     offset: { type: 'integer', minimum: 0 }, maxResults: { type: 'integer', minimum: 1, maximum: 100 } }, ['query'])],
   'git.status': ['Read the current Git status for the authorized Workspace.', objectInput()],
   'git.overview':['Read Git branches, history, conflicts, Task associations and managed Worktrees.',objectInput()],
+  'git.index.review': ['Read exact current file/index/HEAD identities before a scoped Git mutation.', objectInput({paths: {type: 'array', items: {type: 'string'}, minItems: 1, maxItems: 100}}, ['paths'])],
+  'git.stage': ['Stage exactly reviewed files without changing working files or unrelated staged entries. Owner approval required.', gitIndexInput()],
+  'git.unstage': ['Unstage exactly reviewed entries without changing working files or unrelated staged entries. Owner approval required.', gitIndexInput()],
+  'git.commit.staged': ['Commit exactly reviewed staged objects and preserve partial working edits and unrelated staged entries. Owner approval required.', gitIndexInput(true)],
   'git.branch.create':['Create a branch associated with the current server-bound Task at the reviewed HEAD. Owner approval required.',objectInput({branch:stringField('New task branch.'),expectedHead:stringField('Reviewed source HEAD.')},['branch','expectedHead'])],
   'git.worktree.create':['Create an isolated Worktree for the current server-bound Task. Owner approval required.',objectInput({branch:stringField('New task branch.'),expectedHead:stringField('Reviewed source HEAD.')},['branch','expectedHead'])],
   'git.diff': ['Read a bounded Git diff summary inside the authorized Workspace.', objectInput({ path: stringField('Optional Workspace-relative file path.'), statOnly: { type: 'boolean' } })],
@@ -671,7 +686,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       broker.register({ id, cancellationAware: concurrentRead || id === 'test.run',
         ...(concurrentRead ? { readOnly: true, parallelSafe: true, effect: 'read-only',
           cancellationMode: 'cooperative', timeoutMode: 'await-settlement' } : {}),
-        permission: ['git.branch.create','git.worktree.create'].includes(id)?'git.commit':id==='git.overview'?'git.status':id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
+        permission: ['git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS].includes(id)?'git.commit':['git.overview', 'git.index.review'].includes(id)?'git.status':id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
+        ...(GIT_INDEX_MUTATIONS.includes(id) ? {effect: 'conditional-write'} : id === 'git.index.review' ? {effect: 'read-only'} : {}),
+        ...(GIT_INDEX_MUTATIONS.includes(id) ? {isKnownNoEffectError: error => workspaceService.isKnownGitNoEffect?.(error) === true} : {}),
         ...(['git.branch.create','git.worktree.create'].includes(id)?{effect:'non-idempotent',requiresTask:true}:{}),
         description: WORKSPACE_TOOL_DESCRIPTORS[id][0],
         inputSchema: WORKSPACE_TOOL_DESCRIPTORS[id][1],
@@ -688,8 +705,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         // test.run = 执行 Workspace 中可被 Agent 修改的代码：high（审批必经），
         // 不是普通 medium。Owner 直接点击"运行测试"走 executeWorkspace 的
         // approved:true（Owner 的点击本身就是显式决定，语义与既往一致）。
-        risk: ['workspace.create', 'git.commit','git.branch.create','git.worktree.create', 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
+        risk: ['workspace.create', 'git.commit','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS, 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
         async validate(request, { replay = false } = {}) {
+          if (GIT_INDEX_MUTATIONS.includes(id)) {
+            if (request.actor.kind === 'extension') throw capabilityError('EXTENSION_SCOPE_UNSUPPORTED', 'Exact Git mutations require the Owner or an explicitly granted Task principal');
+            if (!replay) await workspaceService.validateApprovedGit({method, params: {...request.input, id: request.workspaceId}});
+          }
           if(['git.branch.create','git.worktree.create'].includes(id)&&!request.taskId)throw capabilityError('TASK_SCOPE_MISMATCH','Git action requires the current server-bound Task');
           if (id === 'workspace.apply') {
             validateWorkspaceImport(request);
@@ -790,7 +811,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               }
               return result;
             }
-            const executor=['git.commit','git.branch.create','git.worktree.create'].includes(id)&&workspaceService.executeApprovedGit?workspaceService.executeApprovedGit:workspaceService.execute;
+            const executor=['git.commit','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS].includes(id)&&workspaceService.executeApprovedGit?workspaceService.executeApprovedGit:workspaceService.execute;
             if(id==='git.overview'&&request.actor.kind!=='owner'){
               const overview=await executor({method,params:{...request.input,id:request.workspaceId}});
               const allowed=request.actor.grants?.taskIds??[request.taskId];return {...overview,tasks:overview.tasks.filter(t=>allowed.includes(t.id)),branches:overview.branches.filter(b=>!b.taskId||allowed.includes(b.taskId)),worktrees:overview.worktrees.filter(w=>!w.taskId||allowed.includes(w.taskId)),worktreeRelation:overview.worktreeRelation?.taskId&&!allowed.includes(overview.worktreeRelation.taskId)?null:overview.worktreeRelation};

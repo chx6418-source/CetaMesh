@@ -12,6 +12,9 @@ export function createCapabilityRegistry() {
         throw capabilityError('INVALID_CAPABILITY', 'id and execute required');
       }
       const id = String(definition.id).trim();
+      if (definition.isKnownNoEffectError !== undefined && typeof definition.isKnownNoEffectError !== 'function') {
+        throw capabilityError('INVALID_CAPABILITY', 'Known no-effect evidence requires an in-process verifier');
+      }
       if (definition.effect !== undefined && !CAPABILITY_EFFECTS.includes(definition.effect)) {
         throw capabilityError('INVALID_CAPABILITY', 'Unknown capability effect');
       }

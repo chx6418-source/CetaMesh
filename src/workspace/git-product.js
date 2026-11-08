@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { isInsideRoot, resolveInside } from './boundary.js';
 import { gitRun, gitStatus } from './tools.js';
+import { createGitObservations } from './git-observation.js';
 import { createGitIndexActions } from './git-index-actions.js';
 
 const fail = (code, message, extra = {}) => { throw Object.assign(new Error(message), { code, ...extra }); };
@@ -132,5 +133,5 @@ export function createGitProduct({ stateDir, registry, getTask = () => null, lis
     record(entry, actor, 'git.worktree.create', binding.branch);
     return { created: true, ...binding, parentWorkspaceId: entry.id, workspace: { id: workspace.id, name: workspace.name, root: workspace.root, gitWorktree: workspace.gitWorktree } };
   }
-  return { overview, create, ...createGitIndexActions({ record }) };
+  return { overview, create, ...createGitObservations(), ...createGitIndexActions({ record }) };
 }

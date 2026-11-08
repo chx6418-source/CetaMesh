@@ -56,6 +56,7 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
   const [notice, setNotice] = useState('');
   const [selected, setSelected] = useState<string[]>([]);
   const [message, setMessage] = useState('');
+  const [commitMode, setCommitMode] = useState('working');
   const [taskId, setTaskId] = useState('');
   const [branch, setBranch] = useState('');
   const [review, setReview] = useState<Review | null>(null);
@@ -79,7 +80,7 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
   useEffect(() => {
     // Drafts and selections belong to this Workspace, never to the next selected project.
     operation.current++;
-    setBusy(false); setSelected([]); setMessage(''); setBranch(''); setTaskId('');
+    setBusy(false); setSelected([]); setMessage(''); setCommitMode('working'); setBranch(''); setTaskId('');
     setPreviewPath(''); setDiff(null); setDiffError(''); setReview(null); setDetail(null); setNotice('');
     previewWorkspace.current = null; setLineStatistics({});
     setQuery(''); setStatusFilter('all'); setPage(0); setBranchQuery(''); setWorktreeQuery('');
@@ -124,6 +125,7 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
   const visiblePage = Math.min(page, lastPage);
   const visibleEntries = filteredEntries.slice(visiblePage * PAGE_SIZE, (visiblePage + 1) * PAGE_SIZE);
   const selectedSet = useMemo(() => new Set(selected), [selected]);
+  const selectedStaged = entries.filter(entry => selectedSet.has(entry.path) && entry.commitEligible && staged(entry));
   const pageEligible = visibleEntries.filter(entry => entry.commitEligible);
   const allPageSelected = pageEligible.length > 0 && pageEligible.every(entry => selectedSet.has(entry.path));
   const hiddenSelection = selected.filter(path => !visibleEntries.some(entry => entry.path === path)).length;
@@ -140,7 +142,7 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
     const epoch = generation.current, targetWorkspace = workspaceId, request = ++operation.current;
     setBusy(true); setError(''); setNotice('');
     try {
-      const response = await callRef.current(method, params) as { status?: string; committed?: boolean; created?: boolean; result?: { committed?: boolean; created?: boolean; status?: string } };
+      const response = await callRef.current(method, params) as { status?: string; committed?: boolean; created?: boolean; staged?: boolean; unstaged?: boolean; result?: { committed?: boolean; created?: boolean; staged?: boolean; unstaged?: boolean; status?: string } };
       if (generation.current !== epoch || workspaceRef.current !== targetWorkspace || operation.current !== request) return;
       const result = response.result ?? response;
       const statuses = [response.status, result.status];
@@ -149,7 +151,7 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
         setNotice('请求正在等待审批，请打开任务页，在审批面板确认当前操作。批准完成前不会视为已创建或已提交。');
       } else if (result.committed === false) {
         setNotice('所选文件没有可提交的变化。提交草稿已保留。');
-      } else if (result.committed === true || result.created === true) {
+      } else if (result.committed === true || result.created === true || result.staged === true || result.unstaged === true) {
         setNotice(success);
       } else {
         setNotice('请求已受理，执行结果尚未确认。请检查审批状态并刷新；草稿已保留。');
@@ -163,7 +165,23 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
     if (!overview || !selected.length || !message.trim() || locked || overview.conflicts.length) return;
     const selectedEntries = entries.filter(entry => selectedSet.has(entry.path) && entry.commitEligible);
     if (!selectedEntries.length) return;
+    if (commitMode === 'staged') { await indexAction('commit.staged', selectedStaged.map(entry => entry.path)); return; }
     await mutate('ui.workspace.git.commit', { id: workspaceId, ...(taskId ? { taskId } : {}), message: message.trim(), paths: selectedEntries.map(entry => entry.path), expectedHead: overview.git.headSha, expectedHashes: Object.fromEntries(selectedEntries.map(entry => [entry.path, entry.sha256])) }, '所选文件已提交，未选中的改动已保留。');
+  }
+  async function indexAction(action: 'stage' | 'unstage' | 'commit.staged', paths: string[]) {
+    if (locked || !paths.length || paths.length > 100) return;
+    const targetWorkspace = workspaceId, epoch = generation.current, request = ++operation.current;
+    setBusy(true); setError(''); setNotice('');
+    try {
+      const observed = await callRef.current('ui.workspace.git.index.review', {id: targetWorkspace, paths}) as Record<string, unknown>;
+      if (workspaceRef.current !== targetWorkspace || generation.current !== epoch || operation.current !== request) return;
+      if (observed.workspaceId !== targetWorkspace || JSON.stringify(observed.paths) !== JSON.stringify(paths)) throw new Error('Git 审查范围已改变，请刷新后重试。');
+      const input = Object.fromEntries(['paths', 'expectedHead', 'expectedHeadRef', 'indexIdentity', 'expectedRepositoryIdentity', 'expectedHashes', 'expectedIndexEntries'].map(key => [key, observed[key]]));
+      await mutate('ui.workspace.git.' + action, {id: targetWorkspace, ...(taskId ? {taskId} : {}), ...input,
+        ...(action === 'commit.staged' ? {message: message.trim()} : {})}, action === 'stage' ? '所选文件已暂存，工作文件和其他暂存项保持不变。'
+          : action === 'unstage' ? '所选文件已取消暂存，工作文件和其他暂存项保持不变。' : '所选暂存内容已提交，未暂存编辑和其他暂存项已保留。');
+    } catch (cause) { if (workspaceRef.current === targetWorkspace && operation.current === request) setError(errorMessage(cause)); }
+    finally { if (workspaceRef.current === targetWorkspace && operation.current === request) setBusy(false); }
   }
   function prepareCreation(kind: Review['kind']) {
     if (!canCreate || !overview?.git.headSha) return;
@@ -213,14 +231,20 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
           <section className="git-preview" aria-label="文件差异预览"><div className="git-section-heading"><h2>Diff · 文件差异</h2>{previewPath && <Button type="button" variant="ghost" compact onClick={() => setPreviewPath('')}>关闭预览</Button>}</div>
             {!previewPath ? <div className="git-empty">选择文件名，查看该文件的差异。<p>文件复选框仅选择提交范围。</p></div> : <><Select label="Diff 来源" value={cached ? 'cached' : 'working'} onChange={event => setCached(event.target.value === 'cached')}><option value="working">工作目录</option><option value="cached">暂存区</option></Select>
               <DiffViewer path={previewPath} output={diff?.output??''} loading={!diff&&!diffError} error={diffError} truncated={diff?.truncated} onRetry={()=>setRevision(value=>value+1)} onExplain={onExplain?(path,output)=>onExplain(path,output,workspaceId):undefined} />
-              <div className="git-stage-unavailable"><Button compact disabled title="现有受控 Git 执行器尚未提供文件级暂存；不会绕过 Broker 直接运行 Git。">{cached?'取消文件暂存':'暂存此文件'}</Button><small>文件级暂存执行器未接入。仍可在提交区按审批提交所选完整文件。</small></div>
+              <div className="git-stage-unavailable"><Button compact disabled={locked || !entries.find(entry => entry.path === previewPath)?.commitEligible || !!overview.conflicts.length} onClick={() => void indexAction(cached ? 'unstage' : 'stage', [previewPath])}>{cached?'取消文件暂存':'暂存此文件'}</Button><small>审批后只修改这个文件的暂存状态，工作文件保持原样。</small></div>
             </>}
           </section></div>}
         {tab === 'history' && <><div className="git-section-heading"><h2>提交记录</h2><small>最近 {overview.history.length} 次提交</small></div>{!overview.history.length && <div className="git-empty">仓库还没有提交记录。</div>}{overview.history.map(item => <div className="git-data-row" key={item.sha}><div><strong>{item.subject}</strong><small>{new Date(item.committedAt).toLocaleString()} · {item.parents.length > 1 ? '合并提交' : '提交'}</small></div><code title={item.sha}>{shortSha(item.sha)}</code></div>)}</>}
         {tab === 'branches' && <><div className="git-section-heading"><h2>本地分支</h2><Badge>{overview.branches.length}</Badge></div><SearchInput label="搜索分支" placeholder="搜索分支、上游或 Task…" value={branchQuery} onChange={event => setBranchQuery(event.target.value)} />{!branches.length && <div className="git-empty">{overview.branches.length ? '没有匹配的分支。' : '首次提交后会显示本地分支。'}</div>}{branches.map(item => <div className="git-data-row" key={item.name}><div><Button type="button" variant="ghost" className="git-detail-link" aria-label={'分支详情 ' + item.name} onClick={() => setDetail({ kind: 'branch', item })}>{item.name}</Button><small>{item.upstream ? '跟踪 ' + item.upstream : '本地分支'} · {item.taskId ? 'Task ' + item.taskId : 'Task 未关联'}</small></div><div>{item.current && <Badge tone="accent">当前分支</Badge>}<small><code>{shortSha(item.headSha)}</code></small></div></div>)}</>}
         {tab === 'worktrees' && <><div className="git-section-heading"><h2>Worktrees · 工作树</h2><Badge>{overview.worktrees.length}</Badge></div><SearchInput label="搜索工作树" placeholder="搜索工作树、实际分支或 Task…" value={worktreeQuery} onChange={event => setWorktreeQuery(event.target.value)} /><div className="git-worktree-list">{!worktrees.length && <div className="git-empty">没有匹配的工作树。</div>}{worktrees.map((item, index) => <div className="git-data-row" key={item.workspaceId ?? String(item.branch) + '-' + index}><div><Button type="button" variant="ghost" className="git-detail-link" aria-label={'工作树详情 ' + item.name} onClick={() => setDetail({ kind: 'worktree', item })}>{item.name}</Button><strong className="git-actual-branch">{item.branch || 'Detached HEAD'} {item.current && <Badge tone="accent">当前</Badge>}</strong><small>{item.managed ? 'Agent 隔离目录' : item.workspaceId ? '已登记工作区' : '外部工作区'} · {item.taskId ? 'Task ' + item.taskId : 'Task 未关联'}</small><small>{shortSha(item.headSha)}{item.locked ? ' · 已锁定' : ''}{item.prunable ? ' · 需要检查登记状态' : ''}</small></div>{item.workspaceId && !item.current && <Button type="button" compact disabled={locked} onClick={() => void openWorktree(item.workspaceId!)}>打开</Button>}</div>)}</div></>}
       </section><aside className="git-context" aria-label="Git 操作">
-        {tab === 'changes' && <Surface className="git-commit" aria-label="提交所选文件"><div className="git-section-heading"><h2>提交所选文件</h2><Badge tone="accent">{selected.length}</Badge></div><p>复选框选择本次提交范围，不会执行 Git 暂存。</p><small>{hiddenSelection ? '另有 ' + hiddenSelection + ' 个选择位于其他页或已被筛选隐藏。' : '选择会在翻页与筛选后保留。'}</small><label htmlFor="git-commit-message">提交信息</label><Textarea id="git-commit-message" value={message} onChange={event => setMessage(event.target.value)} placeholder="说明这次改动解决了什么" rows={3} maxLength={2000} disabled={locked} /><small>审批绑定 HEAD {shortSha(overview.git.headSha)} 与已选文件的当前内容；提交整个文件。</small><Button type="button" variant="primary" disabled={locked || !selected.length || !message.trim() || !!overview.conflicts.length} onClick={() => void commit()}>提交所选文件（{selected.length}）</Button>{!!selected.length && <Button type="button" variant="ghost" compact disabled={locked} onClick={() => setSelected([])}>清除全部选择</Button>}</Surface>}
+        {tab === 'changes' && <Surface className="git-commit" aria-label="提交所选文件"><div className="git-section-heading"><h2>提交所选文件</h2><Badge tone="accent">{selected.length}</Badge></div>
+          <p>选中文件后，可暂存、取消暂存或选择提交内容。</p><small>{hiddenSelection ? '另有 ' + hiddenSelection + ' 个选择位于其他页或已被筛选隐藏。' : '选择会在翻页与筛选后保留。'}</small>
+          <div className="git-inline"><Button type="button" compact disabled={locked || !selected.length || selected.length > 100 || !!overview.conflicts.length} onClick={() => void indexAction('stage', entries.filter(entry => selectedSet.has(entry.path) && entry.commitEligible).map(entry => entry.path))}>暂存所选文件（{selected.length}）</Button><Button type="button" compact disabled={locked || !selectedStaged.length || selectedStaged.length > 100 || !!overview.conflicts.length} onClick={() => void indexAction('unstage', selectedStaged.map(entry => entry.path))}>取消暂存所选文件（{selectedStaged.length}）</Button></div>
+          <Select label="提交内容" disabled={locked} value={commitMode} onChange={event => setCommitMode(event.target.value)}><option value="working">所选完整文件</option><option value="staged">仅提交已暂存内容</option></Select>
+          <label htmlFor="git-commit-message">提交信息</label><Textarea id="git-commit-message" value={message} onChange={event => setMessage(event.target.value)} placeholder="说明这次改动解决了什么" rows={3} maxLength={2000} disabled={locked} />
+          <small>{commitMode === 'staged' ? '审批绑定已选暂存对象，未暂存编辑保持原样。' : '审批绑定 HEAD ' + shortSha(overview.git.headSha) + ' 与已选文件的当前内容；提交整个文件。'}</small>
+          <Button type="button" variant="primary" disabled={locked || !(commitMode === 'staged' ? selectedStaged.length : selected.length) || selected.length > 100 || !message.trim() || !!overview.conflicts.length} onClick={() => void commit()}>{commitMode === 'staged' ? '提交所选暂存（' + selectedStaged.length + '）' : '提交所选文件（' + selected.length + '）'}</Button>{!!selected.length && <Button type="button" variant="ghost" compact disabled={locked} onClick={() => setSelected([])}>清除全部选择</Button>}</Surface>}
         <Surface className="git-create"><h2>为任务创建分支</h2><p>以当前 HEAD 创建分支或隔离目录，源工作区的未提交改动保留在原处。</p><label>关联 Task</label><Select label="关联 Task" disabled={locked} value={taskId} onChange={event => { setTaskId(event.target.value); setReview(null); }}><option value="">选择当前工作区的任务</option>{tasks.map(task => <option key={task.id} value={task.id} disabled={terminal(task) || task.readOnly}>{task.goal + (task.readOnly ? ' · 只读' : terminal(task) ? ' · 已结束' : '')}</option>)}</Select><label htmlFor="git-new-branch">新分支名称</label><Input id="git-new-branch" aria-label="新分支名称" value={branch} placeholder="codex/task-name" maxLength={200} disabled={locked} onChange={event => { setBranch(event.target.value); setReview(null); }} /><small>起点 {shortSha(overview.git.headSha)}</small><div className="git-inline"><Button type="button" compact disabled={locked || !canCreate} onClick={() => prepareCreation('branch')}>创建分支</Button><Button type="button" compact disabled={locked || !canCreate} onClick={() => prepareCreation('worktree')}>创建 Worktree</Button></div>{!tasks.length && <p>在这个工作区创建 Task 后可关联 Git 分支。</p>}
           {review && <div className="git-review"><strong>{review.kind === 'worktree' ? '创建任务隔离目录' : '创建本地分支'}</strong><p>{tasks.find(task => task.id === review.taskId)?.goal ?? review.taskId}</p><code>{review.branch}</code><code>HEAD {review.headSha}</code><small>确认后仍需按工作区策略审批。</small><div className="git-inline"><Button type="button" compact disabled={locked} onClick={() => setReview(null)}>取消</Button><Button type="button" compact variant="primary" disabled={locked || !canCreate} onClick={() => void mutate('ui.workspace.git.' + review.kind + '.create', { id: review.workspaceId, taskId: review.taskId, branch: review.branch, expectedHead: review.headSha }, review.kind === 'worktree' ? 'Agent Worktree 已创建并登记，可在 Worktree 列表中打开。' : '本地分支已创建并关联当前 Task。')}>确认创建</Button></div></div>}
         </Surface>

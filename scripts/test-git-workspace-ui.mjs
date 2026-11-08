@@ -112,6 +112,7 @@ try {
   assert.deepEqual(await evaluate('Array.from(document.querySelectorAll("[role=tablist][aria-label=\\"Git 视图\\"] [role=tab]")).map(row=>row.textContent.trim())'), ['Changes · 变更', 'History · 提交记录', 'Branches · 分支', 'Worktrees · 工作树'], 'Workspace Git has exactly four product views');
   assert.ok(await evaluate('!!document.querySelector("input[aria-label=\\"搜索变更文件\\"]")'), 'Changes provides file search');
   assert.ok(await evaluate('document.querySelector(".git-commit")?.getAttribute("aria-label")==="提交所选文件"'), 'commit panel is an independent named surface');
+  assert.ok(await evaluate('!!window.findButton("暂存所选文件（0）")&&!!window.findButton("取消暂存所选文件（0）")'), 'the actual Git page exposes exact stage and unstage actions');
   assert.ok(await evaluate('document.querySelector(".git-file-list")?.textContent.includes("已暂存")&&document.querySelector(".git-file-list")?.textContent.includes("工作目录")'), 'actual index and working status are represented separately');
   await selectTask(); await evaluate('document.querySelector("button[aria-label=\\"查看差异 a.txt\\"]").click()');
   await until('document.querySelector(".git-preview .diff-scroll")?.textContent.includes("approved UI change")', 'real file working tree diff');
@@ -148,6 +149,24 @@ try {
   await click('History · 提交记录'); await until('document.querySelector(".git-panel")?.innerText.includes("approved exact Git UI commit")', 'approved commit history refreshed');
   console.log('PASS selected-path/hash/HEAD commit remains inert while pending, then preserves unrelated staged/unstaged/untracked data and refreshes history');
 
+  fs.writeFileSync(path.join(project, 'a.txt'), 'UI staged portion\n'); await click('Changes · 变更'); await click('刷新');
+  await until('!!document.querySelector("input[aria-label=\\"提交 a.txt\\"]")', 'partial stage selection visible');
+  await evaluate('document.querySelector("input[aria-label=\\"提交 a.txt\\"]").click()');
+  await click('暂存所选文件（1）'); const stageApproval = await reviewRequest('git.stage');
+  assert.equal(git(project, 'show', ':a.txt'), 'approved UI change'); await approve(stageApproval); assert.equal(git(project, 'show', ':a.txt'), 'UI staged portion');
+  await click('取消暂存所选文件（1）'); const unstageApproval = await reviewRequest('git.unstage'); await approve(unstageApproval);
+  assert.equal(git(project, 'show', ':a.txt'), 'approved UI change'); assert.equal(fs.readFileSync(path.join(project, 'a.txt'), 'utf8'), 'UI staged portion\n');
+  await click('暂存所选文件（1）'); await approve(await reviewRequest('git.stage'));
+  fs.writeFileSync(path.join(project, 'a.txt'), 'UI staged portion\nUI unstaged portion\n'); await click('刷新'); await until('!document.body.innerText.includes("正在读取 Git 状态")', 'partial working edit refresh');
+  await choose('提交内容', '仅提交已暂存内容'); await input('#git-commit-message', 'UI partial staged commit');
+  await click('提交所选暂存（1）'); const partialApproval = await reviewRequest('git.commit.staged');
+  assert.equal(partialApproval.request.input.expectedIndexEntries[0].oid, git(project, 'rev-parse', ':a.txt'));
+  const indexBeforePartial = fs.readFileSync(path.join(project, '.git', 'index'));
+  await approve(partialApproval); assert.equal(git(project, 'show', 'HEAD:a.txt'), 'UI staged portion');
+  assert.equal(fs.readFileSync(path.join(project, 'a.txt'), 'utf8'), 'UI staged portion\nUI unstaged portion\n'); assert.equal(git(project, 'show', ':user.txt'), initialIndex);
+  assert.deepEqual(fs.readFileSync(path.join(project, '.git', 'index')), indexBeforePartial);
+  console.log('PASS real Git page stage/unstage/partial-staged approval loop preserves working edits and unrelated staged content');
+
   const staleTask = taskService.runtime.create({ goal: 'Task removed after UI snapshot', workspaceId: workspace.id });
   await click('刷新'); await until('!document.body.innerText.includes("正在读取 Git 状态")', 'real Task refresh before concurrent removal');
   await choose('关联 Task', staleTask.goal); await input('input[aria-label="新分支名称"]', 'codex/stale-task-must-not-execute');
@@ -163,7 +182,7 @@ try {
   git(project, 'commit', '-qm', 'fixture staged baseline'); git(project, 'checkout', '-qb', 'fixture-conflict'); fs.writeFileSync(path.join(project, 'a.txt'), 'branch conflict\n'); git(project, 'commit', '-qam', 'branch conflict'); git(project, 'checkout', '-q', 'main'); fs.writeFileSync(path.join(project, 'a.txt'), 'main conflict\n'); git(project, 'commit', '-qam', 'main conflict'); assert.throws(() => git(project, 'merge', 'fixture-conflict'));
   const conflicted = fs.readFileSync(path.join(project, 'a.txt'), 'utf8'); await click('刷新'); await until('document.body.innerText.includes("需要在项目中处理后刷新")', 'real conflict summary visible'); await click('Changes · 变更');
   await until('document.body.innerText.includes("文件包含未解决的 Git 冲突")', 'actual conflict file visible'); assert.equal(await evaluate('document.querySelector("input[aria-label=\\"提交 a.txt\\"]").disabled'), true); assert.equal(fs.readFileSync(path.join(project, 'a.txt'), 'utf8'), conflicted);
-  assert.equal(calls.filter(row => row.method === 'ui.approvals.decide').length, 3); assert.ok(calls.filter(row => /^ui\.workspace\.git\.(?:commit|branch\.create|worktree\.create)$/.test(row.method)).every(row => !Object.hasOwn(row.params, 'actor') && !Object.hasOwn(row.params, 'approved')), 'renderer never supplies identity or approval authority');
+  assert.equal(calls.filter(row => row.method === 'ui.approvals.decide').length, 7); assert.ok(calls.filter(row => /^ui\.workspace\.git\.(?:commit|stage|unstage|commit\.staged|branch\.create|worktree\.create)$/.test(row.method)).every(row => !Object.hasOwn(row.params, 'actor') && !Object.hasOwn(row.params, 'approved')), 'renderer never supplies identity or approval authority');
   console.log('PASS real merge conflict visibility disables commit and preserves conflict bytes; renderer identity and authority are not forged');
   await closeBrowser(); await delay(750); failed = false; console.log('Git Workspace Chromium: PASS (actual Git, Core Broker and Owner approval UI; native host acceptance separate)');
 } catch (error) { console.error(JSON.stringify(calls.slice(-15).map(row=>({method:row.method,params:row.params,status:row.result?.status,error:row.error})))); console.error(error.stack); throw error; } finally {

@@ -39,6 +39,13 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-git-branch-actions.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 600000, note: 'Actual clean branch switch, fixed physical worktree HEAD, current ref transactions and Windows cleanup recovery' },
+  'test-git-branch-byte-preservation.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 180000, note: 'Actual branch publication preserves final-gap ignored additions and Git-canonical-equivalent raw edits' },
+  'test-git-branch-conversion.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 180000, note: 'Actual protected branch publication preserves native LF/CRLF/UTF16 and target attribute conversions' },
+  'test-git-branch-file-race.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 180000, note: 'Actual native branch-switch final dispatch rejects preserved-stat file races and recovers exact index-pending state' },
+  'test-git-core-actions.mjs': { category: 'security', timeoutMs: 180000, note: 'Actual Desktop/Core approvals for exact stage, unstage and partial staged commits with stale-scope refusal' },
+  'test-git-no-effect.mjs': { category: 'security', timeoutMs: 180000, note: 'Trusted Core Git pre-effect refusals remain retryable while untrusted no-effect fields and actual attempted effects remain fenced' },
+  'test-git-observation.mjs': {category:'security',timeoutMs:120000,note:'Actual repository anchored history, scoped status paging and reviewed content identities'},
   'test-git-binary-output.mjs': { category: 'security', timeoutMs: 60000, note: 'Native Git bounded raw stdout preserves arbitrary blob bytes and drains overflow without changing source objects' },
   'test-workspace-native-byte-transaction.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 180000, note: 'Existing Workspace owner with actual protected Windows byte writes, v2 journal, old-reader refusal and exact native receipts' },
   'test-workspace-byte-recovery.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 180000, note: 'Cold read-only adoption of terminal native file receipts, stale evidence refusal and completed private cleanup without replay' },
