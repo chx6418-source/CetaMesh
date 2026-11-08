@@ -7,9 +7,9 @@
 import { createTaskRuntime } from './runtime.js';
 import { taskError } from './types.js';
 
-export function createTaskService({ stateDir, now, resolveWorkspace, workspacesOverlap, resolveMemory, ownedArtifactRoot, resolvePostWriteVerification } = {}) {
+export function createTaskService({ stateDir, now, resolveWorkspace, workspacesOverlap, resolveMemory, ownedArtifactRoot, resolvePostWriteVerification, resolveIsolatedChildWorkspace } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createTaskService 需要 stateDir');
-  const runtime = createTaskRuntime({ stateDir, now, resolveWorkspace, workspacesOverlap, ownedArtifactRoot, resolvePostWriteVerification });
+  const runtime = createTaskRuntime({ stateDir, now, resolveWorkspace, workspacesOverlap, ownedArtifactRoot, resolvePostWriteVerification, resolveIsolatedChildWorkspace });
   runtime.recoverInterrupted();
 
   const handlers = {
@@ -20,7 +20,7 @@ export function createTaskService({ stateDir, now, resolveWorkspace, workspacesO
     'task.child.create': (p) => runtime.createChild({ parentTaskId: p.parentTaskId,
       expectedParentRev: p.expectedParentRev, requestId: p.requestId, goal: p.goal,
       requirements: p.requirements, workspaceId: p.workspaceId, contract: p.contract,
-      supersedesChildId: p.supersedesChildId }),
+      supersedesChildId: p.supersedesChildId, provisionOperationId: p.provisionOperationId }),
     'task.child.list': (p) => runtime.listChildren({ parentTaskId: p.parentTaskId }),
     'task.child.verify': (p) => runtime.verifyChild({ id: p.id, expectedRev: p.expectedRev }),
     'task.outcome.verify': (p) => runtime.verifyOutcome({ id: p.id, kind: p.kind,

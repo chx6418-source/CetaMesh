@@ -11,8 +11,10 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { taskError, TASK_STATUSES } from './types.js';
+import { validateStoredIsolatedChild, isolatedChildRootsOverlap } from './isolated-child-contract.js';
 
 export const TASK_SCHEMA_VERSION = 1;
+export const TASK_WRITER_SCHEMA_VERSION = 2;
 const MAX_TASKS = 5000;
 
 function loadTaskFile(file, fallback) {
@@ -98,7 +100,9 @@ function assertRecoverySchema(task) {
 }
 
 export function assertTaskSchema(raw, file) {
-  if (raw?.schemaVersion !== TASK_SCHEMA_VERSION || !Number.isSafeInteger(raw.revision) || raw.revision < 1
+  if (![TASK_SCHEMA_VERSION, TASK_WRITER_SCHEMA_VERSION].includes(raw?.schemaVersion)
+    || (raw.schemaVersion === TASK_WRITER_SCHEMA_VERSION && JSON.stringify(raw.features) !== '["isolated-writer-v1"]')
+    || !Number.isSafeInteger(raw.revision) || raw.revision < 1
     || !Array.isArray(raw.tasks) || raw.tasks.length > MAX_TASKS) {
     throw taskError('STORE_CORRUPT', '任务文件版本、修订号或列表无效：' + file);
   }
@@ -117,11 +121,12 @@ export function assertTaskSchema(raw, file) {
     const linked = row.parentTaskId !== undefined && row.parentTaskId !== null;
     if (linked) {
       const contract = row.childContract;
+      const writer = contract?.mode === 'isolated-write';
       if (typeof row.parentTaskId !== 'string' || !row.parentTaskId || row.parentTaskId === row.id
         || typeof row.parentFingerprint !== 'string' || !/^[a-f0-9]{64}$/i.test(row.parentFingerprint)
         || (row.supersedesChildId != null && (typeof row.supersedesChildId !== 'string' || !row.supersedesChildId
           || row.supersedesChildId === row.id))
-        || !contract || contract.mode !== 'read-only'
+        || (writer ? raw.schemaVersion !== TASK_WRITER_SCHEMA_VERSION || !validateStoredIsolatedChild(contract) : (!contract || contract.mode !== 'read-only'
         || !['analysis', 'tool'].includes(contract.outputKind)
         || !Array.isArray(contract.readScope) || !contract.readScope.length || contract.readScope.length > 50
         || contract.readScope.some(scope => typeof scope !== 'string' || !scope
@@ -130,7 +135,7 @@ export function assertTaskSchema(raw, file) {
         || !Array.isArray(contract.expectedEvidence) || !contract.expectedEvidence.length
         || !contract.expectedEvidence.every(item => typeof item === 'string')
         || (contract.outputKind === 'tool' && (new Set(contract.expectedEvidence).size !== contract.expectedEvidence.length
-          || contract.expectedEvidence.some(item => !['filesystem.read', 'filesystem.search'].includes(item))))) {
+          || contract.expectedEvidence.some(item => !['filesystem.read', 'filesystem.search'].includes(item))))))) {
         throw taskError('STORE_CORRUPT', 'Invalid child Task authority');
       }
       children.push(row);
@@ -151,7 +156,13 @@ export function assertTaskSchema(raw, file) {
   const byId = new Map(raw.tasks.map(row => [row.id, row]));
   for (const child of children) {
     const parent = byId.get(child.parentTaskId);
-    if (!parent || parent.parentTaskId || parent.workspaceId !== child.workspaceId
+    const writer = child.childContract?.mode === 'isolated-write', isolation = child.childContract?.isolation;
+    if (!parent || parent.parentTaskId || (writer
+      ? isolation.parentTaskId !== parent.id || isolation.sourceWorkspaceId !== parent.workspaceId
+        || isolation.workspaceId !== child.workspaceId || parent.workspaceId === child.workspaceId
+        || children.some(other => other.id !== child.id && other.childContract?.mode === 'isolated-write'
+          && (other.workspaceId === child.workspaceId || isolatedChildRootsOverlap(other.childContract.isolation.rootIdentity, isolation.rootIdentity)))
+      : parent.workspaceId !== child.workspaceId)
       || children.filter(row => row.parentTaskId === parent.id).length > 6) {
       throw taskError('STORE_CORRUPT', 'Invalid Task family linkage');
     }
@@ -258,6 +269,7 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
 
   const tasks = new Map();
   let fileRevision = 0;
+  let schemaVersion = TASK_SCHEMA_VERSION;
   let loaded = false;
 
   function backupInvalidSource() {
@@ -286,18 +298,41 @@ export function createTaskStore({ stateDir, now = () => Date.now(), idFactory } 
     tasks.clear();
     for (const [id, task] of nextTasks) tasks.set(id, task);
     fileRevision = Number.isSafeInteger(raw.revision) && raw.revision > 0 ? raw.revision : 0;
+    schemaVersion = raw.schemaVersion;
     loaded = true;
   }
 
   function persist() {
     const nextRevision = fileRevision + 1;
-    writeJsonAtomic(file, {
-      schemaVersion: TASK_SCHEMA_VERSION,
+    const nextSchema = schemaVersion === TASK_WRITER_SCHEMA_VERSION
+      || [...tasks.values()].some(row => row.childContract?.mode === 'isolated-write') ? TASK_WRITER_SCHEMA_VERSION : TASK_SCHEMA_VERSION;
+    if (nextSchema !== schemaVersion && fs.existsSync(file)) {
+      // Preserve the exact pre-upgrade v1 document. This backup is evidence,
+      // never an automatic rollback over newer Tasks or execution receipts.
+      const original = fs.readFileSync(file);
+      const sha = crypto.createHash('sha256').update(original).digest('hex');
+      const backup = path.join(dir, `tasks.pre-isolated-writer-v1.${sha}.json`);
+      try {
+        const descriptor = fs.openSync(backup, 'wx', 0o600);
+        try { fs.writeFileSync(descriptor, original); fs.fsyncSync(descriptor); }
+        finally { fs.closeSync(descriptor); }
+      }
+      catch (error) { if (error.code !== 'EEXIST') throw taskError('STORE_RECOVERY_FAILED', 'Task schema upgrade backup failed'); }
+      const stat = fs.lstatSync(backup);
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1 || !fs.readFileSync(backup).equals(original))
+        throw taskError('STORE_RECOVERY_FAILED', 'Task schema upgrade backup changed');
+    }
+    const document = {
+      schemaVersion: nextSchema,
+      ...(nextSchema === TASK_WRITER_SCHEMA_VERSION ? {features: ['isolated-writer-v1']} : {}),
       revision: nextRevision,
       updatedAt: now(),
       tasks: [...tasks.values()]
-    });
+    };
+    if (nextSchema === TASK_WRITER_SCHEMA_VERSION) assertTaskSchema(document, file);
+    writeJsonAtomic(file, document);
     fileRevision = nextRevision;
+    schemaVersion = nextSchema;
   }
 
   function clone(task) {

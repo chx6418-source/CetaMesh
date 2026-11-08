@@ -37,6 +37,7 @@ import { createTaskStore } from './store.js';
 import { resolveTaskArtifactOpen } from './artifact-open.js';
 import { verifyTaskOutcome, normalizePostWriteVerificationBinding } from './outcome-verification.js';
 import {normalizeDelegationVerification,verifyDelegationContract} from './delegation-verification.js';
+import { normalizeIsolatedChildBinding, normalizeIsolatedChildRequest, isolatedChildRootsOverlap } from './isolated-child-contract.js';
 
 function subId(prefix) {
   return prefix + '_' + crypto.randomBytes(4).toString('hex');
@@ -44,7 +45,7 @@ function subId(prefix) {
 
 export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   resolveWorkspace = () => null, workspacesOverlap = (left, right) => left === right, ownedArtifactRoot = null,
-  resolvePostWriteVerification = null } = {}) {
+  resolvePostWriteVerification = null, resolveIsolatedChildWorkspace = null } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createTaskRuntime 需要 stateDir');
   const store = createTaskStore({ stateDir, now, idFactory });
 
@@ -339,25 +340,26 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   function createChild({ parentTaskId, expectedParentRev, requestId, goal, requirements,
-    workspaceId, contract, supersedesChildId } = {}) {
+    workspaceId, contract, supersedesChildId, provisionOperationId } = {}) {
     const parent = requireTask(parentTaskId);
     if (parent.parentTaskId) throw taskError('TASK_CHILD_DEPTH_EXCEEDED', 'Child Tasks cannot have children');
-    if (parent.status === 'running') throw taskError('TASK_PARENT_PAUSE_REQUIRED', 'Pause the parent writer before creating read-only children');
+    if (parent.status === 'running') throw taskError('TASK_PARENT_PAUSE_REQUIRED', 'Pause the parent writer before creating children');
     if (!['queued', 'paused'].includes(parent.status)) throw taskError('TASK_PARENT_TERMINAL', 'Parent Task is not available for new children');
     const wantedWorkspace = normalizeWorkspaceId(workspaceId);
-    if (!parent.workspaceId || wantedWorkspace !== parent.workspaceId) {
-      throw taskError('TASK_WORKSPACE_CONFLICT', 'Child must remain in the parent Workspace');
+    const writer = contract?.mode === 'isolated-write';
+    if (!parent.workspaceId || !wantedWorkspace || (writer ? wantedWorkspace === parent.workspaceId : wantedWorkspace !== parent.workspaceId)) {
+      throw taskError('TASK_WORKSPACE_CONFLICT', writer ? 'An isolated writer requires a different Workspace' : 'Child must remain in the parent Workspace');
     }
     const request = normalizeText(requestId, 'requestId', 160, { required: true });
     const childGoal = normalizeText(goal, 'goal', TASK_LIMITS.goalChars, { required: true });
     const childRequirements = normalizeStringList(requirements, 'requirements', TASK_LIMITS.requirements);
-    if (!contract || typeof contract !== 'object' || Array.isArray(contract)
+    if (!writer && (!contract || typeof contract !== 'object' || Array.isArray(contract)
       || contract.mode !== 'read-only'
       || !['analysis', 'tool'].includes(contract.outputKind)
-      || !Array.isArray(contract.readScope) || !Array.isArray(contract.expectedEvidence)) {
+      || !Array.isArray(contract.readScope) || !Array.isArray(contract.expectedEvidence))) {
       throw taskError('INVALID_PARAMS', 'Child requires an output and evidence contract');
     }
-    const childContract = {
+    const childContract = writer ? normalizeIsolatedChildRequest(contract) : {
       mode: 'read-only',
       outputKind: contract.outputKind,
       readScope: normalizeStringList(contract.readScope, 'contract.readScope', TASK_LIMITS.requirements),
@@ -375,7 +377,8 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     }
     const fingerprint = crypto.createHash('sha256').update(JSON.stringify({
       parentTaskId: parent.id, goal: childGoal, requirements: childRequirements,
-      workspaceId: wantedWorkspace, childContract, supersedesChildId: supersedesChildId || null
+      workspaceId: wantedWorkspace, childContract, supersedesChildId: supersedesChildId || null,
+      ...(writer ? {provisionOperationId: normalizeText(provisionOperationId, 'provisionOperationId', 240, {required: true})} : {})
     })).digest('hex');
     const prior = store.listAll().find(row => row.createRequest?.id === request);
     if (prior) {
@@ -386,6 +389,9 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     }
     if (!Number.isSafeInteger(expectedParentRev)) throw taskError('REVISION_REQUIRED', 'expectedParentRev is required');
     if (parent.rev !== expectedParentRev) throw taskError('TASK_CONFLICT', 'Parent Task revision changed');
+    if (writer && store.listAll().some(row => row.childContract?.mode === 'isolated-write' && row.workspaceId === wantedWorkspace)) {
+      throw taskError('TASK_CHILD_WORKSPACE_CLAIMED', 'An isolated writer Workspace cannot be shared or reused');
+    }
     const children = store.listAll().filter(row => row.parentTaskId === parent.id);
     const superseded = new Set(children.map(row => row.supersedesChildId).filter(Boolean));
     const leaves = children.filter(row => !superseded.has(row.id));
@@ -401,6 +407,14 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     }
     if (children.length >= 6 || leaves.length - (replaced ? 1 : 0) >= 2) {
       throw taskError('TASK_CHILD_LIMIT', 'At most two current child Tasks and six lifetime children are allowed');
+    }
+    if (writer) {
+      childContract.isolation = isolatedChildBinding(parent, wantedWorkspace, provisionOperationId);
+      if (store.listAll().some(row => row.childContract?.mode === 'isolated-write'
+        && isolatedChildRootsOverlap(row.childContract.isolation.rootIdentity, childContract.isolation.rootIdentity)))
+        throw taskError('TASK_CHILD_WORKSPACE_CLAIMED', 'An isolated writer physical root cannot be shared or reused');
+      if (requireTask(parent.id).rev !== expectedParentRev)
+        throw taskError('TASK_CONFLICT', 'Parent changed during isolated worktree admission');
     }
     const timestamp = now();
     return store.insert({
@@ -420,6 +434,23 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     });
   }
 
+  function isolatedChildBinding(parent, workspaceId, provisionOperationId) {
+    if (typeof resolveIsolatedChildWorkspace !== 'function')
+      throw taskError('TASK_CHILD_ISOLATION_UNAVAILABLE', 'Core isolated writer admission is unavailable');
+    const value = resolveIsolatedChildWorkspace({parentTask: structuredClone(parent), workspaceId, provisionOperationId});
+    if (value && typeof value.then === 'function') {
+      // This hook runs inside synchronous admission. Never treat a pending proof
+      // as authorization, nor leak a rejection from an incorrectly wired hook.
+      Promise.resolve(value).catch(() => {});
+      throw taskError('TASK_CHILD_ISOLATION_UNAVAILABLE', 'Isolated writer admission requires current synchronous facts');
+    }
+    const binding = normalizeIsolatedChildBinding(value);
+    if (binding.parentTaskId !== parent.id || binding.sourceWorkspaceId !== parent.workspaceId
+      || binding.workspaceId !== workspaceId || binding.provisionOperationId !== provisionOperationId)
+      throw taskError('TASK_CHILD_ISOLATION_INVALID', 'Worktree proof belongs to another Task, Workspace or operation');
+    return binding;
+  }
+
   function listChildren({ parentTaskId } = {}) {
     const parent = requireTask(parentTaskId);
     return { children: store.listAll().filter(row => row.parentTaskId === parent.id) };
@@ -429,19 +460,32 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     const child = requireTask(id);
     if (!child.parentTaskId) return null;
     const parent = requireTask(child.parentTaskId);
-    if (parent.workspaceId !== child.workspaceId || parent.workspaceId !== workspaceId
-      || !['queued', 'running', 'paused'].includes(parent.status)) {
+    const writer = child.childContract?.mode === 'isolated-write';
+    if ((writer ? child.workspaceId !== workspaceId || parent.workspaceId !== child.childContract.isolation.sourceWorkspaceId
+      : parent.workspaceId !== child.workspaceId || parent.workspaceId !== workspaceId)
+      || !(writer ? ['queued', 'paused'] : ['queued', 'running', 'paused']).includes(parent.status)) {
       throw taskError('TASK_PARENT_UNAVAILABLE', 'Parent Task is not active in this Workspace');
     }
     if (child.parentFingerprint !== createFingerprint({ goal: parent.goal,
       requirements: parent.requirements, workspaceId: parent.workspaceId })) {
       throw taskError('TASK_CHILD_PARENT_CHANGED', 'Parent objective changed after child assignment');
     }
+    if (writer && JSON.stringify(isolatedChildBinding(parent, child.workspaceId, child.childContract.isolation.provisionOperationId))
+      !== JSON.stringify(child.childContract.isolation))
+      throw taskError('TASK_CHILD_ISOLATION_CHANGED', 'Isolated writer physical identity or creation proof changed');
     return parent;
+  }
+
+  function assertIsolatedChildExecution(task, provider) {
+    if (task.childContract?.mode !== 'isolated-write') return;
+    assertChildParentCurrent({id: task.id, workspaceId: task.workspaceId});
+    if (provider != null && provider !== 'cetamesh')
+      throw taskError('TASK_CHILD_PROVIDER_UNVERIFIED', 'Isolated writer execution currently requires the controlled Managed provider');
   }
 
   function recordAttempt({ id, expectedRev, provider, sessionId, state, requestId, reason } = {}) {
     const current = requireTask(id);
+    if (state === 'started') assertIsolatedChildExecution(current, provider);
     const request = normalizeText(requestId, 'requestId', 160, { required: true });
     const validStates = ['started', 'completed', 'failed', 'cancelled', 'unknown'];
     if (!validStates.includes(state)) throw taskError('INVALID_PARAMS', 'Invalid Attempt state');
@@ -752,6 +796,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     if (!normalizedProvider) throw taskError('INVALID_PROVIDER', 'attachAgent 需要 provider');
     const normalizedSession = normalizeText(sessionId, 'sessionId', TASK_LIMITS.idChars, { required: true });
     const current = requireTask(id);
+    assertIsolatedChildExecution(current, normalizedProvider);
     let version = null;
     if (current.recoveryIntent) throw taskError('TASK_RECOVERY_REVIEW_REQUIRED', 'Pending Owner recovery must finish before attachment');
     if (versionContext != null) {
@@ -871,6 +916,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   // ── 生命周期 ───────────────────────────────────────────────────────────
   function start({ id, expectedRev, provider, sessionId, note } = {}) {
     const current = requireTask(id);
+    assertIsolatedChildExecution(current, provider);
     if (!current.parentTaskId && store.listAll().some(row => row.parentTaskId === id
       && !isTerminalStatus(row.status))) {
       throw taskError('TASK_CHILD_ACTIVE', 'Child Tasks must finish before the parent writer starts');
@@ -896,6 +942,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
 
   function resume({ id, expectedRev, provider, sessionId, note } = {}) {
     const current = requireTask(id);
+    assertIsolatedChildExecution(current, provider);
     if (!current.parentTaskId && store.listAll().some(row => row.parentTaskId === id
       && !isTerminalStatus(row.status))) {
       throw taskError('TASK_CHILD_ACTIVE', 'Child Tasks must finish before the parent writer resumes');
