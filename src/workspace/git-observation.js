@@ -95,8 +95,22 @@ export function createGitObservations() {
       if (!values) fail('GIT_OUTPUT_INVALID', 'Git returned invalid upstream counts');
       ahead = Number(values[1]); behind = Number(values[2]);
     } catch (error) { assertObservationActive(signal); if (error.code === 'GIT_OUTPUT_INVALID') throw error; }
-    const entries = rows.slice(offset, offset + count);
+    const entries = await Promise.all(rows.slice(offset, offset + count).map(async row => {
+      const conflict = ['DD','AU','UD','UA','DU','AA','UU'].includes(row.x + row.y);
+      const result = { ...row, conflict, commitEligible: false };
+      if (conflict) return { ...result, blockedReason: 'GIT_CONFLICT' };
+      if (sensitive(row.path)) return { ...result, blockedReason: 'SENSITIVE_RESOURCE' };
+      try {
+        const target = resolveInside(meta.root, relativeFile(row.path), { forWrite: true }).absolute;
+        let stat;
+        try { stat = await fs.lstat(target); } catch (error) { if (error.code === 'ENOENT') return { ...result, commitEligible: true }; throw error; }
+        if (!stat.isFile() || stat.isSymbolicLink()) return { ...result, blockedReason: 'REGULAR_FILE_REQUIRED' };
+        return stat.size > 10 * 1024 * 1024 ? { ...result, blockedReason: 'HASH_LIMIT' } : { ...result, commitEligible: true };
+      } catch { return { ...result, blockedReason: 'PATH_UNAVAILABLE' }; }
+    }));
+    assertObservationActive(signal);
     return { workspaceId: entry.id, repositoryId: meta.repositoryId, headSha: meta.status.headSha, branch: meta.status.branch,
+      conflictCount: rows.filter(row => ['DD','AU','UD','UA','DU','AA','UU'].includes(row.x + row.y)).length,
       indexIdentity: meta.indexIdentity, snapshotId, upstream, ahead, behind, entries, totalKnown: rows.length,
       nextCursor: offset + entries.length < rows.length ? encodeCursor({ kind: 'status', workspaceId: entry.id, repositoryId: meta.repositoryId, snapshotId, offset: offset + entries.length }) : null,
       truncated: offset + entries.length < rows.length, observation: observation(started, Buffer.byteLength(JSON.stringify(rows)), 'status-list') };
@@ -189,7 +203,9 @@ export function createGitObservations() {
     const rows = out.stdout.split(/\r?\n/).filter(Boolean).map(line => {
       const fields = line.split('\0');
       if (fields.length !== 4 || !fields[0] || !oid(fields[1])) fail('GIT_OUTPUT_INVALID', 'Git returned invalid branch metadata');
-      return { name: fields[0], headSha: fields[1], current: fields[2] === '*', upstream: fields[3] || null };
+      const relation=(entry.gitBranches??[]).find(row=>row.branch===fields[0]);
+      return { name: fields[0], headSha: fields[1], current: fields[2] === '*', upstream: fields[3] || null,
+        taskId:relation?.taskId??null,baselineHead:relation?.baselineHead??null };
     });
     const offset = cursor?.offset ?? 0;
     if (offset > rows.length) fail('GIT_CURSOR_INVALID', 'Git page starts past the current branches');

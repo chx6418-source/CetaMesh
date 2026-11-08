@@ -36,18 +36,19 @@ function enrichEntries(root, rows) {
 
 /** A read projection and two trusted Broker effects; no separate task/worktree store. */
 export function createGitProduct({ stateDir, registry, getTask = () => null, listTasks = () => [], record = () => {}, nativeExecutable }) {
-  async function overview(entry) {
-    const status = await gitStatus(entry.root, { completeFiles: true });
+  async function overview(entry, { contextOnly = false, signal } = {}) {
+    const status = await gitStatus(entry.root, { completeFiles: true, signal });
     const taskRows = await listTasks({ workspaceId: entry.id, limit: 100 });
     const tasks = (Array.isArray(taskRows) ? taskRows : taskRows?.tasks ?? []).slice(0, 100)
       .filter(task => task.workspaceId === entry.id).map(task => ({ id: task.id, goal: safeText(task.goal), status: task.status, workspaceId: task.workspaceId, readOnly: task.childContract?.mode === 'read-only',
         executor: task.currentAgent?.provider && task.currentAgent?.sessionId ? { provider: safeText(task.currentAgent.provider, 100), sessionId: safeText(task.currentAgent.sessionId, 200) } : null }));
-    if (!status.isRepo) return { workspaceId: entry.id, git: status, branches: [], history: [], worktrees: [], conflicts: [], tasks, truncated: false };
+    if (!status.isRepo) return contextOnly ? {workspaceId:entry.id,git:{isRepo:false},worktrees:[],tasks,truncated:false}
+      : { workspaceId: entry.id, git: status, branches: [], history: [], worktrees: [], conflicts: [], tasks, truncated: false };
     if (!samePath(status.repoRoot, fs.realpathSync.native(entry.root))) fail('GIT_ROOT_REQUIRED', 'Git management requires the registered repository root');
     const [branchOutput, historyOutput, worktreeOutput] = await Promise.all([
-      gitRun(entry.root, ['for-each-ref', '--count=201', '--format=%(refname:short)%00%(objectname)%00%(HEAD)%00%(upstream:short)', 'refs/heads/']),
-      status.headSha ? gitRun(entry.root, ['log', '-n', '50', '--format=%H%x00%P%x00%ct%x00%s']) : Promise.resolve({ stdout: '' }),
-      gitRun(entry.root, ['worktree', 'list', '--porcelain', '-z'])
+      contextOnly ? Promise.resolve({ stdout: '' }) : gitRun(entry.root, ['for-each-ref', '--count=201', '--format=%(refname:short)%00%(objectname)%00%(HEAD)%00%(upstream:short)', 'refs/heads/']),
+      !contextOnly && status.headSha ? gitRun(entry.root, ['log', '-n', '50', '--format=%H%x00%P%x00%ct%x00%s']) : Promise.resolve({ stdout: '' }),
+      gitRun(entry.root, ['worktree', 'list', '--porcelain', '-z'], { signal })
     ]);
     const branches = branchOutput.stdout.trim().split('\n').filter(Boolean).slice(0, 200).map(line => {
       const [name, headSha, current, upstream] = line.replace(/\r$/, '').split('\0');
@@ -59,7 +60,7 @@ export function createGitProduct({ stateDir, registry, getTask = () => null, lis
       return { sha, parents: parents ? parents.split(' ') : [], committedAt: Number(timestamp) * 1000, subject: safeText(subject) };
     });
     // Match creation's canonical StateDir, including Windows junction/short-name aliases.
-    const managedBase = path.join(fs.realpathSync.native(stateDir), 'agent-worktrees');
+    const managedBase = path.join(fs.existsSync(stateDir) ? fs.realpathSync.native(stateDir) : path.resolve(stateDir), 'agent-worktrees');
     const registrations = registry.list(), worktrees = [];
     let row = null;
     const flush = () => {
@@ -80,6 +81,9 @@ export function createGitProduct({ stateDir, registry, getTask = () => null, lis
       else if (row && ['locked', 'prunable'].includes(key)) row[key] = true;
     }
     flush();
+    if (contextOnly) return { workspaceId: entry.id, git: { isRepo: true, branch: status.branch, headSha: status.headSha },
+      tasks, worktrees: worktrees.slice(0, 200), worktreeRelation: entry.gitWorktree ?? null,
+      truncated: worktrees.length > 200 || tasks.length === 100 };
     const entries = enrichEntries(entry.root, status.entries);
     return { workspaceId: entry.id, git: { ...status, repoRoot: undefined, entries }, conflicts: entries.filter(item => item.conflict), branches, history, worktrees: worktrees.slice(0, 200), tasks,
       worktreeRelation: entry.gitWorktree ?? null, truncated: status.entries.length > MAX_DISPLAY_ENTRIES || worktrees.length > 200 || branchOutput.stdout.split('\n').filter(Boolean).length > 200 };
@@ -134,5 +138,5 @@ export function createGitProduct({ stateDir, registry, getTask = () => null, lis
     record(entry, actor, 'git.worktree.create', binding.branch);
     return { created: true, ...binding, parentWorkspaceId: entry.id, workspace: { id: workspace.id, name: workspace.name, root: workspace.root, gitWorktree: workspace.gitWorktree } };
   }
-  return { overview, create, ...createGitObservations(), ...createGitIndexActions({ record }), ...createGitBranchActions({record, nativeExecutable}) };
+  return { overview, context: (entry, options) => overview(entry, { ...options, contextOnly: true }), create, ...createGitObservations(), ...createGitIndexActions({ record }), ...createGitBranchActions({record, nativeExecutable}) };
 }

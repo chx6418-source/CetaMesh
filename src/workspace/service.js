@@ -342,6 +342,7 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     },
 
     'workspace.git.overview': async p => gitProduct.overview(requireWorkspace(p)),
+    'workspace.git.context': (p, context) => gitProduct.context(requireWorkspace(p), {signal: context.signal}),
     'workspace.git.index.review': async p => gitProduct.reviewStaged(requireWorkspace(p), {paths: p.paths}),
     'workspace.git.branch.review': async (p, context) => {
       const entry = requireWorkspace(p);

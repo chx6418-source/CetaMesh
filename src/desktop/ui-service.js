@@ -1741,7 +1741,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.workspace.git.overview':p=>workspace('workspace.git.overview',{id:idParam(p)}),
     'ui.workspace.git.index.review': p => workspace('workspace.git.index.review', {id: idParam(p), paths: p.paths}),
     'ui.workspace.git.branch.review': p => services.capabilityService.executeWorkspace({method:'workspace.git.branch.review',params:{id:idParam(p),targetBranch:p.targetBranch,mode:p.mode??'clean'}}),
-    ...Object.fromEntries(['status.page', 'history', 'branches', 'commit.detail', 'preview', 'review'].map(action => [
+    ...Object.fromEntries(['context', 'status.page', 'history', 'branches', 'commit.detail', 'preview', 'review'].map(action => [
       'ui.workspace.git.' + action, async (p, { signal } = {}) => {
         if (!services.workspaceService) throw uiError('SERVICE_UNAVAILABLE', 'Workspace is unavailable');
         const result = await services.workspaceService.execute({ method: 'workspace.git.' + action,

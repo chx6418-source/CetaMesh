@@ -39,6 +39,8 @@ export const WORKSPACE_CAPABILITIES = Object.freeze({
   'workspace.git.index.review': 'git.index.review', 'workspace.git.stage': 'git.stage',
   'workspace.git.unstage': 'git.unstage', 'workspace.git.commit.staged': 'git.commit.staged',
   'workspace.git.branch.review': 'git.branch.review', 'workspace.git.branch.switch': 'git.branch.switch',
+  'workspace.git.status.page':'git.status.page', 'workspace.git.history':'git.history', 'workspace.git.branches':'git.branches',
+  'workspace.git.commit.detail':'git.commit.detail', 'workspace.git.preview':'git.preview', 'workspace.git.review':'git.review',
   'workspace.test.run': 'test.run', 'workspace.create': 'workspace.create',
   'workspace.apply': 'workspace.apply'
 });
@@ -57,6 +59,9 @@ const objectInput = (properties = {}, required = []) => ({
   type: 'object', properties, required, additionalProperties: false
 });
 const GIT_INDEX_MUTATIONS = ['git.stage', 'git.unstage', 'git.commit.staged'];
+const GIT_OBSERVATION_PERMISSIONS = {'git.status.page':'git.status','git.history':'git.status','git.branches':'git.status',
+  'git.commit.detail':'git.diff','git.preview':'filesystem.read','git.review':'filesystem.read'};
+const gitPageInput = max => objectInput({limit:{type:'integer',minimum:1,maximum:max},cursor:{type:'string',maxLength:2048}});
 const gitIndexInput = (commit = false) => objectInput({
   paths: {type: 'array', items: stringField('Exact Workspace-relative regular file.'), minItems: 1, maxItems: 100},
   expectedHead: {type: ['string', 'null']}, expectedHeadRef: {type: ['string', 'null']},
@@ -66,6 +71,12 @@ const gitIndexInput = (commit = false) => objectInput({
   ...(commit ? {message: stringField('Commit message for the exact reviewed staged objects.')} : {})
 }, ['paths', 'expectedHead', 'expectedHeadRef', 'indexIdentity', 'expectedRepositoryIdentity', 'expectedHashes', ...(commit ? ['expectedIndexEntries', 'message'] : [])]);
 const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
+  'git.status.page':['Read one source-bound status page without content hashes. Cursor is not mutation approval.',gitPageInput(500)],
+  'git.history':['Read one anchored commit history page; pass only the returned cursor for subsequent pages.',gitPageInput(200)],
+  'git.branches':['Read one source-bound local branch page.',gitPageInput(500)],
+  'git.commit.detail':['Read reachable commit metadata, files and bounded patch; truncation is explicit.',objectInput({sha:{type:'string',pattern:'^[a-f0-9]{40}$'},maxPatchBytes:{type:'integer',minimum:1,maximum:524288}},['sha'])],
+  'git.preview':['Read bounded current-worktree file content, not historical blobs or execution authority.',objectInput({path:{type:'string',maxLength:1024},offset:{type:'integer',minimum:0},maxBytes:{type:'integer',minimum:1,maximum:64000}},['path'])],
+  'git.review':['Observe exact selected current files before separately authorized Git mutation.',objectInput({paths:{type:'array',minItems:1,maxItems:100,items:{type:'string',maxLength:1024}}},['paths'])],
   'git.branch.review': ['Review one existing local branch and its exact byte/index/HEAD switch scope.', objectInput({targetBranch:{type:'string'},mode:{type:'string',enum:['clean','finish-prepared']}},['targetBranch'])],
   'git.branch.switch': ['Switch one exactly reviewed local branch after once-only approval; finish-prepared never republishes working files.', objectInput({
     paths:{type:'array',items:{type:'string'},maxItems:100},targetBranch:{type:'string'},mode:{type:'string',enum:['clean','finish-prepared']},
@@ -757,10 +768,12 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       } });
     for (const [method, id] of Object.entries(WORKSPACE_CAPABILITIES)) {
       const concurrentRead = id === 'filesystem.read' || id === 'filesystem.search';
-      broker.register({ id, cancellationAware: concurrentRead || id === 'test.run',
+      const gitObservation=Object.hasOwn(GIT_OBSERVATION_PERMISSIONS,id);
+      broker.register({ id, cancellationAware: concurrentRead || gitObservation || id === 'test.run',
+        ...(gitObservation?{readOnly:true,effect:'read-only',parallelSafe:false,cancellationMode:'cooperative',timeoutMode:'await-settlement'}:{}),
         ...(concurrentRead ? { readOnly: true, parallelSafe: true, effect: 'read-only',
           cancellationMode: 'cooperative', timeoutMode: 'await-settlement' } : {}),
-        permission: ['git.branch.switch','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS].includes(id)?'git.commit':['git.branch.review','git.overview', 'git.index.review'].includes(id)?'git.status':id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
+        permission: gitObservation?GIT_OBSERVATION_PERMISSIONS[id]:['git.branch.switch','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS].includes(id)?'git.commit':['git.branch.review','git.overview', 'git.index.review'].includes(id)?'git.status':id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
         ...(id === 'git.branch.switch' ? {effect:'conditional-write',gitBranchApplication:true,
           retainOperationResult: result=>result, gitOriginalBinding: result=>workspaceService.gitOriginalBinding(result),
           gitClosedBindings: result=>workspaceService.gitClosedBindings(result),
@@ -789,6 +802,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         // approved:true（Owner 的点击本身就是显式决定，语义与既往一致）。
         risk: ['git.branch.switch','workspace.create', 'git.commit','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS, 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
         async validate(request, { replay = false } = {}) {
+          if(gitObservation&&(!['owner','agent'].includes(request.actor.kind)||request.constrainedActor?.kind==='extension'))
+            throw capabilityError('EXTENSION_SCOPE_UNSUPPORTED','Paged Git observations require Owner or explicit Task grants; plugin path scopes are not widened');
           if (['git.branch.review','git.branch.switch'].includes(id)) {
             if (!['owner','agent'].includes(request.actor.kind)) throw capabilityError('EXTENSION_SCOPE_UNSUPPORTED','Branch actions require Owner or explicit Task grants');
             const recovery=assertGitApplicationAvailable(request);
@@ -920,6 +935,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               return result;
             }
             const executor=['git.commit','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS].includes(id)&&workspaceService.executeApprovedGit?workspaceService.executeApprovedGit:workspaceService.execute;
+            if(id==='git.branches'&&request.actor.kind!=='owner'){
+              const page=await executor({method,params:{...request.input,id:request.workspaceId}},{signal:request.signal});
+              const allowed=request.actor.grants?.taskIds??[request.taskId];
+              return {...page,entries:page.entries.map(row=>row.taskId&&!allowed.includes(row.taskId)?{...row,taskId:null,baselineHead:null}:row)};
+            }
             if(id==='git.overview'&&request.actor.kind!=='owner'){
               const overview=await executor({method,params:{...request.input,id:request.workspaceId}});
               const allowed=request.actor.grants?.taskIds??[request.taskId];return {...overview,tasks:overview.tasks.filter(t=>allowed.includes(t.id)),branches:overview.branches.filter(b=>!b.taskId||allowed.includes(b.taskId)),worktrees:overview.worktrees.filter(w=>!w.taskId||allowed.includes(w.taskId)),worktreeRelation:overview.worktreeRelation?.taskId&&!allowed.includes(overview.worktreeRelation.taskId)?null:overview.worktreeRelation};
@@ -932,7 +952,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               ...(request.workspaceId ? { id: request.workspaceId } : {}), actor: request.actor.id } },
               concurrentRead ? { signal: request.signal, assertAuthorized: request.assertAuthorized,
                 consumeReadBytes: request.consumeReadBytes,
-                restricted: request.actor.kind !== 'owner' } : undefined);
+                restricted: request.actor.kind !== 'owner' } : gitObservation ? {signal:request.signal} : undefined);
           };
           return id === 'workspace.create' ? idempotent(request, run) : run();
         }

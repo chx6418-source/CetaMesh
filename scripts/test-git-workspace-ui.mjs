@@ -23,6 +23,7 @@ const { buildSync } = require('esbuild');
 const sandbox = createSuiteSandbox({ suiteId: 'git-workspace-ui' });
 let failed = true, child, socket, server, capabilityService, closeBrowser;
 const calls = [];
+let holdRead = null, releaseRead;
 const env = { ...process.env };
 for (const key of Object.keys(env)) if (/^GIT_/i.test(key)) delete env[key];
 const git = (cwd, ...args) => execFileSync('git', ['-c', 'commit.gpgSign=false', '-c', 'core.hooksPath=' + path.join(sandbox.root, 'no-hooks'), ...args], { cwd, env, encoding: 'utf8', windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] }).trim();
@@ -69,6 +70,7 @@ try {
       if (!/^ui\.(?:workspace\.|approvals\.)/.test(method)) throw new Error('Test bridge only forwards Workspace and Owner approval UI methods');
       const record = { method, params }; calls.push(record);
       try { record.result = await ui.execute({ method, params }); } catch (error) { record.error = { code: error.code, message: error.message }; throw error; }
+      if(holdRead?.(record)){holdRead=null;await new Promise(resolve=>{releaseRead=resolve;});}
       response.writeHead(200, { 'Content-Type': 'application/json' }); response.end(JSON.stringify(record.result));
     } catch (error) { response.writeHead(400, { 'Content-Type': 'application/json' }); response.end(JSON.stringify({ code: error.code || 'FIXTURE', message: error.message })); }
   });
@@ -109,6 +111,8 @@ try {
   }
   async function selectTask() { await choose('关联 Task', selectedTask.goal); }
   await until('!!document.querySelector("input[aria-label=\\"新分支名称\\"]")', 'production GitWorkspace mount');
+  assert.ok(calls.some(row=>row.method==='ui.workspace.git.status.page'), 'production Changes must request an actual server page');
+  assert.equal(calls.some(row=>row.method==='ui.workspace.git.overview'),false,'production consumers cannot retain eager overview hashing');
   assert.deepEqual(await evaluate('Array.from(document.querySelectorAll("[role=tablist][aria-label=\\"Git 视图\\"] [role=tab]")).map(row=>row.textContent.trim())'), ['Changes · 变更', 'History · 提交记录', 'Branches · 分支', 'Worktrees · 工作树'], 'Workspace Git has exactly four product views');
   assert.ok(await evaluate('!!document.querySelector("input[aria-label=\\"搜索变更文件\\"]")'), 'Changes provides file search');
   assert.ok(await evaluate('document.querySelector(".git-commit")?.getAttribute("aria-label")==="提交所选文件"'), 'commit panel is an independent named surface');
@@ -118,6 +122,8 @@ try {
   await until('document.querySelector(".git-preview .diff-scroll")?.textContent.includes("approved UI change")', 'real file working tree diff');
   assert.ok(calls.some(row=>row.method==='ui.workspace.git.diff'&&row.params.path==='a.txt'&&row.params.cached===false), 'file preview requests an exact path DTO');
   assert.equal(await evaluate('document.querySelector(".git-preview .diff-scroll")?.textContent.includes("unrelated user")'), false, 'file preview excludes unrelated diffs');
+  await click('查看工作文件原文');await until('document.querySelector("[aria-label=\\"当前工作文件原文\\"]")?.textContent.includes("approved UI change")','actual current original file preview');
+  assert.ok(calls.some(row=>row.method==='ui.workspace.git.preview'&&row.params.path==='a.txt'));
   await input('input[aria-label="新分支名称"]', 'codex/ui-branch'); await click('创建分支'); await click('确认创建');
   const branchApproval = await reviewRequest('git.branch.create');
   assert.equal(git(project, 'branch', '--list', 'codex/ui-branch'), ''); assert.equal(git(project, 'status', '--porcelain'), initialStatus); assert.equal(git(project, 'rev-parse', 'HEAD'), baseline);
@@ -151,6 +157,9 @@ try {
   assert.equal(git(project, 'rev-parse', 'HEAD'), baseline); assert.equal(git(project, 'show', ':user.txt'), initialIndex); assert.equal(git(project, 'status', '--porcelain'), initialStatus);
   await approve(commitApproval); const committed = git(project, 'rev-parse', 'HEAD'); assert.notEqual(committed, baseline); assert.equal(git(project, 'diff-tree', '--no-commit-id', '--name-only', '-r', committed), 'a.txt'); assert.equal(git(project, 'show', ':user.txt'), initialIndex); assert.equal(fs.readFileSync(path.join(project, 'user.txt'), 'utf8'), 'unrelated user unstaged\n'); assert.equal(fs.readFileSync(path.join(project, 'loose.txt'), 'utf8'), 'unrelated loose file\n'); assert.equal(git(project, 'diff', '--cached', '--name-only'), 'user.txt');
   await click('History · 提交记录'); await until('document.querySelector(".git-panel")?.innerText.includes("approved exact Git UI commit")', 'approved commit history refreshed');
+  await click('approved exact Git UI commit');await until('document.querySelector("[aria-label=\\"提交详情\\"]")?.textContent.includes("a.txt")','actual commit detail files and patch');
+  assert.ok(calls.some(row=>row.method==='ui.workspace.git.commit.detail'&&row.params.sha===committed));
+  assert.ok(calls.some(row=>row.method==='ui.workspace.git.review'&&row.params.paths[0]==='a.txt'),'whole-file commit uses fresh selected source review');
   console.log('PASS selected-path/hash/HEAD commit remains inert while pending, then preserves unrelated staged/unstaged/untracked data and refreshes history');
 
   fs.writeFileSync(path.join(project, 'a.txt'), 'UI staged portion\n'); await click('Changes · 变更'); await click('刷新');
@@ -199,8 +208,46 @@ try {
   await until('document.querySelector(".git-repository")?.textContent.includes("switch-target") && !!document.querySelector("#git-commit-message")','completed branch overview refresh restores draft controls');
   assert.equal(git(branchProject,'symbolic-ref','HEAD'),'refs/heads/switch-target');assert.equal(await evaluate('document.querySelector("#git-commit-message").value'),'retain this draft');assert.equal(fs.readFileSync(path.join(project,'a.txt'),'utf8'),conflicted);
   console.log('PASS production same-tree branch switch uses fresh scoped review and existing once approval; accepted is not complete, terminal polling refreshes and preserves draft/other conflicted Workspace');
+  for(let i=0;i<53;i++)fs.writeFileSync(path.join(branchProject,'paged-'+String(i).padStart(3,'0')+'.txt'),'paged original '+i+'\n');
+  for(let i=0;i<51;i++)git(branchProject,'commit','--allow-empty','-qm','paged history '+i);
+  const branchHead=git(branchProject,'rev-parse','HEAD');
+  execFileSync('git',['update-ref','--stdin'],{cwd:branchProject,env,windowsHide:true,input:Array.from({length:53},(_,i)=>'create refs/heads/paged-'+String(i).padStart(3,'0')+' '+branchHead).join('\n')+'\n'});
+  await click('刷新');await until('document.querySelectorAll(".git-file-list [role=listitem]").length===50','first actual status page');
+  await click('下一页');await until('document.querySelectorAll(".git-file-list [role=listitem]").length===3','second actual status page');
+  assert.ok(calls.some(row=>row.method==='ui.workspace.git.status.page'&&row.params.cursor));
+  await input('input[aria-label="搜索变更文件"]','paged-000');assert.equal(await evaluate('document.querySelectorAll(".git-file-list [role=listitem]").length'),0,'search is honestly current-page only');
+  await input('input[aria-label="搜索变更文件"]','');await click('上一页');await until('document.querySelectorAll(".git-file-list [role=listitem]").length===50','cursor previous page');
+  await click('History · 提交记录');await until('document.querySelectorAll(".git-main .git-data-row").length===50','first actual history page');
+  const firstSubjects=await evaluate('Array.from(document.querySelectorAll(".git-main .git-data-row")).map(row=>row.textContent)');
+  await click('下一页');await until('document.querySelectorAll(".git-main .git-data-row").length>0&&document.querySelectorAll(".git-main .git-data-row").length<50','second history page');
+  const secondSubjects=await evaluate('Array.from(document.querySelectorAll(".git-main .git-data-row")).map(row=>row.textContent)');assert.equal(secondSubjects.some(row=>firstSubjects.includes(row)),false);
+  await click('Branches · 分支');await until('document.querySelectorAll(".git-main .git-data-row").length===50','first actual branches page');
+  await click('下一页');await until('document.querySelectorAll(".git-main .git-data-row").length>0&&document.querySelectorAll(".git-main .git-data-row").length<50','second actual branches page');
+  assert.ok(calls.some(row=>row.method==='ui.workspace.git.branches'&&row.params.cursor));
+  await click('Changes · 变更');
+  await evaluate('document.querySelector("input[aria-label=\\"提交 paged-000.txt\\"]").click()');
+  fs.writeFileSync(path.join(branchProject,'paged-000.txt'),'fresh bytes after status listing\n');
+  await input('#git-commit-message','fresh source review only');await click('提交所选文件（1）');
+  const freshCommit=await reviewRequest('git.commit',{taskId:undefined,workspaceId:branchWorkspace.id});
+  assert.equal(freshCommit.request.input.expectedHashes['paged-000.txt'],crypto.createHash('sha256').update('fresh bytes after status listing\n').digest('hex'),'approval hash comes from fresh review, not page listing');
+  await evaluate('window.lastDecision=null');await click('拒绝');await until('window.lastDecision && !["accepted","running"].includes(window.lastDecision.status)','reject fresh review request');
+  assert.equal(capabilityService.broker.approvals.get(freshCommit.id).status,'rejected');
+  assert.equal(git(branchProject,'rev-parse','HEAD'),branchHead);
+  holdRead=record=>record.method==='ui.workspace.git.status.page'&&!!record.params.cursor;
+  await click('下一页');for(let i=0;!releaseRead&&i<200;i++)await delay(20);assert.ok(releaseRead);
+  fs.writeFileSync(path.join(branchProject,'000-refresh.txt'),'refresh generation\n');await click('刷新');
+  await until('document.querySelector(".git-file-list")?.textContent.includes("000-refresh.txt")','refresh starts a fresh cursor generation');
+  releaseRead();releaseRead=null;await delay(200);assert.equal(await evaluate('document.querySelectorAll(".git-file-list [role=listitem]").length'),50,'late same-Workspace page cannot replace refreshed first page');
+  holdRead=record=>record.method==='ui.workspace.git.status.page'&&!!record.params.cursor;
+  await click('下一页');for(let i=0;!releaseRead&&i<200;i++)await delay(20);assert.ok(releaseRead,'real delayed response captured');
+  await choose('Git 工作区','Real Git project');await until('document.querySelector(".git-repository-name")?.textContent.includes("Real Git project")','different Workspace before late response');
+  releaseRead();releaseRead=null;await delay(300);
+  assert.equal(await evaluate('document.querySelector(".git-file-list")?.textContent.includes("paged-")'),false,'late source page cannot paint another Workspace');
+  assert.equal(calls.some(row=>row.method==='ui.workspace.git.overview'),false,'all production reads avoid legacy eager overview');
+  console.log('PASS actual server status/history/branch cursors, scoped search, commit detail/original preview and late cross-Workspace page isolation');
   await closeBrowser(); await delay(750); failed = false; console.log('Git Workspace Chromium: PASS (actual Git, Core Broker and Owner approval UI; native host acceptance separate)');
 } catch (error) { console.error(JSON.stringify(calls.slice(-15).map(row=>({method:row.method,params:row.params,status:row.result?.status,error:row.error})))); console.error(error.stack); throw error; } finally {
+  releaseRead?.();
   if (closeBrowser && socket?.readyState === WebSocket.OPEN) { try { await closeBrowser(); } catch {} await delay(1000); }
   if (socket?.readyState === WebSocket.OPEN) socket.terminate();
   if (child?.pid && child.exitCode === null && child.signalCode === null) { await terminateSuiteProcessTree(child); await delay(250); }

@@ -57,6 +57,7 @@ const UI_METHODS: &[&str] = &[
     "ui.workspace.verification.get", "ui.workspace.verification.update",
     "ui.workspace.verification.retry",
     "ui.workspace.git.status.page", "ui.workspace.git.history", "ui.workspace.git.branches",
+    "ui.workspace.git.context",
     "ui.workspace.git.commit.detail", "ui.workspace.git.preview", "ui.workspace.git.review",
     "ui.memory.overview", "ui.memory.get", "ui.memory.create", "ui.memory.update", "ui.memory.pin", "ui.memory.delete",
     "ui.memory.candidates.confirm", "ui.memory.candidates.confirmBatch",

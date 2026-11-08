@@ -1,5 +1,37 @@
 # Exact Git index actions
 
+## Paged read consumers
+
+Git Workspace reads status, anchored history and local branches through the
+existing cursor APIs. It does not use the legacy eager-hashing overview. The
+Owner-only context projection retains bounded Task/Worktree associations without
+reading working file contents. Status pages contain metadata eligibility hints,
+never content hashes or approval authority. Git still scans bounded native
+metadata before slicing status/branch pages; measured observation timings do not
+claim a streaming repository index.
+
+Search and filters cover the displayed server page only. More-page indicators,
+commit patch/file omissions and current-file preview truncation remain visible.
+Commit detail is historical; original-file preview reads the current worktree,
+including untracked text. Refresh and Workspace generations discard late page,
+detail and preview responses. Bounded selections are intent, and full-file commit
+obtains fresh selected-path `review` evidence before requesting approval. Index
+and branch operations retain their existing independent exact review paths.
+
+Agents can request `git.status.page`, `git.history`, `git.branches`,
+`git.commit.detail`, `git.preview` and `git.review` only with explicit grants for
+those exact IDs. Existing permission categories and Broker Task/Workspace checks
+remain authoritative; old/default grants are unchanged. These sequential,
+cancellation-aware read descriptors use the same Workspace observation owner.
+They do not grant writes or broaden plugin path scopes; Extension use remains
+refused until an explicit resource-scope contract is supplied.
+
+Registered observation and production Chromium suites exercise real Git pages,
+fresh review, grant denial and late Workspace responses. Installed native,
+external Agent and remote-platform acceptance remain separate gates.
+
+## Exact write boundary
+
 The existing Workspace Git product provides `reviewStaged`, `stage`, `unstage`
 and `commitStaged` for trusted Core executors. Production mutations must pass
 through the existing Capability Broker authorization and approval boundary.

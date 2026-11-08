@@ -8,6 +8,8 @@ import { createGitProduct } from '../src/workspace/git-product.js';
 import { createWorkspaceService } from '../src/workspace/service.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
 import { gitRun } from '../src/workspace/tools.js';
+import { createCapabilityService } from '../src/capability/service.js';
+import { createTaskRuntime } from '../src/task/runtime.js';
 
 const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cm-git-observation-')));
 const env = { ...process.env };
@@ -83,6 +85,22 @@ try {
     const controller = new AbortController(); controller.abort();
     await assert.rejects(call('history', {}, { signal: controller.signal }), error => /ABORT|CANCEL/.test(error.code ?? error.name));
     assert.equal((await call('history', { limit: 1 })).entries.length, 1, 'cancelling one observation does not disable the Workspace');
+  });
+  await check('consumer context is hash-free and page metadata never supplies content approval', async () => {
+    const observed=path.join(a.root,'context-untracked.txt');fs.writeFileSync(observed,'untracked preview');
+    const syncRead=fs.readFileSync,asyncRead=fs.promises.readFile;let contentReads=0;
+    const count=file=>{if(path.resolve(String(file))===observed)contentReads++;};
+    fs.readFileSync=function(file,...args){count(file);return syncRead.call(this,file,...args);};
+    fs.promises.readFile=async function(file,...args){count(file);return asyncRead.call(this,file,...args);};
+    let context,page;
+    try{context=await product.context(a);page=await product.status(a,{limit:2});}
+    finally{fs.readFileSync=syncRead;fs.promises.readFile=asyncRead;fs.unlinkSync(observed);}
+    assert.equal(contentReads,0,'context/list must not read untracked file contents');
+    assert.equal(context.workspaceId, a.id);
+    assert.ok(Array.isArray(context.tasks)); assert.ok(Array.isArray(context.worktrees));
+    assert.equal(Object.hasOwn(context, 'history'), false);
+    assert.equal(typeof page.conflictCount, 'number');
+    assert.ok(page.entries.every(row => typeof row.commitEligible === 'boolean' && !Object.hasOwn(row, 'sha256')));
   });
   await check('history uses real anchored pages without duplicates after a newer commit', async () => {
     const first = await product.history(a, { limit: 2 });
@@ -169,6 +187,35 @@ try {
     try { await assert.rejects(product.reviewPaths(a, { paths: ['race.txt'] }), { code: 'GIT_SNAPSHOT_CHANGED' }); }
     finally { io.open = originalOpen; }
     assert.equal(injected, true, 'the real selected file was removed exactly at open');
+  });
+  await check('Agent paged reads require exact fresh grants and retain Workspace content boundaries', async () => {
+    const stateDir=path.join(root,'agent-state'),workspaceService=createWorkspaceService({stateDir});
+    const {workspace}=await workspaceService.execute({method:'workspace.create',params:{root:a.root,name:'Agent observation'}});
+    const tasks=createTaskRuntime({stateDir,resolveWorkspace:id=>workspaceService.describeWorkspace(id)});
+    let task=tasks.create({goal:'Read actual local Git pages',workspaceId:workspace.id});
+    task=tasks.start({id:task.id,expectedRev:task.rev,provider:'fixture',sessionId:'page-session'}).task;
+    tasks.beginExecutionObservation({id:task.id,provider:'fixture',sessionId:'page-session',runId:'page-run',phase:'user'});
+    const capabilities=createCapabilityService({stateDir,workspaceService,taskRuntime:tasks});
+    const ids=['git.status.page','git.history','git.branches','git.commit.detail','git.preview','git.review'];
+    try{
+      for(const id of ids)assert.ok(capabilities.broker.list().some(row=>row.id===id),'missing exact descriptor '+id);
+      capabilities.grantTask(task.id,{capabilities:['git.status','git.diff']});
+      const call=(capability,input,workspaceId=workspace.id)=>capabilities.broker.execute({actor:capabilities.principalForTask(task.id),taskId:task.id,workspaceId,capability,input,
+        origin:{targetKind:'agent',phase:'user',sessionId:'page-session',runId:'page-run'}});
+      await assert.rejects(call('git.status.page',{limit:2}),{code:'PERMISSION_DENIED'});
+      capabilities.grantTask(task.id,{capabilities:ids});
+      const status=await call('git.status.page',{limit:2});assert.equal(status.status,'completed');assert.equal(status.result.entries.length,2);
+      const history=await call('git.history',{limit:1});assert.equal(history.result.entries.length,1);
+      assert.equal((await call('git.commit.detail',{sha:history.result.entries[0].sha})).result.sha,history.result.entries[0].sha);
+      assert.equal((await call('git.branches',{limit:1})).result.entries.length,1);
+      const preview=await call('git.preview',{path:'a.txt',maxBytes:8});assert.equal(preview.result.truncated,true);
+      const review=await call('git.review',{paths:['a.txt']});assert.equal(review.result.expectedHashes['a.txt'],hash(fs.readFileSync(path.join(a.root,'a.txt'))));
+      await assert.rejects(call('git.preview',{path:'.env'}),{code:'SENSITIVE_RESOURCE'});
+      await assert.rejects(capabilities.broker.execute({actor:{kind:'extension',id:'fixture-extension',grants:{capabilities:['git.preview'],approvedCapabilities:['git.preview'],workspaceIds:[workspace.id],paths:['unrelated/']}},workspaceId:workspace.id,
+        capability:'git.preview',input:{path:'a.txt'}}),{code:'EXTENSION_SCOPE_UNSUPPORTED'});
+      await assert.rejects(call('git.status.page',{cursor:status.result.nextCursor},'other-workspace'));
+      assert.equal(capabilities.broker.approvals.list().length,0,'read descriptors grant no mutation');
+    }finally{await capabilities.close();}
   });
   await check('branches have source-bound stable pages and detect changed refs', async () => {
     for (let i = 0; i < 4; i++) git(a.root, 'branch', `topic-${i}`);
