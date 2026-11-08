@@ -35,12 +35,26 @@ export function createCodexProviderRouter({legacyProvider,appServerProvider,roll
     capabilities:()=>({...defaultProvider?.capabilities(),id:'codex',appServerRolloutEnabled:rolloutEnabled,
       ...(!defaultProvider ? {available:false,readyForTask:false,security:{mode:'native',nativeSandboxSupported:false}} : {})}),
     health:params=>defaultProvider ? defaultProvider.health(params) : Promise.resolve({provider:'codex',available:false,taskEligible:false,reason:'app_server_unavailable'}),
+    modelCatalog() {
+      if (closing) throw fault('PROVIDER_UNAVAILABLE', 'Codex router shutting down');
+      if (typeof defaultProvider?.modelCatalog !== 'function') return Promise.resolve({provider:'codex',supported:false,reason:'AGENT_MODEL_CATALOG_UNSUPPORTED'});
+      const pending = Promise.resolve().then(() => defaultProvider.modelCatalog()).then(result => {
+        if (closing) throw fault('PROVIDER_UNAVAILABLE', 'Codex router closed before catalog publication');
+        return result;
+      });
+      creating.add(pending);
+      pending.then(() => creating.delete(pending), () => creating.delete(pending));
+      return pending;
+    },
     configure:settings => {
       if (typeof legacyProvider.configure !== 'function') throw fault('CONFIGURATION_UNSUPPORTED','Codex configuration unavailable');
       return legacyProvider.configure(settings);
     },
     async shutdown() {
       closing = true;
+      // Fence/cancel metadata reads before awaiting them. Do not interrupt the
+      // ordinary Task creation ownership protocol merely to stop a catalog probe.
+      for (const selected of new Set([legacyProvider, appServerProvider])) selected?.beginCatalogShutdown?.();
       if (shutdownPromise) return shutdownPromise;
       shutdownPromise = (async()=>{
         const failures=[];

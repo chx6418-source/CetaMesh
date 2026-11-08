@@ -1,4 +1,7 @@
 import { PassThrough } from 'node:stream';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { createAcpAgentProvider } from './acp-agent-provider.js';
 import { agentProviderError as fault } from './agent-provider.js';
 import { createJsonRpcTransport } from './protocol/json-rpc-transport.js';
@@ -7,9 +10,28 @@ import { CODEX_MODEL_CONTROL_SCHEMA_VERSION, readCodexModelCatalog, codexSelecti
 
 export const CODEX_APP_SERVER_SCHEMA_VERSION = '0.163.0-alpha.11.1';
 const CONFIG_FAILURES = new Set(['AGENT_CONFIGURATION_UNSUPPORTED','AGENT_CONFIGURATION_UNCONFIRMED','CODEX_NATIVE_POLICY_UNCONFIRMED','CODEX_MODEL_CATALOG_INVALID','INVALID_PARAMS']);
+const sameDirectoryPath = (left, right) => process.platform === 'win32' ? left.toLowerCase() === right.toLowerCase() : left === right;
+function catalogDirectoryIdentity(directory) {
+  const before = fs.lstatSync(directory, { bigint: true });
+  const canonical = fs.realpathSync.native(directory);
+  const after = fs.lstatSync(directory, { bigint: true });
+  if (!before.isDirectory() || before.isSymbolicLink() || !after.isDirectory() || after.isSymbolicLink()
+    || before.dev === 0n || before.ino === 0n || before.dev !== after.dev || before.ino !== after.ino
+    || !sameDirectoryPath(canonical, path.resolve(directory))) throw fault('ACP_CLOSE_UNKNOWN', 'Catalog directory ownership is unconfirmed');
+  return { canonical, dev: after.dev, ino: after.ino };
+}
+function assertCatalogDirectoryOwner(probe) {
+  const parent = catalogDirectoryIdentity(probe.parent.canonical), current = catalogDirectoryIdentity(probe.root);
+  if (parent.dev !== probe.parent.dev || parent.ino !== probe.parent.ino
+    || current.dev !== probe.directory?.dev || current.ino !== probe.directory?.ino
+    || !sameDirectoryPath(current.canonical, probe.directory.canonical)
+    || !sameDirectoryPath(path.dirname(current.canonical), parent.canonical)) {
+    throw fault('ACP_CLOSE_UNKNOWN', 'Catalog directory was replaced; current path is retained');
+  }
+}
 /** Translates the pinned native protocol into the shared staged Agent lifecycle.
  * No executable/argv or policy is accepted from model messages. */
-export function createCodexAppServerProvider({launch,taskOptions = {},requestNativeApproval,log} = {}) {
+export function createCodexAppServerProvider({launch,taskOptions = {},catalogOptions,requestNativeApproval,log} = {}) {
   let lifecycle=taskOptions.sessionLifecycle??(taskOptions.stateDir?createCodexSessionLifecycle({stateDir:taskOptions.stateDir}):null);
   let sessionCreationStarted=false;
   const runtime = taskOptions.verifiedRuntime;
@@ -21,6 +43,105 @@ export function createCodexAppServerProvider({launch,taskOptions = {},requestNat
     && security.inheritedExtensionsDisabled === true && security.sandbox === 'read-only'
     && security.approvalPolicy === 'on-request';
   const controls = new Map();
+  // This optional trusted profile is distinct from the Task launcher. Its owner
+  // must isolate the supplied empty profile and verify the actual runtime/account
+  // generation. Neither callbacks nor launch fields are accepted from Agent IPC.
+  const catalogLaunch = catalogOptions?.launch, catalogIdentity = catalogOptions?.resolveIdentity;
+  const catalogSupported = verified && nativeModelProfile && typeof catalogLaunch === 'function' && typeof catalogIdentity === 'function';
+  const catalogTimeout = Math.max(50, Math.min(15000, Number(catalogOptions?.timeoutMs) || 15000));
+  const retainedCatalogs = new Set();
+  let catalogPending = null, catalogClosing = false;
+  async function deadline(operation, code = 'ACP_CLOSE_UNKNOWN') {
+    let timer;
+    try { return await Promise.race([operation, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(fault(code, 'Catalog observation exceeded its bounded wait')), catalogTimeout);
+    })]); } finally { clearTimeout(timer); }
+  }
+  async function readCatalogIdentity() {
+    const identity = await deadline(Promise.resolve().then(() => catalogIdentity()), 'AGENT_MODEL_CATALOG_TIMEOUT');
+    // Check after the await: shutdown may have started while identity was read.
+    if (catalogClosing) throw fault('PROVIDER_UNAVAILABLE', 'Codex catalog discovery is shutting down');
+    if (typeof identity !== 'string' || !/^[a-f0-9]{64}$/.test(identity)) throw fault('AGENT_RUNTIME_CHANGED', 'Catalog runtime/account identity is unavailable');
+    return identity;
+  }
+  function beginCatalogShutdown() {
+    catalogClosing = true;
+    // Transport close rejects held control requests immediately. Task Session
+    // shutdown remains with the ordinary provider lifecycle, after creations drain.
+    for (const probe of retainedCatalogs) void probe.rpc?.close();
+  }
+  async function stopCatalog(probe) {
+    if (probe.stopPromise) return probe.stopPromise;
+    const stopping = probe.stopPromise = closeCatalog(probe);
+    try { return await stopping; } catch (error) { if (probe.stopPromise === stopping) probe.stopPromise = null; throw error; }
+  }
+  async function closeCatalog(probe) {
+    await probe.rpc?.close();
+    if (!probe.stopped) {
+      if (typeof probe.handle?.close !== 'function' || !probe.handle?.done?.then) {
+        throw fault('ACP_CLOSE_UNKNOWN', 'Catalog launcher has no observed owned process exit');
+      }
+      const outcomes = await deadline(Promise.all([Promise.resolve().then(() => probe.handle.close()), probe.handle.done]));
+      const receipt = outcomes[1];
+      if (receipt?.terminationConfirmed === false || receipt?.effectStatus === 'unknown'
+        || receipt?.processTreeExitConfirmed !== true && receipt?.terminationConfirmed !== true) {
+        throw fault('ACP_CLOSE_UNKNOWN', 'Catalog process-tree exit is unconfirmed; owned profile retained');
+      }
+      probe.stopped = true;
+    }
+    // A past mkdtemp path is not present-tense ownership. Recheck canonical
+    // parent/root and native node identities immediately before recursive removal.
+    try {
+      assertCatalogDirectoryOwner(probe);
+      fs.rmSync(probe.root, { recursive: true });
+    } catch { throw fault('ACP_CLOSE_UNKNOWN', 'Catalog directory cleanup is unconfirmed; current path is retained'); }
+    retainedCatalogs.delete(probe);
+  }
+  async function observeCatalog() {
+    if (!catalogSupported) throw fault('AGENT_MODEL_CATALOG_UNSUPPORTED', 'This Codex runtime has no verified catalog-only profile');
+    if (catalogClosing) throw fault('PROVIDER_UNAVAILABLE', 'Codex catalog discovery is shutting down');
+    if (retainedCatalogs.size) throw fault('ACP_CLOSE_UNKNOWN', 'Previous catalog process cleanup is unconfirmed');
+    const identity = await readCatalogIdentity();
+    if (catalogClosing) throw fault('PROVIDER_UNAVAILABLE', 'Codex catalog discovery is shutting down');
+    const parent = catalogDirectoryIdentity(fs.realpathSync.native(os.tmpdir()));
+    const root = fs.mkdtempSync(path.join(parent.canonical, 'cetamesh-codex-catalog-'));
+    const probe = { root, parent, directory: null, handle: null, rpc: null, stopped: false };
+    retainedCatalogs.add(probe);
+    let observation;
+    try {
+      probe.directory = catalogDirectoryIdentity(root);
+      const cwd = path.join(root, 'cwd'), profileRoot = path.join(root, 'profile');
+      fs.mkdirSync(cwd); fs.mkdirSync(profileRoot);
+      const onHandle = handle => {
+        if (probe.handle && probe.handle !== handle) throw fault('ACP_LAUNCH_HANDLE_MISMATCH', 'Catalog launcher changed owned handle');
+        probe.handle = handle;
+        if (probe.expired) void stopCatalog(probe).catch(() => { /* Retained ownership permits explicit shutdown retry. */ });
+      };
+      const launching = Promise.resolve().then(() => catalogLaunch({ cwd, profileRoot, purpose: 'model-catalog', transport: 'app-server', schemaVersion: runtime.version, onHandle }))
+        .then(handle => { onHandle(handle); return handle; });
+      let handle;
+      try { handle = await deadline(launching); } catch (error) { probe.expired = true; throw error; }
+      if (!handle?.readable || !handle?.writable || !handle?.done?.then || typeof handle.close !== 'function') {
+        throw fault('ACP_LAUNCH_INVALID', 'Catalog discovery requires supervised streams and observed close');
+      }
+      if (catalogClosing) throw fault('PROVIDER_UNAVAILABLE', 'Codex catalog discovery is shutting down');
+      const rpc = probe.rpc = createJsonRpcTransport({ readable: handle.readable, writable: handle.writable,
+        framing: 'codex-app-server-jsonl', controlTimeoutMs: catalogTimeout,
+        // Metadata discovery cannot request native tools or permissions.
+        onRequest: async () => { throw fault('AGENT_UNSUPPORTED', 'Native requests are unavailable during metadata discovery'); } });
+      await rpc.request('initialize', { clientInfo: { name: 'CetaMesh', title: 'CetaMesh', version: '1' }, capabilities: { experimentalApi: false } });
+      rpc.notify('initialized');
+      const catalog = await readCodexModelCatalog((method, params) => rpc.request(method, params));
+      if (catalogClosing || await readCatalogIdentity() !== identity) throw fault('AGENT_RUNTIME_CHANGED', 'Catalog runtime/account identity changed during discovery');
+      const modelControl = projectCodexModelControl({ version: runtime.version, catalog, selection: null });
+      // Advertised choices never manufacture an effective native selection.
+      modelControl.status = 'unknown'; modelControl.application = 'requires-new-session';
+      observation = { supported: true, provider: 'codex', source: 'codex-app-server-model-list', runtimeVersion: runtime.version,
+        connectionIdentity: identity, modelControl };
+    } finally { await stopCatalog(probe); }
+    if (catalogClosing || await readCatalogIdentity() !== identity) throw fault('AGENT_RUNTIME_CHANGED', 'Catalog identity changed before publication');
+    return observation;
+  }
   const base = createAcpAgentProvider({resolveTaskWorkspace:taskOptions.resolveTaskWorkspace,
     validateCreatedSession(result) {
       if(CONFIG_FAILURES.has(result?.configurationFailure))throw fault(result.configurationFailure,'Codex did not accept the requested initial configuration; the existing Session is unchanged');
@@ -193,6 +314,22 @@ export function createCodexAppServerProvider({launch,taskOptions = {},requestNat
       return supervised;
     }});
   return Object.freeze({...base,
+    beginCatalogShutdown,
+    modelCatalog() {
+      if (!catalogPending) {
+        const pending = catalogPending = observeCatalog();
+        pending.then(() => { if (catalogPending === pending) catalogPending = null; }, () => { if (catalogPending === pending) catalogPending = null; });
+      }
+      return catalogPending;
+    },
+    async shutdown() {
+      beginCatalogShutdown();
+      let pendingFailure = null;
+      try { if (catalogPending) await deadline(catalogPending.catch(() => {})); } catch (error) { pendingFailure = error; }
+      const cleanup = await Promise.allSettled([...retainedCatalogs].map(stopCatalog));
+      await base.shutdown();
+      if (pendingFailure || cleanup.some(result => result.status === 'rejected')) throw fault('ACP_CLOSE_UNKNOWN', 'Catalog cleanup is unconfirmed; owned resources retained');
+    },
     async createSession(params = {}) {
       if(verified && !nativeModelProfile && ['model','reasoningEffort','modelProvider'].some(key=>params[key]!=null)) {
         throw fault('AGENT_CONFIGURATION_UNSUPPORTED','This Codex version has no verified native model-control profile; use a verified fresh Session');
@@ -222,5 +359,5 @@ export function createCodexAppServerProvider({launch,taskOptions = {},requestNat
     const control = controls.get(sessionId);
     if (!control) throw fault('SESSION_NOT_FOUND','Codex native session unavailable; create a new session');
     return control.resume();
-  },capabilities() {const c=base.capabilities(); return {...c,supported:{...c.supported,resume:true},unsupported:c.unsupported.filter(n=>n!=='resume')};}});
+  },capabilities() {const c=base.capabilities(); return {...c,supported:{...c.supported,resume:true,modelCatalog:catalogSupported},unsupported:c.unsupported.filter(n=>n!=='resume')};}});
 }

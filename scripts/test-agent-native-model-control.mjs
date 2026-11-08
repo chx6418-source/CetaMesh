@@ -9,6 +9,10 @@ import { createCodexAppServerProvider, CODEX_APP_SERVER_SCHEMA_VERSION } from '.
 import { createClaudeAgentProvider } from '../src/agent/claude-agent-provider.js';
 import { createAcpAgentProvider } from '../src/agent/acp-agent-provider.js';
 import { readCodexModelCatalog, projectCodexModelControl } from '../src/agent/protocol/codex-model-control.js';
+import { createCodexProviderRouter } from '../src/agent/codex-provider-router.js';
+import { createAgentProviderRegistry } from '../src/agent/registry.js';
+import { createAgentBroker } from '../src/agent/broker.js';
+import { createAgentService } from '../src/agent/service.js';
 
 const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cm-native-model-control-')));
 const version = '0.167.0-alpha.3.2';
@@ -79,11 +83,211 @@ async function settledSyntheticTurn(fixture, created) {
   fixture.peer.send({method:'turn/completed',params:{threadId:fixture.peer.threadId,turn:{id:'native-config-turn',status:'completed'}}});await tick();
 }
 let failures = 0;
+function catalogFixture({ verified = true, runtimeVersion = version, catalog = modelRows, closeUnknown = false, hold = false, reverseRequest = false, hangLaunch = false, holdIdentityAt = 0, replaceRoot = false } = {}) {
+  let identity = 'a'.repeat(64), peer, release, unknown = closeUnknown, identityCalls = 0, releaseIdentity, replacement;
+  const heldIdentity = new Promise(resolve => { releaseIdentity = resolve; });
+  const provider = createCodexAppServerProvider({ taskOptions: { verifiedRuntime: { verified, version: runtimeVersion, security }, resolveTaskWorkspace },
+    launch() { throw new Error('Discovery must never use the Task launcher'); },
+    catalogOptions: { resolveIdentity: async () => ++identityCalls === holdIdentityAt ? heldIdentity : identity, timeoutMs: 100,
+      launch(binding) {
+        assert.equal(binding.taskId, undefined); assert.equal(binding.workspaceId, undefined); assert.equal(binding.sessionId, undefined);
+        assert.equal(binding.purpose, 'model-catalog'); assert.notEqual(binding.cwd, root);
+        assert.deepEqual(fs.readdirSync(binding.cwd), []); assert.deepEqual(fs.readdirSync(binding.profileRoot), []);
+        const readable = new PassThrough(), writable = new PassThrough(); let finish;
+        const done = new Promise(resolve => { finish = resolve; });
+        peer = { frames: [], binding, closes: 0, send: frame => readable.write(JSON.stringify(frame) + '\n') };
+        writable.on('data', chunk => { for (const line of String(chunk).trim().split('\n')) {
+          const frame = JSON.parse(line); peer.frames.push(frame);
+          if (frame.method === 'initialize') {
+            peer.send({ id: frame.id, result: { userAgent: 'synthetic-codex' } });
+            if (reverseRequest) peer.send({ id: 'reverse-permission', method: 'item/commandExecution/requestApproval', params: { command: 'never-run' } });
+          }
+          if (frame.method === 'model/list') {
+            const respond = () => peer.send({ id: frame.id, result: { data: catalog, nextCursor: null } });
+            if (hold) release = respond; else respond();
+          }
+        } });
+        const handle = { readable, writable, done, async close() {
+          peer.closes++; if (unknown) throw Object.assign(new Error('Synthetic unconfirmed exit'), { code: 'ACP_CLOSE_UNKNOWN' });
+          if (replaceRoot && !replacement) {
+            const probeRoot = path.dirname(binding.cwd), parent = fs.realpathSync.native(os.tmpdir());
+            assert.equal(path.dirname(probeRoot).toLowerCase(), parent.toLowerCase());
+            const parking = fs.mkdtempSync(path.join(root, 'catalog-replacement-')), parked = path.join(parking, 'owned-original');
+            assert.ok(path.resolve(parked).startsWith(root + path.sep));
+            const originalIdentity = fs.lstatSync(probeRoot, { bigint: true });
+            fs.renameSync(probeRoot, parked);
+            const target = replaceRoot === 'junction' ? path.join(parking, 'replacement-target') : probeRoot;
+            fs.mkdirSync(target); fs.writeFileSync(path.join(target, 'replacement-owner.txt'), 'replacement directory must survive');
+            if (replaceRoot === 'junction') fs.symlinkSync(target, probeRoot, process.platform === 'win32' ? 'junction' : 'dir');
+            replacement = { probeRoot, parked, target, originalIdentity, identity: fs.lstatSync(probeRoot, { bigint: true }) };
+          }
+          finish({ exitCode: 0, processTreeExitConfirmed: true });
+        } };
+        binding.onHandle(handle); return hangLaunch ? new Promise(() => {}) : handle;
+      }
+    } });
+  return { provider, get peer() { return peer; }, get identityCalls() { return identityCalls; }, get replacement() { return replacement; },
+    restoreRoot() {
+      if (!replacement) return;
+      const { probeRoot, parked, identity: expected } = replacement;
+      if (fs.existsSync(probeRoot)) {
+        const current = fs.lstatSync(probeRoot, { bigint: true });
+        assert.equal(current.dev, expected.dev); assert.equal(current.ino, expected.ino);
+        if (current.isSymbolicLink()) fs.unlinkSync(probeRoot); else fs.rmSync(probeRoot, { recursive: true });
+      }
+      fs.renameSync(parked, probeRoot);
+    },
+    cleanupRestoredRoot() {
+      if (!replacement || !fs.existsSync(replacement.probeRoot)) return;
+      const current = fs.lstatSync(replacement.probeRoot, { bigint: true });
+      assert.equal(current.dev, replacement.originalIdentity.dev); assert.equal(current.ino, replacement.originalIdentity.ino);
+      assert.equal(current.isSymbolicLink(), false); fs.rmSync(replacement.probeRoot, { recursive: true });
+    }, releaseIdentity() { releaseIdentity(identity); }, setIdentity(value) { identity = value; }, release() { release?.(); }, settleClose() { unknown = false; } };
+}
 async function check(name, action) {
   try { await action(); console.log('PASS ' + name); }
   catch (error) { failures++; console.log(`FAIL ${name}: ${error.code || error.name || 'Error'} ${error.stack?.split('\n').find(line => line.includes('test-agent-native-model-control.mjs'))?.trim() ?? ''}`); }
 }
 try {
+  await check('catalog-only discovery uses existing service and Broker without creating a Session or changing default transport', async () => {
+    const fixture = catalogFixture();
+    const legacy = { id: 'codex', capabilities: () => ({ workspaceBoundary: 'native-staged' }), health: async () => ({ available: true }) };
+    const router = createCodexProviderRouter({ legacyProvider: legacy, appServerProvider: fixture.provider, rolloutEnabled: true });
+    const broker = createAgentBroker({ registry: createAgentProviderRegistry({ providers: [router] }) });
+    const service = createAgentService({ broker });
+    try {
+      const result = await service.execute({ method: 'agent.modelCatalog', params: { provider: 'codex' } });
+      assert.equal(result.supported, true); assert.equal(result.source, 'codex-app-server-model-list');
+      assert.equal(result.connectionIdentity, 'a'.repeat(64)); assert.equal(result.runtimeVersion, version);
+      assert.equal(result.modelControl.selection, null); assert.equal(result.modelControl.status, 'unknown');
+      assert.equal(result.modelControl.application, 'requires-new-session');
+      assert.deepEqual(result.modelControl.model.options.map(row => row.value), ['native-model-a', 'native-model-b']);
+      assert.deepEqual(result.modelControl.model.options[1].reasoningOptions.map(row => row.value), ['high', 'low']);
+      assert.equal(fixture.peer.closes, 1); assert.equal(fs.existsSync(fixture.peer.binding.cwd), false);
+      assert.deepEqual(fixture.peer.frames.map(frame => frame.method), ['initialize', 'initialized', 'model/list']);
+      await assert.rejects(service.execute({ method: 'agent.modelCatalog', params: { provider: 'codex', cwd: root } }), { code: 'INVALID_PARAMS' });
+      const execRouter = createCodexProviderRouter({ legacyProvider: legacy, appServerProvider: fixture.provider });
+      assert.equal((await execRouter.modelCatalog()).supported, false, 'metadata must not silently switch the selected transport');
+    } finally { await router.shutdown(); }
+  });
+  for (const options of [{ verified: false }, { runtimeVersion: CODEX_APP_SERVER_SCHEMA_VERSION }]) await check('unverified native discovery profile refuses before launch ' + JSON.stringify(options), async () => {
+    const fixture = catalogFixture(options);
+    try { await assert.rejects(fixture.provider.modelCatalog(), { code: 'AGENT_MODEL_CATALOG_UNSUPPORTED' }); assert.equal(fixture.peer, undefined); }
+    finally { await fixture.provider.shutdown(); }
+  });
+  await check('native metadata invalid advertisements close the owned probe and do not publish a partial catalog', async () => {
+    const fixture = catalogFixture({ catalog: [{ ...modelRows[0], defaultReasoningEffort: 'invented' }] });
+    try { await assert.rejects(fixture.provider.modelCatalog(), { code: 'CODEX_MODEL_CATALOG_INVALID' }); assert.equal(fixture.peer.closes, 1); }
+    finally { await fixture.provider.shutdown(); }
+  });
+  await check('catalog identity change during native read discards advertisements and closes its own process', async () => {
+    const fixture = catalogFixture({ hold: true });
+    try {
+      const pending = fixture.provider.modelCatalog();
+      for (let i = 0; i < 20 && !fixture.peer?.frames.some(frame => frame.method === 'model/list'); i++) await tick();
+      fixture.setIdentity('b'.repeat(64)); fixture.release();
+      await assert.rejects(pending, { code: 'AGENT_RUNTIME_CHANGED' }); assert.equal(fixture.peer.closes, 1);
+    } finally { await fixture.provider.shutdown(); }
+  });
+  await check('unconfirmed catalog process cleanup retains owned profile and can be closed on shutdown', async () => {
+    const fixture = catalogFixture({ closeUnknown: true });
+    try {
+      await assert.rejects(fixture.provider.modelCatalog(), { code: 'ACP_CLOSE_UNKNOWN' });
+      assert.equal(fs.existsSync(fixture.peer.binding.cwd), true);
+      await assert.rejects(fixture.provider.modelCatalog(), { code: 'ACP_CLOSE_UNKNOWN' });
+      fixture.settleClose(); await fixture.provider.shutdown();
+      assert.equal(fs.existsSync(fixture.peer.binding.cwd), false);
+    } finally { fixture.settleClose(); await fixture.provider.shutdown(); }
+  });
+  await check('simultaneous catalog readers share one bounded native observation and metadata reverse requests cannot grant permissions', async () => {
+    const fixture = catalogFixture({ hold: true, reverseRequest: true });
+    try {
+      const first = fixture.provider.modelCatalog(), second = fixture.provider.modelCatalog();
+      assert.equal(first, second);
+      for (let i = 0; i < 20 && !fixture.peer?.frames.some(frame => frame.id === 'reverse-permission'); i++) await tick();
+      assert.ok(fixture.peer.frames.find(frame => frame.id === 'reverse-permission')?.error);
+      fixture.release(); await Promise.all([first, second]);
+      assert.equal(fixture.peer.closes, 1);
+      assert.equal(fixture.peer.frames.filter(frame => frame.method === 'model/list').length, 1);
+    } finally { await fixture.provider.shutdown(); }
+  });
+  await check('catalog control timeout closes the owned probe without publishing or leaving a stuck refresh', async () => {
+    const fixture = catalogFixture({ hold: true });
+    try {
+      await assert.rejects(fixture.provider.modelCatalog(), { code: 'RPC_TIMEOUT' });
+      assert.equal(fixture.peer.closes, 1); assert.equal(fs.existsSync(fixture.peer.binding.cwd), false);
+    } finally { await fixture.provider.shutdown(); }
+  });
+  await check('shutdown drains in-flight catalog ownership and late advertisements cannot publish', async () => {
+    const fixture = catalogFixture({ hold: true });
+    const pending = fixture.provider.modelCatalog().then(value => ({ value }), error => ({ error }));
+    for (let i = 0; i < 20 && !fixture.peer?.frames.some(frame => frame.method === 'model/list'); i++) await tick();
+    await fixture.provider.shutdown(); fixture.release();
+    assert.ok((await pending).error); assert.equal(fixture.peer.closes, 1);
+    assert.equal(fs.existsSync(fixture.peer.binding.cwd), false);
+    await assert.rejects(fixture.provider.modelCatalog(), { code: 'PROVIDER_UNAVAILABLE' });
+  });
+  await check('a catalog launcher stalled after handle capture remains bounded and shutdown closes its owned process', async () => {
+    const fixture = catalogFixture({ hangLaunch: true });
+    const pending = fixture.provider.modelCatalog().then(value => ({ value }), error => ({ error }));
+    for (let i = 0; i < 20 && !fixture.peer; i++) await tick();
+    await fixture.provider.shutdown();
+    assert.ok((await pending).error); assert.equal(fixture.peer.closes, 1);
+    assert.equal(fs.existsSync(fixture.peer.binding.cwd), false);
+  });
+  await check('router shutdown fences a held catalog before the provider can publish it', async () => {
+    const fixture = catalogFixture({ hold: true });
+    const legacy = { id: 'codex', capabilities: () => ({}), shutdown: async () => {} };
+    const router = createCodexProviderRouter({ legacyProvider: legacy, appServerProvider: fixture.provider, rolloutEnabled: true });
+    try {
+      const reading = router.modelCatalog().then(value => ({ value }), error => ({ error }));
+      for (let i = 0; i < 20 && !fixture.peer?.frames.some(frame => frame.method === 'model/list'); i++) await tick();
+      const stopping = router.shutdown();
+      await tick(); fixture.release();
+      const result = await reading; await stopping;
+      assert.equal(result.value, undefined, 'shutdown must fence metadata publication before waiting on readers');
+      assert.ok(result.error); assert.equal(fixture.peer.closes, 1);
+    } finally { fixture.release(); await router.shutdown(); }
+  });
+  for (const holdIdentityAt of [1, 2, 3]) await check('identity validation has a bounded wait at observation boundary ' + holdIdentityAt, async () => {
+    const fixture = catalogFixture({ holdIdentityAt });
+    const legacy = { id: 'codex', capabilities: () => ({}), shutdown: async () => {} };
+    const router = createCodexProviderRouter({ legacyProvider: legacy, appServerProvider: fixture.provider, rolloutEnabled: true });
+    let readSettled = false, shutdownSettled = false;
+    const reading = router.modelCatalog().then(value => { readSettled = true; return { value }; }, error => { readSettled = true; return { error }; });
+    for (let i = 0; i < 20 && fixture.identityCalls < holdIdentityAt; i++) await tick();
+    const stopping = router.shutdown().then(() => { shutdownSettled = true; }, error => { shutdownSettled = true; return error; });
+    await new Promise(resolve => setTimeout(resolve, 250));
+    const bounded = readSettled && shutdownSettled;
+    // Always release the synthetic dependency, including on the RED run.
+    fixture.releaseIdentity(); const result = await reading; await stopping;
+    assert.equal(bounded, true, 'catalog and router shutdown must settle without an identity resolver completing');
+    assert.equal(result.value, undefined); assert.ok(result.error);
+    if (holdIdentityAt === 1) assert.equal(fixture.peer, undefined, 'late preflight identity cannot launch after shutdown');
+    if (fixture.peer) { assert.equal(fixture.peer.closes, 1); assert.equal(fs.existsSync(fixture.peer.binding.cwd), false); }
+  });
+  await check('direct provider shutdown during the final identity await prevents late publication even before timeout', async () => {
+    const fixture = catalogFixture({ holdIdentityAt: 3 });
+    const pending = fixture.provider.modelCatalog().then(value => ({ value }), error => ({ error }));
+    for (let i = 0; i < 20 && fixture.identityCalls < 3; i++) await tick();
+    const stopping = fixture.provider.shutdown();
+    fixture.releaseIdentity();
+    const result = await pending; await stopping;
+    assert.equal(result.value, undefined); assert.ok(result.error); assert.equal(fixture.peer.closes, 1);
+  });
+  for (const replaceRoot of ['directory', 'junction']) await check('catalog cleanup retains a replaced owned root and its new owner bytes: ' + replaceRoot, async () => {
+    const fixture = catalogFixture({ replaceRoot });
+    try {
+      const result = await fixture.provider.modelCatalog().then(value => ({ value }), error => ({ error }));
+      assert.equal(fs.readFileSync(path.join(fixture.replacement.target, 'replacement-owner.txt'), 'utf8'), 'replacement directory must survive');
+      assert.equal(result.value, undefined); assert.equal(result.error?.code, 'ACP_CLOSE_UNKNOWN');
+      assert.equal(fs.lstatSync(fixture.replacement.probeRoot).isSymbolicLink(), replaceRoot === 'junction');
+      await assert.rejects(fixture.provider.shutdown(), { code: 'ACP_CLOSE_UNKNOWN' });
+      assert.equal(fs.readFileSync(path.join(fixture.replacement.target, 'replacement-owner.txt'), 'utf8'), 'replacement directory must survive');
+    } finally {
+      fixture.restoreRoot(); await fixture.provider.shutdown(); assert.equal(fixture.peer.closes, 1); fixture.cleanupRestoredRoot();
+    }
+  });
   await check('0.167 profile alone never grants execution eligibility', async () => {
     const fixture = nativeFixture({ verified: false });
     assert.equal((await fixture.provider.health()).available, false);

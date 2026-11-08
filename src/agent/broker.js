@@ -142,6 +142,13 @@ export function createAgentBroker({ registry, log = () => {}, resolveWorkspaceId
     capabilities(providerId) {
       return requireProvider(providerId).capabilities();
     },
+    async modelCatalog({ provider: providerId, ...extra } = {}) {
+      if (Object.keys(extra).length) throw agentProviderError('INVALID_PARAMS', 'Catalog discovery accepts only the Provider identity');
+      const provider = requireProvider(providerId);
+      if (typeof provider.modelCatalog !== 'function') return { provider: providerId, supported: false,
+        reason: TASK_WORKSPACE_BOUNDARIES.has(provider.capabilities()?.workspaceBoundary) ? 'AGENT_MODEL_CATALOG_SESSION_REQUIRED' : 'AGENT_MODEL_CATALOG_UNSUPPORTED' };
+      return provider.modelCatalog();
+    },
 
     // ── 会话操作（统一入口；provider id 必填首参） ────────────────────────────
     async createSession(providerId, params = {}) {

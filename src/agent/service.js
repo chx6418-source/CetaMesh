@@ -197,6 +197,11 @@ export function createAgentService({ broker, log = () => {}, desktopStatus = nul
       }))
     }),
     'agent.capabilities': (params) => ({ capabilities: broker.capabilities(params?.provider) }),
+    'agent.modelCatalog': (params) => {
+      if (!params || typeof params !== 'object' || Array.isArray(params) || typeof params.provider !== 'string'
+        || Object.keys(params).some(key => key !== 'provider')) throw agentProviderError('INVALID_PARAMS', 'Catalog discovery accepts only the Provider identity');
+      return broker.modelCatalog(params);
+    },
     'agent.health': async (params) => decorate(broker.require(params?.provider), await broker.health(params?.provider, { refresh: params?.refresh === true }), params),
     'agent.createSession': (params) => {
       const boundary = broker.capabilities(params?.provider)?.workspaceBoundary;
