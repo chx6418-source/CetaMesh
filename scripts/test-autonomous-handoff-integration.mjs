@@ -27,6 +27,9 @@ async function scenario(machineContract,coldNative=false,control='approve',longC
   credentialService.set({provider:'automatic-fixture-model',apiKey:'synthetic-local-only'});
   services=createCetaMeshServices({stateDir:path.join(root,'state'),dataRoot:path.join(root,'data'),agentStagingRoot:path.join(root,'staging'),providerSecrets:credentialService});
   assert.equal(services.providerSecrets,credentialService);
+  const failedTurns=[],follow=services.agentBroker.follow.bind(services.agentBroker);
+  services.agentBroker.follow=async function*(params){for await(const item of follow(params)){const event=item?.type==='event'?item.event:item;
+   if(event?.type==='turn/end'&&event.data?.reason?.kind!=='completed')failedTurns.push({provider:params.provider,reason:event.data?.reason});yield item;}};
   let modelCalls=0,verificationCalls=0,sawCompactedVerification=false;const observedPlans=[];
   services.modelRegistry.register({id:'automatic-fixture-model',label:'Deterministic local model',defaultModel:'fixture',supportsTools:true,
    health:async()=>({available:true,configured:true}),listModels:async()=>[{id:'fixture'}],chat:async()=>({text:'unused'}),
@@ -47,12 +50,13 @@ async function scenario(machineContract,coldNative=false,control='approve',longC
     // Simulated high context must not let normal context rollover steal the delegation boundary.
     yield {type:'turn/end',data:{usage:{inputTokens:120000,outputTokens:5},reason:{kind:'completed'}}};
    }});
-  const events=[],sent=[];let sequence=0,ready=!coldNative,readiness=null,nativeApprovals=0;
-  const fixture=defineAgentProvider({id:'coding-fixture',label:'Isolated coding fixture',eventProtocol:'turn-v1',
+  const events=[],sent=[];let sequence=0,ready=!coldNative,readiness=null,nativeApprovals=0,fixtureBinding=null,fixtureStopped=false;
+  const leaf=defineAgentProvider({id:'coding-fixture',label:'Isolated coding fixture',eventProtocol:'turn-v1',
    capabilityExtras:{workspaceBoundary:coldNative?'native-staged':'capability-broker',...(coldNative?{supportsReadinessCheck:true,security:{mode:'native',verified:true,nativeSandboxSupported:true,nativeSandboxMode:'fixture-only',strictIsolationVerified:false}}:{}),assignment:{taskKinds:['code'],tools:[],maxDifficulty:3}},
    methods:{
-    async createSession(){if(control==='revoke-bootstrap'){const latest=services.taskService.runtime.get({id:taskId}).task;await services.capabilityService.execute({method:'capability.delegation.revoke',params:{taskId,expectedRev:latest.rev}});}return {sessionId:'fixture-target-session'};},
+    async createSession(scope){fixtureBinding={taskId:scope.taskId,workspaceId:scope.workspaceId,sessionId:'fixture-target-session'};fixtureStopped=false;if(control==='revoke-bootstrap'){const latest=services.taskService.runtime.get({id:taskId}).task;await services.capabilityService.execute({method:'capability.delegation.revoke',params:{taskId,expectedRev:latest.rev}});}return {sessionId:'fixture-target-session'};},
     async send({sessionId,content,phase,runId,nativeReadinessToken}) {
+     fixtureStopped=false;
      if(nativeReadinessToken){ready=true;readiness={verified:true,runId,tokenSha256:hash(nativeReadinessToken)};}
      if(coldNative&&phase==='user')assert.ok(readiness?.verified,'formal work must wait for native tool proof');
      const requestId='fixture-'+(++sequence);sent.push({sessionId,content,phase});
@@ -71,9 +75,14 @@ async function scenario(machineContract,coldNative=false,control='approve',longC
     },
     async status(){return {running:false,queued:0,waitingForApproval:false,readiness};},
     async health(){return {available:true,installed:true,compatible:true,authenticated:true,sessionCapable:true,toolsAvailable:ready?true:null,sandboxCapable:ready?true:null};},
-    async cancel(){return {cancelled:true};},async closeSession(){return {closed:true};},
+    async cancel(){fixtureStopped=control!=='unconfirmed-stop';return {cancelled:true};},async closeSession(){fixtureStopped=control!=='unconfirmed-stop';return {closed:true};},
     async *follow({signal,sinceSequence=0}){let cursor=sinceSequence;while(!signal?.aborted){const next=events.find(row=>row.seq>cursor);if(next){cursor=next.seq;yield next;continue;}await delay(10);}}
    }});
+  // This is a controlled leaf, not a real native-process proof. Its lifecycle
+  // records explicitly model the proof required of native adapters; protocol
+  // idle alone must not grant retained-history admission after a handoff.
+  const fixture={...leaf,...(coldNative?{async verifyStoppedTask(scope){return {...scope,provider:'coding-fixture',stopped:fixtureStopped
+    &&fixtureBinding&&Object.entries(fixtureBinding).every(([key,value])=>scope[key]===value),evidence:'controlled-fixture-stop'};}}:{})};
   services.agentBroker.register(fixture);
   const realIds=services.agentBroker.ids.bind(services.agentBroker);
   services.agentBroker.ids=()=>realIds().filter(id=>['cetamesh','coding-fixture'].includes(id));
@@ -97,9 +106,17 @@ async function scenario(machineContract,coldNative=false,control='approve',longC
      await services.capabilityService.execute({method:'capability.approval.decide',params:{id:approval.id,approve:true}});}
    current=rt.get({id:taskId}).task;if(['needs-review','verified','unknown','blocked'].includes(current.delegationProposal?.state))break;await delay(25);
   }
+  if(control==='unconfirmed-stop'){
+   assert.equal(current.delegationProposal?.state,'unknown');assert.equal(current.status,'blocked');
+   assert.ok(failedTurns.some(row=>row.reason?.error?.code==='REQUEST_RECOVERY_REQUIRED'));
+   assert.equal(sent.filter(row=>row.phase==='user').length,1,'unconfirmed stop never redispatches external work');
+   assert.equal(verificationCalls,0,'native idle without stop proof cannot start return verification');
+   assert.equal(fs.readFileSync(path.join(project,'新增目录','结果.txt'),'utf8'),'4217','imported bytes are retained');
+   console.log('PASS native idle without affirmative lifecycle proof blocks return bootstrap without replay or data loss');return;
+  }
   if(control!=='approve'){await delay(100);current=rt.get({id:taskId}).task;assert.equal(current.delegationProposal?.state,control==='revoke-bootstrap'?'unknown':'blocked');assert.equal(sent.length,0,'no native Session or formal work after denied/late consent');if(control!=='revoke-bootstrap')assert.equal(services.agentBroker.describeExecutionSecurity('coding-fixture',workspace.id).authorized,false);console.log('PASS cold native '+control+' prevents all dispatch, including late Owner decisions');return;}
   if(coldNative){assert.equal(nativeApprovals,1,'one exact Owner native preparation approval');}
-  assert.equal(current.delegationProposal?.state,machineContract?'verified':'needs-review',JSON.stringify({proposal:current.delegationProposal,status:current.status}));
+  assert.equal(current.delegationProposal?.state,machineContract?'verified':'needs-review',JSON.stringify({proposal:current.delegationProposal,status:current.status,failedTurns}));
   assert.equal(current.executionEvidence.findLast(row=>row.capability==='test.run'&&row.source==='core-test')?.exitCode,0);
   assert.ok(modelCalls>=5);assert.equal(sent.filter(row=>row.phase==='user').length,1);assert.match(sent.find(row=>row.phase==='user').content,/remaining fixture work/);
   assert.deepEqual(current.agentHistory.map(row=>row.provider),['cetamesh','coding-fixture','cetamesh']);
@@ -134,6 +151,7 @@ await scenario(false);
 await scenario(true);
 await scenario(true,false,'approve',true);
 await scenario(true,true);
+await scenario(true,true,'unconfirmed-stop');
 await scenario(true,true,'reject');
 await scenario(true,true,'revoke');
 await scenario(true,true,'revoke-bootstrap');

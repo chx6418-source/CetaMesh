@@ -14,6 +14,7 @@ import { CliAgentProcess, createMinimalAgentEnv, findCliExecutable } from '../sr
 import { createCodexAgentProvider, buildCodexExecArgs } from '../src/agent/codex-agent-provider.js';
 import { createZCodeAgentProvider } from '../src/agent/zcode-agent-provider.js';
 import { createDshAgentProvider } from '../src/agent/dsh-agent-provider.js';
+import { createStagedDshAgentProvider } from '../src/agent/staged-dsh-agent-provider.js';
 import { createCapabilityService } from '../src/capability/service.js';
 import { createChatService } from '../src/desktop/chat-service.js';
 import { createTaskService } from '../src/task/service.js';
@@ -158,16 +159,43 @@ try {
   const taskFollowStateDir = path.join(root, 'task-follow-capabilities');
   const followAudit = [];
   let taskFollowCapabilityService = null;
-  const dshService = createDefaultAgentService({ api: dshApi, dshOptions: {
+  const stagingOptions = {
     stagingRoot: path.join(root, 'dsh-staging'),
     resolveTaskWorkspace: async ({ taskId } = {}) => ({ task: taskRuntime.get({ id: taskId ?? task.id }).task, workspace: authoritative }),
     listWorkspaceRoots: async () => [authoritativeRoot],
     applyChanges: request => taskFollowCapabilityService.applyAgentWorkspaceChanges(request),
     approvalStatus: approvalId => taskFollowCapabilityService.workspaceImportStatus(approvalId),
     cancelApproval: approvalId => taskFollowCapabilityService.cancelWorkspaceImportApproval(approvalId)
-  } });
-  assert.equal(dshService.broker.capabilities('dsh').workspaceBoundary, 'capability-broker',
-    'the product DSH provider advertises a Broker boundary only when the staging/import adapter is installed');
+  };
+  const productionDsh = createDefaultAgentService({api:dshApi,dshOptions:stagingOptions});
+  assert.equal(productionDsh.broker.capabilities('dsh').workspaceBoundary,'unverified',
+    'HTTP readiness plus staging cannot stand in for an SDK tool approval bridge');
+  await assert.rejects(productionDsh.broker.createSession('dsh',{taskId:task.id,workspaceId:authoritative.id}),{code:'AGENT_BOUNDARY_UNSUPPORTED'});
+  await assert.rejects(productionDsh.broker.require('dsh').createSession({taskId:task.id,workspaceId:authoritative.id}),{code:'DSH_TOOL_APPROVAL_UNAVAILABLE'});
+  assert.equal(dshSessions.size,0,'unsupported production transport does not create a Session');
+  await productionDsh.close();
+  // The remaining cases exercise import and Follow lifecycle using an explicit
+  // controlled leaf. No HTTP readiness or simulated descriptor is native SDK
+  // evidence; the SDK protocol/approval suites validate that separate boundary.
+  const leaf=defineAgentProvider({id:'dsh',label:'Controlled staging lifecycle fixture',capabilityExtras:{taskTransport:'sdk',
+    security:{mode:'native-permissions',verified:true,nativeSandboxSupported:false,strictIsolationVerified:false,
+      nativeApprovalSupported:true,nativePermissionPolicyVerified:true,allToolsRequireApproval:true,nativeSandboxMode:'none'}},methods:{
+    createSession:params=>dshApi.callEndpoint('session/create',{request:params}),
+    async send(params){const requestId=crypto.randomUUID();await dshApi.callEndpoint('session/prompt',{request:{...params,requestId}});return {accepted:true,requestId};},
+    async cancel({sessionId}){await dshApi.callEndpoint('session/cancel',{request:{sessionId}});return {cancelled:true};},
+    async closeSession({sessionId}){await dshApi.callEndpoint('session/cancel',{request:{sessionId}});return {closed:true,stopped:true};},
+    async status({sessionId}){return {running:dshSessions.get(sessionId)?.running===true,queued:0,waitingForApproval:false};},
+    async health(){return {available:true,ready:true,authenticated:true,sessionCapable:true,taskEligible:true,toolsAvailable:true};},
+    follow:({sessionId,signal})=>dshApi.openRemoteStream('session/follow',{request:{address:{sessionId}}},{signal})
+  }});
+  const stagedPeer=createStagedDshAgentProvider({...stagingOptions,provider:leaf});
+  const stagedBroker=createAgentBroker({registry:createAgentProviderRegistry({providers:[stagedPeer]}),resolveWorkspaceIdentity:()=>authoritativeRoot});
+  const dshService=Object.assign(createAgentService({broker:stagedBroker}),{broker:stagedBroker});
+  assert.equal(dshService.broker.capabilities('dsh').workspaceBoundary,'native-staged');
+  const stagedScope=stagedBroker.describeExecutionSecurity('dsh',authoritative.id);
+  await assert.rejects(stagedBroker.createSession('dsh',{taskId:task.id,workspaceId:authoritative.id}),{code:'AGENT_SECURITY_CONFIRMATION_REQUIRED'});
+  assert.equal(dshSessions.size,0,'controlled native boundary also requires explicit scope consent');
+  stagedBroker.authorizeExecution('dsh',authoritative.id,stagedScope.fingerprint);
 
   const followTask = taskRuntime.create({ goal: 'Task-level Agent completion must import its Workspace changes', workspaceId: authoritative.id });
   taskFollowCapabilityService = createCapabilityService({ stateDir: taskFollowStateDir, workspaceService,
@@ -273,7 +301,7 @@ try {
   const dshTaskAfterRollover = taskRuntime.get({ id: task.id }).task;
   taskRuntime.detachAgent({ id: task.id, expectedRev: dshTaskAfterRollover.rev, note: 'DSH fixture cleanup' });
   await taskFollowCapabilityService.close();
-  dshService.close();
+  await dshService.close();
 
   const cliFixture = path.join(root, 'fake-cli.mjs');
   fs.writeFileSync(cliFixture, [
