@@ -44,7 +44,7 @@ try{
   }
   if(!status.turn&&requests.length>=3)break;await delay(10);
  }
- if(leafFailure)throw leafFailure;assert.ok(taskId);assert.equal(status.turn,null);assert.equal(status.lastState,'idle',status.lastErrorCode);assert.equal(requests.length,3);assert.equal(decided.size,1);
+ if(leafFailure)throw leafFailure;assert.ok(taskId);assert.equal(status.turn,null);assert.equal(status.lastState,'idle',JSON.stringify({code:status.lastErrorCode,reason:(await services.managedAgent.provider.status({sessionId:services.taskService.runtime.get({id:taskId}).task.currentAgent.sessionId})).lastReason}));assert.equal(requests.length,3);assert.equal(decided.size,1);
  assert.equal(fs.readFileSync(path.join(project,'proof.txt'),'utf8'),'approved');
  const task=services.taskService.runtime.get({id:taskId}).task;assert.equal(task.executionObservation.state,'awaiting-review');assert.notEqual(task.status,'completed');assert.ok(!task.acceptance.some(row=>row.met));
  const history=await services.chatService.execute({method:'chat.history',params:{id:chat.id}}),last=history.messages.findLast(row=>row.role==='assistant');

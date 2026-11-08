@@ -190,7 +190,7 @@ await nullableHistory.close();
 
 // Use production Task dispatch, approvals, Follow projection and source filesystem
 // evidence to catch activity observers lost only on Managed approval continuation.
-{
+for (const restoreMode of ['live', 'mismatch', 'non-live']) {
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'cetamesh-managed-activity-'));let services,taskId;
   try{
     const project=path.join(root,'project');fs.mkdirSync(project);fs.writeFileSync(path.join(project,'proof.txt'),'before');
@@ -199,15 +199,18 @@ await nullableHistory.close();
     let modelStep=0;
     services.modelRegistry.register({id:'activity-fixture',label:'Local activity fixture',defaultModel:'fixture',supportsTools:true,
       health:async()=>({available:true,configured:true}),listModels:async()=>[{id:'fixture'}],chat:async()=>({text:'unused'}),
-      stream:async function*(){
+      stream:async function*(request){
+        assert.ok(request.messages.some(row => typeof row.content === 'string' && row.content.includes('D:\\synthetic-owned-reference\\proof.txt')),
+          'approval continuation preserves the actual original Owner reference, not sanitized persistence text');
         const step=modelStep++,call=step===0?{id:'approved-write',capabilityId:'filesystem.write',arguments:JSON.stringify({path:'proof.txt',content:'approved',expectedHash:crypto.createHash('sha256').update('before').digest('hex')})}
           :step===1?{id:'read-after-approval',capabilityId:'filesystem.read',arguments:'{"path":"proof.txt"}'}:null;
-        if(call)yield {type:'assistant/tool-calls',data:{toolCalls:[call]}};
+        if(call)yield {type:'assistant/tool-calls',data:{toolCalls:step===0
+          ? [{id:'read-before-approval',capabilityId:'filesystem.read',arguments:'{"path":"proof.txt"}'},call] : [call]}};
         else yield {type:'assistant/message',data:{message:{content:[{type:'text',text:'The approved source write and read returned.'}]}}};
         yield {type:'turn/end',data:{reason:{kind:'completed'}}};
       }});
     const workspace=(await services.workspaceService.execute({method:'workspace.create',params:{root:project,name:'Managed activity fixture'}})).workspace;
-    const created=await services.desktopUiService.execute({method:'ui.task.create',params:{goal:'Write only proof.txt with Owner approval, read it back, and report the actual source result.',workspaceId:workspace.id,
+    const created=await services.desktopUiService.execute({method:'ui.task.create',params:{goal:'Write only proof.txt with Owner approval, read it back, and report the actual source result. Preserve Owner reference D:\\synthetic-owned-reference\\proof.txt as attributed context.',workspaceId:workspace.id,
       agentProvider:'cetamesh',modelProvider:'activity-fixture',model:'fixture',requestId:'managed-activity'}});taskId=created.task.id;
     async function until(predicate,label){const end=Date.now()+5000;while(Date.now()<end){const value=predicate();if(value)return value;await delay(5);}throw Error('Timed out: '+label);}
     const pendingApproval=await until(()=>services.capabilityService.broker.approvals.list().find(row=>row.status==='pending'&&row.request.taskId===taskId),'real source approval');
@@ -215,7 +218,45 @@ await nullableHistory.close();
     for await(const event of services.agentBroker.follow(assignment)){waitingEvents.push(event);if(event.type==='turn/end'&&event.data.reason.kind==='waiting')break;}
     const waitingActivity=waitingEvents.find(event=>event.type==='tool/activity'&&event.data.activity.status==='waiting-approval');
     assert.ok(waitingActivity);assert.equal(fs.readFileSync(path.join(project,'proof.txt'),'utf8'),'before');
+    if (restoreMode !== 'live') {
+      const resume = services.toolExecutionCoordinator.resumeApproval;
+      services.toolExecutionCoordinator.resumeApproval = options => resume({ ...options, restoreMessages: async () => {
+        assert.equal(typeof options.restoreMessages, 'function');
+        if (restoreMode === 'non-live') {
+          await services.managedAgent.provider.archiveSession({ sessionId: assignment.sessionId });
+          return options.restoreMessages();
+        }
+        const raw = await options.restoreMessages();
+        raw.find(row => row.role === 'user').content += ' Altered live owner instruction.';
+        return raw;
+      } });
+    }
     const decision=await services.capabilityService.execute({method:'capability.approval.decide',params:{id:pendingApproval.id,approve:true}});
+    if (restoreMode !== 'live') {
+      assert.equal(decision.status, 'completed', 'the approved actual effect remains completed');
+      assert.equal(decision.turnResumed, false, 'mismatched/non-live transcript cannot restart inference');
+      assert.equal(modelStep, 1, 'no additional tool/model work follows refused live restoration');
+      assert.equal(fs.readFileSync(path.join(project, 'proof.txt'), 'utf8'), 'approved', 'accepted effect is retained, not undone or replayed');
+      const journal = JSON.parse(fs.readFileSync(path.join(root, 'state', 'model', 'tool-continuations.json')));
+      if (restoreMode === 'mismatch') assert.ok(JSON.stringify(journal).includes('resuming'), 'consumed continuation stays fenced for recovery');
+      else assert.equal(services.toolExecutionCoordinator.pendingTarget(pendingApproval.id), null, 'archival removes the continuation through existing cancellation');
+      await assert.rejects(services.toolExecutionCoordinator.resumeApproval({ approvalId: pendingApproval.id,
+        requestFingerprint: pendingApproval.fingerprint, decisionResult: decision }),
+      { code: restoreMode === 'mismatch' ? 'REQUEST_RECOVERY_REQUIRED' : 'APPROVAL_CONTINUATION_NOT_FOUND' }, 'the consumed approval cannot replay');
+      if (restoreMode === 'mismatch') {
+        const { createToolExecutionCoordinator } = await import('../src/model/tool-execution.js');
+        const coldCoordinator = createToolExecutionCoordinator({ stateDir: path.join(root, 'state'),
+          modelRuntime: services.modelRuntime, capabilityBroker: services.capabilityService.broker });
+        let restorationCalled = false;
+        await assert.rejects(coldCoordinator.resumeApproval({ approvalId: pendingApproval.id,
+          requestFingerprint: pendingApproval.fingerprint, decisionResult: decision,
+          restoreMessages: () => { restorationCalled = true; return []; } }), { code: 'APPROVAL_CONTINUATION_ORPHANED' });
+        assert.equal(restorationCalled, false, 'cold consumed continuation is refused before consulting any transcript callback');
+        assert.equal(modelStep, 1);
+      }
+      console.log(`PASS Managed ${restoreMode} live restoration refuses without replaying the accepted source write`);
+      continue;
+    }
     assert.equal(decision.status,'completed');assert.equal(decision.turnResumed,true);
     const completedEvents=[];
     for await(const event of services.agentBroker.follow({...assignment,sinceSequence:waitingEvents.at(-1).seq})){completedEvents.push(event);if(event.type==='turn/end'&&event.data.reason.kind==='completed')break;}

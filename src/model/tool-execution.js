@@ -1124,6 +1124,7 @@ export function createToolExecutionCoordinator({
       delete continuations[approvalId];
       throw error;
     }
+    await messagesCheckpoint(state, 'settled-transcript');
     return { status: 'pending', toolCalling: 'supported', approvalId, expiresAt: result.expiresAt,
         text: '', usage, resolvedModel, continuationId: id,
         ...(pending.postWriteVerification ? { postWriteVerification: pending.result.postWriteVerification } : {}) };
@@ -1475,7 +1476,7 @@ export function createToolExecutionCoordinator({
     return { recorded: rows.length };
   }
 
-  async function resumeApprovalInternal({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, onCapabilityResult, onActivity, onTextDelta, onStreamReset, onContext, onConfiguration } = {}) {
+  async function resumeApprovalInternal({ approvalId, requestFingerprint, decisionResult, signal, refreshContext, restoreMessages, onCapabilityResult, onActivity, onTextDelta, onStreamReset, onContext, onConfiguration } = {}) {
     const continuation = continuations[String(approvalId ?? '')];
     if (!continuation) fail('APPROVAL_CONTINUATION_NOT_FOUND', 'No Model turn is waiting for this approval');
     if (continuation.status === 'resuming') fail('REQUEST_RECOVERY_REQUIRED', 'This consumed approval already resumed; inspect retained receipts before starting a fresh turn');
@@ -1551,6 +1552,17 @@ export function createToolExecutionCoordinator({
     continuation.status = 'resuming';
     continuation.resumeStartedAt = Date.now();
     save();
+    // A trusted live owner may retain protocol text that the durable execution
+    // journal deliberately sanitizes. This callback is not a cold stack loader
+    // or a model/RPC input. Claim the receipt first and require exact agreement
+    // with the saved projection before any resumed tool/effect can execute.
+    if (typeof restoreMessages === 'function') {
+      const original = await restoreMessages();
+      if (!Array.isArray(original) || JSON.stringify(safePersistedMessages(original)) !== JSON.stringify(continuation.state.messages)) {
+        fail('CONTEXT_SYNOPSIS_STALE', 'Live approval transcript does not match its retained continuation; reconcile the consumed receipt before fresh recovery');
+      }
+      state.messages = structuredClone(original);
+    }
     if (state.pendingBatch) {
       state.callBudget = { used: state.totalCalls };
       const actor = typeof actorResolver === 'function' ? await actorResolver({ actorKind: state.actor.kind, actorId: state.actor.id,

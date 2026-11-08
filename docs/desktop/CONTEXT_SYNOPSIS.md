@@ -1,7 +1,7 @@
 # Retained history synopsis contract
 
 The history synopsis is a deterministic extractive projection of existing
-Chat or live Managed history. Chat, Task, Tool Evidence and Continuity retain
+Chat or retained Managed history. Chat, Task, Tool Evidence and Continuity retain
 their current ownership. It is not a second history database, a model-generated
 decision or evidence that an operation completed.
 
@@ -35,10 +35,9 @@ to an omitted source.
 
 Caller integration must separately recalculate the complete outgoing request,
 including actual tools, provider framing and output reserve. Persisted synopsis
-fields belong to existing atomic Chat/Task writers; they must not overwrite Owner
-checkpoint text or certify a completed Task. Raw Managed history unavailable after
-process loss remains unavailable; a synopsis cannot manufacture it or authorize
-replay of an uncertain effect.
+fields belong to the source owner's atomic writers; they must not overwrite Owner
+checkpoint text or certify a completed Task. A missing raw source remains
+unavailable; a synopsis cannot manufacture it or authorize replay of an uncertain effect.
 
 The coordinator accepts two trusted constructor callbacks. Neither callback nor
 any authorization flag comes from model JSON. `resolveHistoryContext` resolves
@@ -89,7 +88,42 @@ context permission. Its one-time source reader binding cannot be replaced. Norma
 parent Task grants include it; read-only child grants retain their original two
 file tools. Exact admitted Broker frames remain required even for the Owner.
 
-Managed retained raw-source persistence and other Task/Continuity synopsis
-consumers require their own existing owner integration before advertising this
-retrieval. Cold private sources remain unavailable; loading Chat history never
-replays a model request, tool operation or uncertain interrupted result.
+Managed owns optional version-1 protocol envelopes under its Agent state directory,
+using the existing atomic JSON primitive. Each envelope is bounded to 8 MiB and
+binds actor, Task, Workspace and Session, the current authorization/configuration
+revision, original message fingerprint, turn/run and checkpoint phase. Within a
+turn, checkpoints retain the exact append-only non-system transcript; current
+system headers may refresh on a new turn or approval continuation. Header changes
+invalidate prior synopsis projections. Completed final responses are also
+checkpointed. Optional synopsis references retain their exact prefix anchors.
+Raw protocol and private continuation never enter public Agent status or events.
+
+A fresh Managed session follows at most the current Task's 100 server-resolved
+`agentHistory` attachments backwards to the nearest retained Managed source.
+Missing replacement envelopes cannot hide a known earlier source. Current actor,
+grants, Workspace and attachment are rechecked. Existing Session stop inspection,
+Task recovery intent, Capability review/approval state and tool recovery journals
+must affirmatively permit recovery, including after asynchronous stop lookups and
+before the new turn's initial model dispatch. Unknown external Sessions and live
+effects/approvals still refuse; missing Core-owned Managed Sessions use the existing
+Core restart stop proof, without inventing external process termination.
+
+Only a completed adjacent source with settled public protocol restores messages.
+An incomplete or native-private source, skipped replacement, or absent legacy
+source instead permits Task-only continuation after those execution gates clear.
+The new request carries an explicit `retained-history-gap`: omitted originals
+remain separate from current Task facts, must not be called recovered, and cannot
+authorize replay. Its bounded original fingerprint/provenance and skipped Session
+IDs persist in the same optional Managed envelope and propagate to later turns.
+The original bytes are unchanged; reconciliation never marks an incomplete source
+completed. No private/native/tool execution stack is injected by this gap path.
+The existing context warning event reports the gap. Corrupt, oversized or
+future-version envelopes remain refusals, not gap fallbacks. Existing Chat/Task/
+settings schemas remain unchanged; prior readers ignore the optional Agent files.
+
+Approval continuation may use a trusted in-process `restoreMessages` callback
+from its exact still-live Managed waiting turn. The coordinator first fences the
+consumed approval, then requires the supplied raw messages to reproduce its exact
+saved sanitized projection before resuming any tool or model work. This callback
+has no RPC/tool schema and never loads a cold execution stack. Mismatch, lost live
+ownership and consumed cold continuations cannot replay the accepted effect.

@@ -19,6 +19,7 @@ import { createDesktopPlatformRuntime } from '../desktop/platform-runtime.js';
 import { createCapabilityService, registerChannelMeshCapabilities } from '../capability/index.js';
 import { createWorkshopService } from '../workshop/index.js';
 import { createManagedAgentProvider } from '../agent/managed-agent-provider.js';
+import { inspectTaskSession } from '../agent/session-recovery.js';
 import { createAutonomousHandoff } from '../continuity/autonomous-handoff.js';
 import { searchWeb } from '../mcp-web-search-safe.js';
 import { createProviderSecrets } from '../providers/secrets.js';
@@ -240,7 +241,27 @@ export function createCetaMeshServices(options = {}) {
     cancelSession: (sessionId, reason) => toolExecutionCoordinator?.cancelSession(sessionId, reason) ?? { cancelled: 0 }
   };
   managedAgent = createManagedAgentProvider({
-    modelRuntime,
+    modelRuntime, stateDir,
+    resolveHistoryTask: taskId => taskService.runtime.get({ id: taskId }).task,
+    authorizeHistoryRecovery: async ({ taskId, workspaceId, sessionId, assignments }) => {
+      const clear = () => {
+        const task = taskService.runtime.get({ id: taskId }).task;
+        if (task.workspaceId !== workspaceId || task.currentAgent?.provider !== 'cetamesh' || task.currentAgent.sessionId !== sessionId
+          || task.recoveryIntent || task.executionObservation?.state === 'unknown'
+          || toolExecutionCoordinator?.recoveryForTask(taskId) || capabilityService.recoveryForTask(taskId)) return null;
+        const review = capabilityService.taskReviewState({ taskId, workspaceId });
+        return review.active === false && ['dispatches', 'requests', 'workspaceFences', 'decisions', 'approvals']
+          .every(key => Array.isArray(review[key]) && review[key].length === 0) ? task : null;
+      };
+      const task = clear();
+      if (!task || !Array.isArray(assignments) || assignments.length > 100) return false;
+      for (const assignment of assignments) {
+        if (!task.agentHistory.some(row => row.provider === assignment.provider && row.sessionId === assignment.sessionId)
+          || (await inspectTaskSession(agentBroker, task, assignment)).stopped !== true) return false;
+      }
+      const current = clear();
+      return Boolean(current && current.rev === task.rev);
+    },
     evidenceStore,
     toolExecutionCoordinator: toolExecutionProxy,
     buildProductTurnContext: request => productContextService?.buildForAgentTurn({
@@ -400,9 +421,11 @@ export function createCetaMeshServices(options = {}) {
     modelRuntime,
     capabilityBroker: capabilityService.broker,
     resolveHistoryContext: request => request.targetKind === 'chat'
-      ? chatService.resolveModelHistoryContext(request) : { authorized: false },
+      ? chatService.resolveModelHistoryContext(request) : request.targetKind === 'agent'
+        ? managedAgent.resolveModelHistoryContext(request) : { authorized: false },
     onMessagesCheckpoint: payload => payload.targetKind === 'chat'
-      ? chatService.checkpointModelHistory(payload) : undefined,
+      ? chatService.checkpointModelHistory(payload) : payload.targetKind === 'agent'
+        ? managedAgent.checkpointModelHistory(payload) : undefined,
     resolvePostWriteVerification: ({ scope, signal }) => scope?.workspaceId
       ? workspaceService.resolvePostWriteVerification({ workspaceId: scope.workspaceId, signal }) : null,
     stateDir,

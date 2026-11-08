@@ -9,6 +9,7 @@ import { safeModelErrorDetails } from '../model/types.js';
 import { defineAgentProvider, agentProviderError, normalizePromptContent, AGENT_EVENT_PROTOCOL_DSH } from './agent-provider.js';
 import { PRODUCT_IDENTITY_PROMPT } from '../context/product-context.js';
 import { classifyAgentFailure } from './failure-recovery.js';
+import { createManagedHistorySource, MANAGED_HISTORY_MAX_BYTES, managedHistorySettled } from './managed-history-source.js';
 
 const MAX_TEXT = 128 * 1024;
 const MAX_HISTORY = 512 * 1024;
@@ -83,10 +84,11 @@ function commandFrom(text) {
   return value;
 }
 
-export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, toolExecutionCoordinator = null, taskPrincipalResolver, resolveTaskPrincipal, buildProductContext = null, buildProductTurnContext = null, requireProductContext = false, now = () => Date.now(), maxSteps = 12, onTurnEnd = null, onUsage = null, evidenceStore = null } = {}) {
+export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, toolExecutionCoordinator = null, taskPrincipalResolver, resolveTaskPrincipal, buildProductContext = null, buildProductTurnContext = null, requireProductContext = false, now = () => Date.now(), maxSteps = 12, onTurnEnd = null, onUsage = null, evidenceStore = null, stateDir = null, resolveHistoryTask = null, authorizeHistoryRecovery = null } = {}) {
   if (!modelRuntime?.chat || (!toolExecutionCoordinator && typeof capabilityExecutor !== 'function')) fail('INVALID_PARAMS', 'Managed Agent needs Model Runtime and Capability Broker execution');
   const resolvePrincipal = taskPrincipalResolver ?? resolveTaskPrincipal;
   const steps = Number.isInteger(maxSteps) ? Math.max(1, Math.min(maxSteps, 40)) : 12;
+  const historySource = createManagedHistorySource({ stateDir });
   const sessions = new Map();
   const waitingTurns = new Map();
   let closed = false;
@@ -139,6 +141,14 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
     // A refused append may contain the only native continuation for a completed
     // response. Never continue inference from the resulting incomplete transcript.
     if (s.contextLimitReached) fail('AGENT_CONTEXT_LIMIT', 'Managed Agent context limit reached; a fresh session is required');
+    if (historySource) {
+      if (Buffer.byteLength(JSON.stringify([...s.messages, value])) > MANAGED_HISTORY_MAX_BYTES - 65536) {
+        s.contextLimitReached = true;
+        fail('AGENT_CONTEXT_LIMIT', 'Managed raw source reached its bounded storage limit; existing originals are retained');
+      }
+      s.messages.push(value);
+      return;
+    }
     s.messages.push(value);
     if (s.messages.reduce((n, item) => n + messageSize(item), 0) > MAX_HISTORY) {
       try {
@@ -160,6 +170,111 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
     if (!source) return requirePrincipal(source);
     return requirePrincipal({ ...source, workspaceId: s.executionWorkspaceId ?? source.workspaceId,
       expectedWorkspaceId: source.expectedWorkspaceId ?? source.workspaceId });
+  }
+  const historyBinding = (s, principal) => evidenceBinding({ actor: principal.actor, sessionId: s.id, scope: principal });
+  const historyRevision = (s, principal) => crypto.createHash('sha256').update(JSON.stringify({ principal,
+    modelProvider: s.modelProvider, model: s.model, reasoningEffort: s.reasoningEffort })).digest('hex');
+  async function historyAuthority(s) {
+    const principal = await principalFor(s);
+    const task = typeof resolveHistoryTask === 'function' ? resolveHistoryTask(principal.taskId) : null;
+    if (!task || typeof task.then === 'function' || task.id !== principal.taskId || task.workspaceId !== principal.expectedWorkspaceId
+      || task.currentAgent?.provider !== 'cetamesh' || task.currentAgent.sessionId !== s.id
+      || !principal.actor.grants.capabilities.includes('context.history.read')) fail('CONTEXT_HISTORY_DENIED', 'Managed history needs the current Task attachment and history grant');
+    return { principal, task, binding: historyBinding(s, principal), revision: historyRevision(s, principal) };
+  }
+  async function hydrateHistory(s) {
+    if (!historySource || s.historyInitialized) return;
+    const authority = await historyAuthority(s);
+    const lineage = authority.task.agentHistory ?? [];
+    const index = lineage.findLastIndex(row => row.provider === 'cetamesh' && row.sessionId === s.id);
+    if (index < 0 || lineage.length > 100) fail('CONTEXT_HISTORY_DENIED', 'Managed source requires bounded current Task lineage');
+    const skipped = [], assignments = [];
+    let source = null;
+    for (let cursor = index - 1; cursor >= 0; cursor--) {
+      const prior = lineage[cursor];
+      if (prior.sessionId === s.id) continue;
+      assignments.push({ provider: prior.provider, sessionId: prior.sessionId });
+      if (prior.provider === 'cetamesh') source = historySource.read({ ...authority.binding, sessionId: prior.sessionId }, { missing: true });
+      if (source) break;
+      skipped.push(prior.sessionId);
+    }
+    if (assignments.length) {
+      s.historyRecoveryAssignments = assignments;
+      await admitHistoryRecovery(s, authority);
+      const current = await historyAuthority(s);
+      if (current.revision !== authority.revision || JSON.stringify(current.task.agentHistory) !== JSON.stringify(lineage)) fail('CONTEXT_SYNOPSIS_STALE', 'Managed Task lineage changed during cold source authorization');
+      const origin = source ? { sessionId: source.binding.sessionId, sourceFingerprint: source.sourceFingerprint, revision: source.revision } : null;
+      const complete = source?.phase === 'turn-complete' && !source.pendingCallIds.length && managedHistorySettled(source.messages);
+      if (complete && !skipped.length) s.messages = copy(source.messages.filter(row => row.role !== 'system'));
+      s.historyDerivedFrom = origin;
+      if (!complete || skipped.length || source?.historyGap) {
+        s.historyGap = { version: 1, representation: 'retained-history-gap', retainedOriginal: source?.historyGap?.retainedOriginal ?? Boolean(source), noReplay: true,
+          reason: !source ? 'missing-source' : !complete ? 'incomplete-source' : skipped.length ? 'missing-predecessor' : 'inherited-gap',
+          retainedOrigin: source?.historyGap ? source.historyGap.retainedOrigin : origin, sourcePhase: source?.phase ?? null,
+          omittedMessageCount: complete && !skipped.length ? source?.historyGap?.omittedMessageCount ?? 0 : source?.messages.length ?? 0,
+          skippedSessionIds: [...new Set([...skipped, ...(source?.historyGap?.skippedSessionIds ?? [])])].slice(0, 100),
+          instruction: 'Prior protocol is omitted or unavailable. Use current Task context and inspect current Workspace evidence. Do not replay prior tool calls, assume omitted effects did not run, or claim the missing source was recovered.' };
+        emit(s, 'context/warning', { code: 'CONTEXT_HISTORY_GAP', retainedOriginal: s.historyGap.retainedOriginal, omittedMessageCount: s.historyGap.omittedMessageCount });
+      }
+    }
+    s.historyInitialized = true;
+  }
+  async function admitHistoryRecovery(s, authority) {
+    if (typeof authorizeHistoryRecovery !== 'function' || await authorizeHistoryRecovery({ taskId: authority.task.id,
+      workspaceId: authority.task.workspaceId, sessionId: s.id, assignments: copy(s.historyRecoveryAssignments ?? []) }) !== true) {
+      fail('REQUEST_RECOVERY_REQUIRED', 'Current Task, effects, approvals and prior Session stop evidence must be clear before history recovery');
+    }
+  }
+  async function checkpointModelHistory(payload) {
+    if (!historySource) return;
+    const s = session(payload.binding?.sessionId);
+    const turn = s.currentTurn;
+    if (payload.targetKind !== 'agent' || !turn || payload.turnId !== turn.id || (payload.runId ?? null) !== (turn.runId ?? null)) fail('CONTEXT_HISTORY_DENIED', 'Managed checkpoint requires its active turn');
+    // History retrieval is optional. Read-only child Tasks keep their existing
+    // grants and complete short requests without acquiring this capability.
+    if (!(await principalFor(s)).actor.grants.capabilities.includes('context.history.read') && !s.historyRevision) return;
+    const authority = await historyAuthority(s);
+    if (s.historyGap && s.historyGapAdmissionTurn !== turn.id
+      && (s.historyTurnId !== turn.id || payload.phase === 'request-projection')) {
+      await admitHistoryRecovery(s, authority);
+      if ((await historyAuthority(s)).revision !== authority.revision) fail('CONTEXT_SYNOPSIS_STALE', 'Managed recovery authority changed before dispatch');
+      if (payload.phase === 'request-projection') s.historyGapAdmissionTurn = turn.id;
+    }
+    if (JSON.stringify(payload.binding) !== JSON.stringify(authority.binding)
+      || payload.revision !== null && payload.revision !== authority.revision) fail('CONTEXT_SYNOPSIS_STALE', 'Managed checkpoint authority changed');
+    if (!s.historyTurnHeaders || s.historyTurnId !== turn.id) {
+      const first = payload.messages.findIndex(row => row.role !== 'system');
+      const protocol = payload.messages.slice(first < 0 ? payload.messages.length : first);
+      if (JSON.stringify(protocol) !== JSON.stringify(s.messages)) fail('CONTEXT_SYNOPSIS_STALE', 'Managed checkpoint does not match original Owner history');
+      s.historyTurnHeaders = copy(payload.messages.slice(0, first < 0 ? payload.messages.length : first));
+      s.historyTurnId = turn.id;
+    }
+    const row = historySource.write({ ...payload, revision: authority.revision, derivedFrom: s.historyDerivedFrom, historyGap: s.historyGap });
+    s.historyTurnHeaders = copy(row.messages.filter(message => message.role === 'system'));
+    s.messages = copy(row.messages.filter(message => message.role !== 'system'));
+    s.historyRevision = row.revision;
+  }
+  async function resolveModelHistoryContext(request) {
+    if (!historySource) return { authorized: false };
+    const s = session(request.sessionId), turn = s.currentTurn;
+    if (request.targetKind !== 'agent' || !turn || turn.id !== request.turnId || (turn.runId ?? null) !== (request.runId ?? null)) fail('CONTEXT_HISTORY_DENIED', 'Managed source requires its active turn');
+    const authority = await historyAuthority(s);
+    if (request.actorKind !== authority.binding.actorKind || request.actorId !== authority.binding.actorId
+      || request.scope?.taskId !== authority.binding.taskId || request.scope?.workspaceId !== authority.binding.workspaceId) fail('CONTEXT_HISTORY_DENIED', 'Managed source belongs to another principal');
+    return { authorized: true, revision: authority.revision, task: authority.task,
+      resolveMessages: async () => {
+        const current = await historyAuthority(s);
+        if (current.revision !== authority.revision || s.currentTurn !== turn) fail('CONTEXT_SYNOPSIS_STALE', 'Managed source authorization changed');
+        const source = historySource.read(current.binding);
+        if (source.revision !== current.revision || source.turnId !== turn.id) fail('CONTEXT_SYNOPSIS_STALE', 'Managed source revision changed');
+        return copy(source.messages);
+      } };
+  }
+  async function checkpointCompletedTurn(s, turn) {
+    if (!historySource || !s.historyTurnHeaders || s.historyTurnId !== turn.id) return;
+    await checkpointModelHistory({ targetKind: 'agent', binding: historyBinding(s, await principalFor(s)),
+      turnId: turn.id, runId: turn.runId, revision: s.historyRevision, phase: 'turn-complete',
+      messages: [...s.historyTurnHeaders, ...s.messages], pendingCallIds: [], synopsis: null });
   }
   async function recordUsage(s, turn, usage, required = false) {
     if (typeof onUsage !== 'function') return;
@@ -183,6 +298,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       turn.accounting.taskId = principal.taskId;
       s.contextPrincipal = principal;
       assertNotAborted(controller.signal);
+      if (historySource && principal.actor.grants.capabilities.includes('context.history.read')) await hydrateHistory(s);
       append(s, { role: 'user', content: turn.content });
       if (toolExecutionCoordinator?.run) {
         const stepPrincipal = await principalFor(s);
@@ -208,6 +324,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
           { role: 'system', content: system + delegationGuidance },
           { role: 'system', content: PRODUCT_IDENTITY_PROMPT },
           ...(contextText ? [{ role: 'system', content: 'CetaMesh dynamic context (JSON reference data):\n' + contextText }] : []),
+          ...(s.historyGap ? [{ role: 'system', content: JSON.stringify(s.historyGap) }] : []),
           ...copy(s.messages)
         ];
         let streamedText = '';
@@ -301,6 +418,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         }
         const finalText = typeof result.text === 'string' ? result.text : '';
         if (finalText || result.modelContinuation) append(s, { role: 'assistant', content: finalText, ...(result.modelContinuation ? { modelContinuation: copy(result.modelContinuation) } : {}) });
+        if (result.status === 'completed') await checkpointCompletedTurn(s, turn);
         outputChars += finalText.length;
         if (finalText && finalText !== streamedText) emit(s, 'assistant/chunk', { requestId: turn.id, chunk: { type: 'text-delta', text: finalText } });
         emit(s, 'assistant/message', { requestId: turn.id, message: { content: [{ type: 'text', text: finalText }] }, usage,
@@ -521,7 +639,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       }
     }
   });
-  return { provider,
+  return { provider, resolveModelHistoryContext, checkpointModelHistory,
     executionWorkspaceId(sessionId) { return session(sessionId).executionWorkspaceId ?? null; },
     resumeLegacyApproval({ sessionId, approvalId, decisionResult } = {}) {
       const s = session(sessionId);
@@ -553,6 +671,13 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       emit(s, 'turn/start', { requestId: turn.id, resumed: true });
       try {
         const result = await toolExecutionCoordinator.resumeApproval({
+          ...(historySource && s.historyTurnId === turn.id ? { restoreMessages: async () => {
+            if (s.currentTurn !== turn || s.waitingTurn !== turn || s.historyTurnId !== turn.id || !s.historyTurnHeaders
+              || !s.running || s.archived || closed) fail('CONTEXT_HISTORY_DENIED', 'Original live Managed approval turn is unavailable');
+            const authority = await historyAuthority(s);
+            if (authority.revision !== s.historyRevision) fail('CONTEXT_SYNOPSIS_STALE', 'Managed approval source authority changed');
+            return copy([...s.historyTurnHeaders, ...s.messages]);
+          } } : {}),
           ...configurationObservationOptions(s, turn),
           onContext:context=>emit(s,'model/context',{requestId:turn.id,context}), approvalId, requestFingerprint, decisionResult,
           signal: controller.signal,
@@ -597,6 +722,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         }
         const text = typeof result.text === 'string' ? result.text : '';
         if (text || result.modelContinuation) append(s, { role: 'assistant', content: text, ...(result.modelContinuation ? { modelContinuation: copy(result.modelContinuation) } : {}) });
+        if (result.status === 'completed') await checkpointCompletedTurn(s, turn);
         s.waitingForApproval = null;
         s.waitingTurn = null;
         s.lastUsage = result.usage ?? s.lastUsage;
