@@ -45,6 +45,10 @@ Plugin Center 是展示、安装和审批界面；唯一执行引擎是现有 Ex
 
 Process Host 使用当前 `v:1` JSON 行帧：`invoke/result/error/cancel/ping/pong/shutdown`；线上限制与超时来自 `src/extension/process-transport.js`、`process-host.js`。这是**已有数据帧协议**，不能因为 CP-001 引入新的领域信封就改变 `v:1`。
 
+Desktop 对声明设置的可执行扩展另有可选公开设置握手，见
+[兼容 ADR](ADR-EXTENSION-PUBLIC-SETTINGS.md)。它保留 v1 framing，准确匹配配置与宿主代次；
+不声明设置的旧扩展继续使用上列帧。旧 Worker 的 ping 不能替代配置回执，秘密字段不交付给插件。
+
 进程隔离可缓解故障，但**不是 Windows Sandbox/AppContainer 等完整 OS 安全边界**；不允许运行未经验证的任意原生代码。任何宿主特权仍须走 Core 授权接口。
 
 ## 5. MCP 插件桥接

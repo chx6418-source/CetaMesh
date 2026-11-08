@@ -15,6 +15,7 @@
 import vm from 'node:vm';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { EXTENSION_LIMITS, extensionError, hostAllowed } from './types.js';
+import { validateSettingsConfiguration } from './settings-protocol.js';
 
 const MAX_LOG_ENTRIES = 200;
 
@@ -25,6 +26,7 @@ export function createVmExtensionHost({
   logger = () => {},
   fetchImpl = null,
   capabilityExecutor = null,
+  packageFingerprint = null,
   timeoutMs = EXTENSION_LIMITS.invokeTimeoutMs
 } = {}) {
   if (!manifest || typeof manifest !== 'object') throw new Error('createExtensionHost 需要 manifest');
@@ -33,6 +35,7 @@ export function createVmExtensionHost({
   const invocationContext = new AsyncLocalStorage();
   const activeInvocations = new Set();
   let closed = false;
+  let configuredSettings = null;
 
   const record = (level, args) => {
     const line = { at: Date.now(), level, message: args.map((a) => (typeof a === 'string' ? a : safeStringify(a))).join(' ') };
@@ -142,6 +145,12 @@ export function createVmExtensionHost({
   }
 
   return {
+    configure(configuration) {
+      if (closed || configuredSettings || activeInvocations.size) throw extensionError('EXTENSION_SETTINGS_RESTART_REQUIRED', 'Configuration requires a new idle host');
+      const checked = validateSettingsConfiguration(configuration, manifest, packageFingerprint);
+      configuredSettings = checked.values;
+      return checked.receipt;
+    },
     manifest,
     logs,
     /** 扩展声明的能力清单（用于 UI 与调用前校验）。 */
@@ -157,6 +166,7 @@ export function createVmExtensionHost({
     },
     async invoke(capabilityId, input, { signal: outerSignal } = {}) {
       if (closed) throw extensionError('PROVIDER_UNAVAILABLE', 'Extension host is closed');
+      if (manifest.settingsSchema?.length && !configuredSettings) throw extensionError('EXTENSION_SETTINGS_PENDING', 'Worker settings have not been acknowledged');
       capabilityOrThrow(capabilityId);
       if (loadError.code) {
         throw extensionError(loadError.code, '扩展加载失败：' + loadError.message);
@@ -170,6 +180,7 @@ export function createVmExtensionHost({
         throw extensionError('CAPABILITY_NOT_IMPLEMENTED', '扩展没有实现能力：' + capabilityId);
       }
       const context = {
+        settings: configuredSettings ?? Object.freeze({}),
         extensionId: manifest.id,
         capability: capabilityId,
         log: (...args) => record('info', args),

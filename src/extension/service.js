@@ -16,11 +16,10 @@ export function createExtensionService({
 } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createExtensionService 需要 stateDir');
   const store = createExtensionStore({ stateDir, now });
-  const runtime = createExtensionRuntime({ store, fetchImpl, capabilityBroker, hostFactory,
+  const settings = createExtensionSettingsService({ stateDir, getExtension: id => store.get(id) });
+  const runtime = createExtensionRuntime({ store, settingsService: settings, fetchImpl, capabilityBroker, hostFactory,
     processHostFactory, vmHostFactory, memoryPackHostFactory, isTrustedVmExtension, now,
     monitorIntervalMs, heartbeatTimeoutMs, maxHeartbeatMisses, maxAutomaticRestarts, restartWindowMs, stableWindowMs });
-
-  const settings = createExtensionSettingsService({ stateDir, getExtension: id => runtime.get({ id }) });
 
   const handlers = {
     'ext.overview': () => runtime.overview(),
@@ -32,15 +31,19 @@ export function createExtensionService({
     'ext.update': (p) => runtime.update({ sourceDir: p.sourceDir, approval: p.approval }),
     'ext.rollback': (p) => runtime.rollback({ id: p.id, approval: p.approval }),
     'ext.uninstall': (p) => runtime.uninstall({ id: p.id, keepFiles: p.keepFiles === true }),
-    'ext.enable': (p) => runtime.enable({ id: p.id }),
+    'ext.enable': async p => { const result = runtime.enable({ id: p.id }); await runtime.awaitSettings({ id: p.id }); return result; },
     'ext.disable': (p) => runtime.disable({ id: p.id }),
     'ext.restart': (p) => runtime.restart({ id: p.id }),
     'ext.invoke': (p) => runtime.invoke({ id: p.id, capability: p.capability, input: p.input }),
     'ext.logs': (p) => runtime.logs({ id: p.id }),
     'ext.memory-pack.overlay': (p) => runtime.updateMemoryPackOverlay({ id: p.id, patch: p.patch }),
     'ext.settings.describe': p => settings.describe({ id: p.id }),
-    'ext.settings.get': p => settings.get({ id: p.id }),
-    'ext.settings.update': p => settings.update({ id: p.id, values: p.values })
+    'ext.settings.get': p => ({ ...settings.get({ id: p.id }), application: runtime.settingsState({ id: p.id }) }),
+    'ext.settings.update': async p => {
+      settings.update({ id: p.id, values: p.values, expectedRevision: p.expectedRevision });
+      await runtime.reconcileSettings({ id: p.id });
+      return { ...settings.get({ id: p.id }), application: runtime.settingsState({ id: p.id }) };
+    }
   };
 
   return {

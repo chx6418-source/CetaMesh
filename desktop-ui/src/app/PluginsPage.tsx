@@ -51,8 +51,35 @@ type PluginReview = { id: string; stageId: string; action: 'install' | 'update' 
 type ExtensionSettingsFormState = {
   description: ExtensionSettingsDescription;
   values: ExtensionSettingsSnapshot['values'];
+  revision?: string | null;
+  application?: ExtensionSettingsSnapshot['application'];
   draft: Record<string, string | number | boolean | null>;
 };
+export function ExtensionSettingsFacts({ application, enabled, runtimeGeneration }: {
+  application?: ExtensionSettingsSnapshot['application']; enabled?: boolean; runtimeGeneration?: number | null;
+}) {
+  const labels: Record<string, string> = { applied: '公开设置已由当前宿主确认', applying: '正在等待宿主确认',
+    pending: '已保存，等待启用或重新应用', 'needs-review': '包或设置已变化，请重新核对并保存',
+    'needs-reconciliation': '已保存，应用失败；请核对后重新保存以重试', unsupported: '此宿主不支持设置应用',
+    'not-applicable': '此类型无需设置应用', unknown: '尚无设置生效证据' };
+  const validReceipt = application?.support === 'restart-and-ack'
+    && typeof application.desiredRevision === 'string' && /^[a-f0-9]{64}$/.test(application.desiredRevision)
+    && application.desiredRevision === application.effectiveRevision
+    && typeof application.generation === 'number' && Number.isSafeInteger(application.generation) && application.generation > 0
+    && application.generation === application.effectiveGeneration;
+  const validCatalogGeneration = typeof runtimeGeneration === 'number' && Number.isSafeInteger(runtimeGeneration) && runtimeGeneration > 0;
+  const currentCatalog = (enabled === undefined || enabled === true)
+    && (runtimeGeneration === undefined || validCatalogGeneration && runtimeGeneration === application?.generation);
+  const stale = enabled === false || validCatalogGeneration && runtimeGeneration !== application?.generation;
+  const status = application?.status === 'applied' && !(validReceipt && currentCatalog)
+    ? validReceipt && stale ? 'pending' : 'unknown' : application?.status ?? 'unknown';
+  return <div role="status"><p>{labels[status]}</p>
+    {application?.support === 'restart-and-ack' && <p className="muted">公开设置改变时仅重启此扩展；内容相同则保留当前宿主。配置代次：{application.effectiveGeneration ?? '未确认'} / 当前代次：{runtimeGeneration ?? application.generation ?? '未知'}。</p>}
+    {application?.desiredRevision && <p className="muted">期望配置：{application.desiredRevision.slice(0, 12)} · 已确认配置：{application.effectiveRevision?.slice(0, 12) ?? '无'}</p>}
+    {application?.secretConsumption === 'unsupported' && <p className="muted">秘密字段仅保存在 Core；当前不支持插件消费秘密字段，公开设置确认不代表凭据可用。</p>}
+    {application?.errorCode && <p>{application.errorCode}</p>}
+  </div>;
+}
 function extensionSettingsDraft(description: ExtensionSettingsDescription, values: ExtensionSettingsSnapshot['values']): Record<string, string | number | boolean | null> {
   return Object.fromEntries(description.fields.map(field => {
     const value = values[field.key];
@@ -141,7 +168,10 @@ export function PluginsPage() {
       setDeveloperMode(statusResult.developerMode);
       if (connection === connectionsRequest.current) { setIntegrations(statusResult.integrations); applyMcpServers(statusResult.mcp, connection); }
       setError('');
-    } catch (cause) { if (epoch === lifetime.current && request === catalogRequest.current && activeTab.current === 'catalog') setError(messageOf(cause)); }
+    } catch (cause) { if (epoch === lifetime.current && request === catalogRequest.current && activeTab.current === 'catalog') {
+      setError(messageOf(cause));
+      setExtensionSettings(current => current?.application ? { ...current, application: { ...current.application, status: 'unknown' } } : current);
+    } }
     finally { if (epoch === lifetime.current && request === catalogRequest.current) setLoading(false); }
   }, [applyMcpServers, category, query, view]);
   const refreshConnections = useCallback(async () => {
@@ -180,7 +210,10 @@ export function PluginsPage() {
     const timer = window.setInterval(() => { void refreshApprovals(); }, 4000);
     return () => { window.clearInterval(timer); offPending(); offResolved(); offOperation(); };
   }, [refreshApprovals]);
-  useEffect(() => bridge.subscribe('plugin.updated', () => { if (tab === 'catalog') void refreshCatalog(); else void refreshConnections(); }), [refreshCatalog, refreshConnections, tab]);
+  useEffect(() => bridge.subscribe('plugin.updated', () => {
+    setExtensionSettings(current => current?.application ? { ...current, application: { ...current.application, status: 'unknown' } } : current);
+    if (tab === 'catalog') void refreshCatalog(); else void refreshConnections();
+  }), [refreshCatalog, refreshConnections, tab]);
 
   async function stage(plugin: Plugin) {
     setBusy(plugin.id); setError(''); setNotice('');
@@ -375,7 +408,7 @@ export function PluginsPage() {
       if (request !== extensionSettingsRequest.current || !description.available || !description.fields.length) return;
       const snapshot = await extensionSettingsClient.get(selected.id);
       if (request !== extensionSettingsRequest.current) return;
-      setExtensionSettings({ description, values: snapshot.values, draft: extensionSettingsDraft(description, snapshot.values) });
+      setExtensionSettings({ description, values: snapshot.values, revision: snapshot.revision, application: snapshot.application, draft: extensionSettingsDraft(description, snapshot.values) });
     } catch (cause) { if (request === extensionSettingsRequest.current) setError(messageOf(cause)); }
     finally { if (request === extensionSettingsRequest.current) setExtensionSettingsLoading(false); }
   }
@@ -393,15 +426,15 @@ export function PluginsPage() {
     }
     setBusy('extension-settings'); setError(''); setNotice('');
     try {
-      const snapshot = await extensionSettingsClient.update(selectedPlugin.id, values);
+      const snapshot = await extensionSettingsClient.update(selectedPlugin.id, values, extensionSettings.revision ?? undefined);
       if (request !== extensionSettingsRequest.current) return;
       setExtensionSettings(current => {
         if (!current || current.description.id !== snapshot.id) return current;
         const draft = extensionSettingsDraft(current.description, snapshot.values);
         for (const field of current.description.fields) if (!Object.is(current.draft[field.key], submittedDraft[field.key])) draft[field.key] = current.draft[field.key];
-        return { ...current, values: snapshot.values, draft };
+        return { ...current, values: snapshot.values, revision: snapshot.revision, application: snapshot.application, draft };
       });
-      setNotice('扩展设置已保存。');
+      setNotice(snapshot.application?.status === 'applied' ? '扩展公开设置已保存，并由当前宿主确认。' : '扩展设置已保存；生效状态请查看设置说明。');
     } catch (cause) { if (request === extensionSettingsRequest.current) setError(messageOf(cause)); }
     finally { if (save === extensionSaveRequest.current) setBusy(''); }
   }
@@ -490,6 +523,7 @@ export function PluginsPage() {
       {selectedPlugin.installed && extensionSettingsLoading && <p className="muted">正在读取扩展设置…</p>}
       {selectedPlugin.installed && extensionSettings && extensionSettings.description.fields.length > 0 && <section className="extension-settings">
         <div><h3>扩展设置</h3><p className="muted">设置由本机 Core 保存；敏感值只显示是否已配置。</p></div>
+        <ExtensionSettingsFacts application={extensionSettings.application} enabled={selectedPlugin.enabled} runtimeGeneration={selectedPlugin.availability?.runtime.generation} />
         {extensionSettings.description.fields.map(field => {
           const draft = extensionSettings.draft[field.key];
           const stored = extensionSettings.values[field.key];
@@ -509,7 +543,7 @@ export function PluginsPage() {
                     : <Input aria-label={field.label} maxLength={field.maxLength ?? undefined} value={typeof draft === 'string' ? draft : ''} onChange={event => updateDraft(event.target.value)} />}
           </div>;
         })}
-        <div className="row detail-actions"><Button compact variant="primary" disabled={busy === 'extension-settings'} onClick={() => void saveExtensionSettings()}>{busy === 'extension-settings' ? '正在保存…' : '保存扩展设置'}</Button></div>
+        <div className="row detail-actions"><Button compact variant="primary" disabled={busy === 'extension-settings'} onClick={() => void saveExtensionSettings()}>{busy === 'extension-settings' ? '正在保存…' : '保存扩展设置'}</Button><Button compact disabled={busy === 'extension-settings'} onClick={() => void openPlugin(selectedPlugin)}>重新读取设置</Button></div>
       </section>}
       <section><h3>更新说明</h3>{selectedPlugin.changelog.length ? <ul>{selectedPlugin.changelog.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul> : <p className="muted">没有更新说明。</p>}</section><div className="row detail-actions">{selectedPlugin.installed && selectedPlugin.status === 'update' ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看更新并安装</Button> : !selectedPlugin.installed ? <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void stage(selectedPlugin)}>查看权限并安装</Button> : selectedPlugin.enabled ? <Button disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'disable')}>停用</Button> : <Button variant="primary" disabled={busy === selectedPlugin.id} onClick={() => void reviewEnable(selectedPlugin)}>查看权限并启用</Button>}{selectedPlugin.installed && <Button variant="danger" disabled={busy === selectedPlugin.id} onClick={() => void pluginAction(selectedPlugin, 'uninstall')}>卸载</Button>}</div></div>}</Sheet>
     <Sheet open={Boolean(review)} title="安装与权限审查" onClose={() => setReview(null)}>{review && <div className="review-detail"><Badge tone={review.trust === 'publisher-signature-verified' ? 'success' : 'warning'}>{review.trust || '来源待核验'}</Badge><h3>{review.action === 'update' ? '更新前查看权限' : review.action === 'install' ? '安装前查看权限' : '启用前查看权限'}</h3><p>仅继续本次明确选择的操作。运行时能力仍需 Core 按策略审批。</p>{review.summary.length ? <section><h4>操作说明</h4><ul>{review.summary.map((line, index) => <li key={`${index}-${line}`}>{line}</li>)}</ul></section> : null}<section><h4>请求的权限</h4>{review.permissions.length ? <ul>{review.permissions.map(permission => <li key={permission}>{permission}</li>)}</ul> : <p>没有声明额外权限。</p>}</section>{!review.installable && <ErrorNotice error="Core 尚未允许该插件安装或启用。请先处理完整性或兼容性问题。" />}<div className="row detail-actions"><Button onClick={() => setReview(null)}>取消</Button><Button variant="primary" disabled={!review.installable || busy === review.id} onClick={() => void confirmReview()}>{busy === review.id ? '正在处理…' : review.action === 'update' ? '确认更新' : review.action === 'install' ? '确认安装' : '确认启用'}</Button></div></div>}</Sheet>

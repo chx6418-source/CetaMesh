@@ -22,10 +22,13 @@ import {isHttpDataManifest,createHttpExtensionHost,httpRequestFor,projectHttpRes
 import {validateSchema} from '../model/input-schema.js';
 import {isEventDataManifest,createEventExtensionHost,eventRequestFor,projectEventResult} from './event-host.js';
 import { isSkillDataManifest, createSkillDataHost, skillHash } from './skill-data.js';
+import { createExtensionSettingsService } from './settings.js';
+import { settingsReceiptMatches } from './settings-protocol.js';
 const isDataManifest=manifest=>isHttpDataManifest(manifest)||isEventDataManifest(manifest);
 
 export function createExtensionRuntime({
   store,
+  settingsService = null,
   fetchImpl = null,
   capabilityBroker = null,
   hostFactory = null,
@@ -44,6 +47,7 @@ export function createExtensionRuntime({
   stopTimeoutMs = 4500
 } = {}) {
   if (!store) throw new Error('createExtensionRuntime 需要 store');
+  const settings = settingsService || createExtensionSettingsService({ stateDir: path.dirname(store.root), getExtension: id => store.get(id) });
   const installer = createExtensionInstaller({ store, now, supportedSkillContent });
   const hosts = new Map(); // id -> host
   const runtimeRecords = new Map();
@@ -108,6 +112,10 @@ export function createExtensionRuntime({
   async function invokeOnHost(id, capability, input, { signal, authority } = {}) {
     const { host } = hostOrThrow(id);
     const record = runtimeRecord(id);
+    await record.settingsPromise;
+    if (hosts.get(String(id)) !== host || record.stopping) throw extensionError('EXTENSION_SETTINGS_SUPERSEDED', 'Extension host changed before invocation');
+    const current = entryOrThrow(id);
+    if (supportsSettings(current) && !settingsApplied(current)) throw extensionError('EXTENSION_SETTINGS_SUPERSEDED', 'Current desired settings do not match this host');
     record.state = 'running';
     const context = { request: authority, next: 0 };
     const generation = record.generation;
@@ -164,6 +172,7 @@ export function createExtensionRuntime({
 
   function registerEntry(entry) {
     if (entry.status !== 'enabled') { hideEntry(entry.id); return; }
+    if (supportsSettings(entry) && !settingsApplied(entry)) { hideEntry(entry.id); return; }
     const descriptorVersion = validateInstalledEntry(entry);
     const catalogOwner = 'extension:' + entry.id;
     const definitions = (entry.manifest.capabilities || []).map(cap => {
@@ -299,6 +308,7 @@ export function createExtensionRuntime({
     return factory({
       manifest: entry.manifest,
       source,
+      packageFingerprint: bound.packageFingerprint,
       storage: store.storage(entry.id),
       fetchImpl,
       capabilityExecutor: capabilityExecutorFor(bound),
@@ -325,6 +335,7 @@ export function createExtensionRuntime({
     const key = String(id);
     const record = runtimeRecord(key);
     record.stopping = true;
+    record.settingsStatus = 'pending';
     record.generation += 1;
     record.lifecycle.abort(Object.assign(extensionError('INVOKE_CANCEL_UNCONFIRMED','Plugin stopped; verify prior effects'),{effectStatus:'unknown'}));
     hideEntry(key);
@@ -408,12 +419,23 @@ export function createExtensionRuntime({
     try {
       const result = await switchVersion(async () => {
         if (previous.status === 'enabled' || hosts.has(id)) {
-          await stopHost(id);
+          const stopping = stopHost(id), generation = record.generation;
+          await stopping;
           stopped = true;
+          const current = store.get(id);
+          if (closed || generation !== record.generation || !current || current.status !== previous.status
+            || current.version !== previous.version || current.packageFingerprint !== previous.packageFingerprint) {
+            throw extensionError('EXTENSION_UPDATE_SUPERSEDED', 'A newer lifecycle operation replaced the version switch');
+          }
         }
       });
       if (previous.status === 'enabled') {
-        const host = startHost(result.entry);
+        const current = store.get(id);
+        if (!current || current.status !== 'enabled' || current.version !== result.entry.version) {
+          throw extensionError('EXTENSION_UPDATE_SUPERSEDED', 'Extension state changed before version startup');
+        }
+        const host = startHost(current);
+        await record.settingsPromise;
         const responsive = typeof host.ping !== 'function'
           || await host.ping({ timeoutMs: heartbeatTimeoutMs });
         if (!responsive) throw extensionError('WORKER_START_FAILED', 'Updated Extension Worker did not answer its startup ping');
@@ -423,13 +445,17 @@ export function createExtensionRuntime({
       const active = store.get(id);
       if (active && active.version !== previous.version) {
         await stopHost(id);
-        store.put(previous);
+        const latest = store.get(id);
+        if (latest) store.put({ ...previous, status: latest.status, disabledAt: latest.disabledAt });
       }
       const currentHost = hosts.get(id);
-      if (previous.status === 'enabled' && (!currentHost || !currentHost.available())) {
+      if (previous.status === 'enabled' && store.get(id)?.status === 'enabled' && (!currentHost || !currentHost.available())) {
         if (currentHost) await stopHost(id);
         try {
-          const restoredHost = startHost(previous);
+          const current = store.get(id);
+          if (!current || current.status !== 'enabled' || current.version !== previous.version) throw extensionError('EXTENSION_UPDATE_SUPERSEDED', 'Previous version startup was superseded');
+          const restoredHost = startHost(current);
+          await record.settingsPromise;
           if (typeof restoredHost.ping === 'function'
             && !(await restoredHost.ping({ timeoutMs: heartbeatTimeoutMs }))) {
             await stopHost(id);
@@ -455,13 +481,13 @@ export function createExtensionRuntime({
       throw extensionError('EXTENSION_STOP_UNCONFIRMED', 'Confirm the previous Extension host has stopped before replacement');
     }
     if(runtimeRecord(entry.id).lifecycle.signal.aborted)runtimeRecord(entry.id).lifecycle=new AbortController();
+    const configuration = supportsSettings(entry) ? settings.runtimeSnapshot({ id: entry.id }) : null;
     const host = buildHost(entry);
     if (!host.available()) {
       const failure = host.loadError?.() || { code: 'EXTENSION_LOAD_FAILED', message: 'Extension host is unavailable' };
       throw extensionError(failure.code || 'EXTENSION_LOAD_FAILED', 'Extension failed to load: ' + failure.message);
     }
     hosts.set(entry.id, host);
-    registerEntry(entry);
     const record = runtimeRecord(entry.id);
     record.generation += 1;
     record.lastCall = null;
@@ -471,13 +497,114 @@ export function createExtensionRuntime({
     record.state = typeof host.ping === 'function' ? 'starting' : 'healthy';
     record.lastError = null;
     record.errorCode = null; record.errorStage = null;
-    scheduleMonitor(entry.id);
+    if (configuration) {
+      const bound = { ...configuration, generation: record.generation };
+      record.settingsStatus = 'applying';
+      record.settingsPromise = Promise.resolve().then(async () => {
+        if (typeof host.configure !== 'function') throw extensionError('EXTENSION_SETTINGS_UNSUPPORTED', 'Host does not support public configuration acknowledgement');
+        const receipt = await host.configure(bound, { timeoutMs: heartbeatTimeoutMs });
+        const current = store.get(entry.id);
+        if (closed || hosts.get(entry.id) !== host || record.generation !== bound.generation || record.stopping
+          || !current || current.status !== 'enabled' || current.packageFingerprint !== bound.packageFingerprint
+          || current.version !== bound.version || settings.runtimeSnapshot({ id: entry.id })?.revision !== bound.revision) {
+          throw extensionError('EXTENSION_SETTINGS_SUPERSEDED', 'Configuration was replaced before acknowledgement');
+        }
+        validateInstalledEntry(current);
+        if (!settingsReceiptMatches(receipt, bound)) throw extensionError('EXTENSION_SETTINGS_ACK_MISMATCH', 'Host configuration receipt does not match');
+        const { values: _publicValues, ...identity } = bound;
+        record.effectiveSettings = Object.freeze(identity);
+        record.settingsStatus = 'applied';
+        record.state = 'healthy'; record.healthySince = now();
+        registerEntry(current); scheduleMonitor(entry.id);
+      }).catch(async error => {
+        if (hosts.get(entry.id) === host && record.generation === bound.generation) {
+          hideEntry(entry.id);
+          try { await stopHost(entry.id); } catch { /* Retain the existing stop fence and host. */ }
+          record.settingsStatus = 'needs-reconciliation';
+          record.errorCode = /^[A-Z0-9_]{1,80}$/.test(error?.code ?? '') ? error.code : 'EXTENSION_SETTINGS_FAILED';
+          record.errorStage = 'settings'; record.lastError = 'Extension configuration was not acknowledged';
+        }
+        throw error;
+      });
+      // Startup is also used synchronously by legacy callers. Retain rejection
+      // for awaitSettings/invoke while observing it to avoid an unhandled promise.
+      record.settingsPromise.catch(() => {});
+    } else { record.settingsPromise = null; scheduleMonitor(entry.id); }
+    registerEntry(entry);
     return host;
+  }
+
+  function supportsSettings(entry) {
+    return Boolean(entry.manifest.settingsSchema?.length) && entry.type !== 'memory-pack'
+      && !isSkillDataManifest(entry.manifest) && !isDataManifest(entry.manifest);
+  }
+
+  function settingsApplied(entry) {
+    const record = runtimeRecord(entry.id), receipt = record.effectiveSettings;
+    try {
+      return Boolean(receipt && record.settingsStatus === 'applied' && hosts.get(entry.id)?.available()
+        && !record.stopping && receipt.generation === record.generation
+        && receipt.revision === settings.runtimeSnapshot({ id: entry.id })?.revision);
+    } catch { return false; }
+  }
+
+  function settingsState({ id } = {}) {
+    const entry = entryOrThrow(id), record = runtimeRecord(entry.id);
+    let desired = null, errorCode = null;
+    try { desired = supportsSettings(entry) ? settings.runtimeSnapshot({ id: entry.id }) : null; }
+    catch (error) { errorCode = error?.code || 'EXTENSION_SETTINGS_CORRUPT'; }
+    const support = !entry.manifest.settingsSchema?.length || entry.type === 'memory-pack' || isSkillDataManifest(entry.manifest)
+      ? 'not-applicable' : supportsSettings(entry) ? 'restart-and-ack' : 'unsupported';
+    const effective = record.effectiveSettings;
+    const current = !errorCode && desired && effective?.revision === desired.revision
+      && effective.generation === record.generation && entry.status === 'enabled'
+      && !record.stopping && hosts.get(entry.id)?.available() && record.settingsStatus === 'applied';
+    return { support, status: support !== 'restart-and-ack' ? support : errorCode ? 'needs-review'
+      : current ? 'applied' : record.settingsStatus === 'needs-reconciliation' ? 'needs-reconciliation'
+        : record.settingsStatus === 'applying' ? 'applying' : 'pending',
+      desiredRevision: desired?.revision ?? null, effectiveRevision: effective?.revision ?? null,
+      generation: record.generation, effectiveGeneration: effective?.generation ?? null,
+      secretConsumption: entry.manifest.settingsSchema?.some(field => field.type === 'secretRef') ? 'unsupported' : 'not-applicable',
+      errorCode: errorCode || (record.errorStage === 'settings' ? record.errorCode : null) };
+  }
+
+  async function reconcileSettings({ id } = {}) {
+    const entry = entryOrThrow(id), record = runtimeRecord(entry.id);
+    if (!supportsSettings(entry) || entry.status !== 'enabled') return settingsState({ id });
+    // Desired saves are synchronous. Joining the previous application cannot
+    // overwrite a newer save; every new host reads the current Settings owner.
+    if (record.settingsOperation) { try { await record.settingsOperation; } catch {} return reconcileSettings({ id }); }
+    let ownedGeneration = null;
+    const operation = (async () => {
+      if (record.settingsPromise && record.settingsStatus === 'applying') { try { await record.settingsPromise; } catch {} }
+      const current = entryOrThrow(id);
+      if (current.status !== 'enabled' || settingsApplied(current)) return;
+      const stopping = stopHost(id), generation = record.generation;
+      ownedGeneration = generation;
+      await stopping;
+      const active = store.get(id);
+      if (closed || generation !== record.generation || !active || active.status !== 'enabled'
+        || active.packageFingerprint !== current.packageFingerprint || active.version !== current.version || record.switching) {
+        throw extensionError('EXTENSION_SETTINGS_SUPERSEDED', 'A newer lifecycle operation replaced configuration application');
+      }
+      startHost(active);
+      ownedGeneration = record.generation;
+      await record.settingsPromise;
+    })();
+    record.settingsOperation = operation;
+    try { await operation; }
+    catch (error) {
+      if (store.get(id)?.status === 'enabled' && record.generation === ownedGeneration) {
+        record.settingsStatus = 'needs-reconciliation'; record.errorStage = 'settings';
+        record.errorCode = error?.code || 'EXTENSION_SETTINGS_FAILED'; record.lastError = 'Extension configuration needs reconciliation';
+      }
+    } finally { if (record.settingsOperation === operation) record.settingsOperation = null; }
+    return settingsState({ id });
   }
 
   async function recoverAfterFailure(id) {
     const record = runtimeRecord(id);
-    if (closed || record.stopping) return { id, state: record.state };
+    if (closed || record.stopping || record.settingsStatus === 'applying' || record.settingsStatus === 'needs-reconciliation') return { id, state: record.state };
     if (record.recovering) return { id, state: record.state };
     const previous = store.get(id);
     if (!previous || previous.status !== 'enabled') {
@@ -486,8 +613,13 @@ export function createExtensionRuntime({
     }
     record.recovering = true;
     try {
-      await stopHost(id);
-      const current = entryOrThrow(id);
+      const stopping = stopHost(id), generation = record.generation;
+      await stopping;
+      const current = store.get(id);
+      if (closed || generation !== record.generation || !current || current.status !== 'enabled'
+        || current.version !== previous.version || current.packageFingerprint !== previous.packageFingerprint || record.switching) {
+        return { id, state: record.state };
+      }
       const cutoff = now() - Math.max(1, restartWindowMs);
       record.restartTimes = record.restartTimes.filter((timestamp) => timestamp > cutoff);
       if (record.restartTimes.length >= Math.max(0, maxAutomaticRestarts)) {
@@ -499,6 +631,7 @@ export function createExtensionRuntime({
       record.restartTimes.push(now());
       try {
         startHost(current);
+        await record.settingsPromise;
       } catch (error) {
         record.state = 'crashed';
         record.lastError = String(error?.message ?? error);
@@ -570,6 +703,7 @@ export function createExtensionRuntime({
       throw extensionError('EXTENSION_DISABLED', '扩展未启用：' + entry.id);
     }
     if (runtimeRecord(entry.id).stopping) throw extensionError('EXTENSION_STOP_UNCONFIRMED', 'Extension cleanup is not confirmed');
+    if (runtimeRecord(entry.id).settingsStatus === 'needs-reconciliation') throw extensionError('EXTENSION_SETTINGS_RECONCILIATION_REQUIRED', 'Save current settings again or explicitly restart before invoking');
     let host = hosts.get(entry.id);
     if (host && !host.available()) {
       runtimeRecord(entry.id).state = 'crashed';
@@ -592,15 +726,17 @@ export function createExtensionRuntime({
       connection: content || entry.type === 'memory-pack' ? 'not-applicable' : 'unknown',
       authentication: content || entry.type === 'memory-pack' ? 'not-applicable' : 'unknown',
       discoveredCapabilities: entry.status === 'enabled' && !record.stopping && !record.lastError
+        && (!supportsSettings(entry) || settingsApplied(entry))
         ? (entry.manifest.capabilities || []).map(cap => cap.id) : [],
       lastCall: record.lastCall ? structuredClone(record.lastCall) : null,
       error: record.lastError ? { code: record.errorCode || 'EXTENSION_RUNTIME_ERROR', stage: record.errorStage || 'runtime' } : null };
   }
 
-  // Restore discovery synchronously at Core construction. Workers remain lazy.
-  // A damaged installed package is isolated from the rest of the catalog.
+  // Legacy discovery remains lazy. Enabled settings profiles obtain a new host
+  // receipt on Core startup before publishing capabilities. Damaged packages
+  // remain isolated from the rest of the catalog.
   for (const entry of store.list()) {
-    try { registerEntry(entry); }
+    try { if (entry.status === 'enabled' && supportsSettings(entry)) startHost(entry); else registerEntry(entry); }
     catch (error) {
       hideEntry(entry.id);
       runtimeRecord(entry.id).lastError = String(error?.message ?? error);
@@ -609,6 +745,9 @@ export function createExtensionRuntime({
 
   return {
     installer,
+    settingsState,
+    reconcileSettings,
+    async awaitSettings({ id } = {}) { await runtimeRecord(id).settingsPromise; return settingsState({ id }); },
 
     list() {
       return store.list();
@@ -785,6 +924,7 @@ export function createExtensionRuntime({
       entry = isSkillDataManifest(current.manifest)
         ? store.put({ ...current, contentGeneration: (current.contentGeneration ?? 0) + 1, updatedAt: now() }) : current;
       const host = startHost(entry);
+      await record.settingsPromise;
       return { extension: store.get(entry.id), runtimeState: runtimeState(store.get(entry.id)), health: host.health?.() || null };
     },
 
@@ -844,6 +984,7 @@ export function createExtensionRuntime({
 
     async invoke({ id, capability, input } = {}) {
       const { entry } = hostOrThrow(id);
+      await runtimeRecord(entry.id).settingsPromise;
       if (!entry.manifest.capabilities.some(c => c.id === capability)) throw extensionError('CAPABILITY_NOT_DECLARED', String(capability));
       const result = await broker.execute({ actor: actorFor(entry), capability: 'extension.' + entry.id + '.' + capability,
         input: input === undefined ? null : input, reason: 'Extension invocation' });

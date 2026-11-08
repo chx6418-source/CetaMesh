@@ -21,6 +21,7 @@ import { EXTENSION_LIMITS, extensionError } from './types.js';
 import { fileURLToPath } from 'node:url';
 import { isPackagedRuntime } from '../app-paths.js';
 import { manifestFingerprint } from './manifest.js';
+import { settingsReceiptMatches } from './settings-protocol.js';
 import { createProcessTransport, resolveExtensionWorkerLaunch } from './process-transport.js';
 
 const PROTOCOL_VERSION = 1;
@@ -38,6 +39,9 @@ function parseFrame(raw) {
   if (typeof raw.kind !== 'string') return null;
   if (raw.capability !== undefined && (typeof raw.capability !== 'string' || raw.capability.length > 200)) return null;
   switch (raw.kind) {
+    case 'configured':
+      if (!isPlainObject(raw.receipt)) return null;
+      break;
     case 'invoke':
       if (typeof raw.capability !== 'string' || !isPlainObject(raw.input)) return null;
       break;
@@ -113,6 +117,8 @@ export function createProcessExtensionHost({
   const declared = new Map((manifest.capabilities || []).map((entry) => [entry.id, entry]));
   const pending = new Map(); // invokeId -> { capability, resolve, reject, timer, cancelled }
   const pendingPings = new Map();
+  let pendingConfiguration = null;
+  let configured = false;
   const reversePending = new Map();
   const logs = [];
   let closed = false;
@@ -131,6 +137,11 @@ export function createProcessExtensionHost({
   function fail(code, message) { throw extensionError(code, message); }
 
   function settlePending(error) {
+    if (pendingConfiguration) {
+      clearTimeout(pendingConfiguration.timer);
+      pendingConfiguration.reject(error);
+      pendingConfiguration = null;
+    }
     for (const [id, entry] of pending) {
       clearTimeout(entry.timer);
       entry.cleanup?.();
@@ -231,6 +242,18 @@ export function createProcessExtensionHost({
     }
     const frame = parseFrame(parsed);
     if (!frame) return failHost('PROTOCOL_VIOLATION', 'Worker emitted malformed or unsupported frame');
+    if (frame.kind === 'configured' || pendingConfiguration?.id === frame.id) {
+      const pending = pendingConfiguration;
+      if (!pending || frame.id !== pending.id) return;
+      clearTimeout(pending.timer); pendingConfiguration = null;
+      if (frame.kind !== 'configured' || !settingsReceiptMatches(frame.receipt, pending.configuration)) {
+        pending.reject(extensionError('EXTENSION_SETTINGS_ACK_MISMATCH', 'Worker configuration receipt does not match'));
+        return;
+      }
+      configured = true;
+      pending.resolve(frame.receipt);
+      return;
+    }
     if (frame.kind === 'pong') {
       const ping = pendingPings.get(frame.id);
       if (ping) {
@@ -324,6 +347,19 @@ export function createProcessExtensionHost({
   transport.onError?.((error) => failHost(error?.code || 'PROTOCOL_VIOLATION', String(error?.message ?? error)));
   transport.onDiagnostic?.((message) => record('info', message));
   return {
+    configure(configuration, { timeoutMs: configureTimeoutMs = 3000 } = {}) {
+      if (closed || configured || pendingConfiguration || pending.size) return Promise.reject(extensionError('EXTENSION_SETTINGS_RESTART_REQUIRED', 'Configuration requires a new idle host'));
+      const id = 'settings_' + Math.random().toString(36).slice(2);
+      return new Promise((resolve, reject) => {
+        const timer = setTimeout(() => {
+          pendingConfiguration = null;
+          reject(extensionError('EXTENSION_SETTINGS_ACK_TIMEOUT', 'Worker did not acknowledge configuration'));
+        }, Math.max(1, Math.min(Number(configureTimeoutMs) || 3000, 30000)));
+        pendingConfiguration = { id, configuration, resolve, reject, timer };
+        try { checkedSend({ v: PROTOCOL_VERSION, id, kind: 'configure', configuration }); }
+        catch (error) { clearTimeout(timer); pendingConfiguration = null; reject(error); }
+      });
+    },
     manifest,
     logs,
     get pid() { return transport.pid ?? null; },
@@ -350,6 +386,7 @@ export function createProcessExtensionHost({
     },
     /** 发起一次受控调用：能力白名单 → 帧发送 → 超时/取消/结果裁决（async：同步拒绝即 rejection）。 */
     async invoke(capabilityId, input, { signal, runWithAuthority } = {}) {
+      if (manifest.settingsSchema?.length && !configured) fail('EXTENSION_SETTINGS_PENDING', 'Worker settings have not been acknowledged');
       const entry = capabilityOrThrow(capabilityId); // 未声明/未授权的能力：不出帧，直接拒绝
       void entry;
       if (closed) fail('PROVIDER_UNAVAILABLE', 'Process extension host 已关闭');

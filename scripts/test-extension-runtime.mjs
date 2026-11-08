@@ -29,6 +29,7 @@ import { readJsonFile, writeJsonAtomic } from '../src/storage/json-file.js';
 import { createDesktopUiService } from '../src/desktop/ui-service.js';
 import { startIpcProtocol, IPC_PROTOCOL_VERSION } from '../src/control/ipc-protocol.js';
 import { createCapabilityBroker } from '../src/capability/index.js';
+import { testEffectiveExtensionSettings } from './test-support/extension-settings-cases.mjs';
 
 let passed = 0;
 let failed = 0;
@@ -87,6 +88,7 @@ const fakeFetch = async (url) => ({
 });
 
 try {
+  await testEffectiveExtensionSettings(root);
   const store = createExtensionStore({ stateDir: root });
   const runtime = createExtensionRuntime({ store, fetchImpl: fakeFetch });
   runtimeCleanups.push(() => runtime.close());

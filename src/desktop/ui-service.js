@@ -556,7 +556,23 @@ function projectExtensionSettingsValues(value, fields) {
       values[field.key] = scalar(source[field.key]);
     }
   }
-  return { id: string(row.id, 160), values };
+  const application = record(row.application);
+  const revision = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value) ? value : null;
+  const projected = {
+      support: lifecycleValue(application.support, ['restart-and-ack', 'not-applicable', 'unsupported']),
+      status: lifecycleValue(application.status, ['applied', 'applying', 'pending', 'needs-review', 'needs-reconciliation', 'not-applicable', 'unsupported']),
+      desiredRevision: revision(application.desiredRevision), effectiveRevision: revision(application.effectiveRevision),
+      generation: lifecycleGeneration(application.generation), effectiveGeneration: lifecycleGeneration(application.effectiveGeneration),
+      secretConsumption: lifecycleValue(application.secretConsumption, ['unsupported', 'not-applicable']),
+      errorCode: /^[A-Z0-9_]{1,80}$/.test(application.errorCode ?? '') ? application.errorCode : null
+    };
+  const currentReceipt = projected.support === 'restart-and-ack'
+    && projected.desiredRevision !== null && projected.desiredRevision === projected.effectiveRevision
+    && projected.generation !== null && projected.generation > 0
+    && projected.generation === projected.effectiveGeneration;
+  if (projected.status === 'applied' && !currentReceipt) projected.status = 'unknown';
+  return { id: string(row.id, 160), values, revision: revision(row.revision), reviewRequired: row.reviewRequired === true,
+    application: projected };
 }
 function lifecycleValue(value, allowed, fallback = 'unknown') {
   return allowed.includes(value) ? value : fallback;
@@ -1854,7 +1870,8 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.extensions.settings.update': async p => {
       const id = idParam(p);
       const values = objectParams(p.values);
-      await extensions('ext.settings.update', { id, values });
+      if (p.expectedRevision !== undefined && (typeof p.expectedRevision !== 'string' || !/^[a-f0-9]{64}$/.test(p.expectedRevision))) throw uiError('INVALID_PARAMS', 'Settings revision must come from a fresh settings view');
+      await extensions('ext.settings.update', { id, values, expectedRevision: p.expectedRevision });
       emit('plugin.updated', { pluginId: id });
       const description = record(await extensions('ext.settings.describe', { id }));
       const fields = (Array.isArray(description.fields) ? description.fields : []).slice(0, 32);

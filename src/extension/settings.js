@@ -1,4 +1,5 @@
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { StorageError, readJsonFile, writeJsonAtomic } from '../storage/json-file.js';
 import { createExtensionPrivateStorage } from './private-storage.js';
 import { extensionError } from './types.js';
@@ -95,7 +96,7 @@ export function normalizeSettingsSchema(raw) {
   });
 }
 
-function validateValue(field, value) {
+export function validateSettingValue(field, value) {
   if (field.type === 'secretRef') {
     if (typeof value !== 'string' || !value.length || value.length > (field.maxLength ?? MAX_SETTING_TEXT)) valueError('secretRef must be a non-empty bounded string');
     return value;
@@ -121,6 +122,15 @@ function validateValue(field, value) {
   }
   valueError('setting type is unsupported');
 }
+const validateValue = validateSettingValue;
+const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+export function extensionSettingsBinding(entry) {
+  return { id: entry.id, version: entry.version, packageFingerprint: entry.packageFingerprint,
+    schemaFingerprint: digest(normalizeSettingsSchema(entry.manifest.settingsSchema) ?? []) };
+}
+
+export function publicSettingsRevision(binding, values) { return digest([binding, values]); }
 
 function mapStorageError(error, operation) {
   if (!(error instanceof StorageError)) return error;
@@ -152,7 +162,7 @@ export function createExtensionSettingsService({ stateDir, getExtension } = {}) 
       if (error?.code === 'INVALID_SETTINGS_SCHEMA') throw error;
       throw extensionError('INVALID_SETTINGS_SCHEMA', 'Installed Extension settings schema is invalid');
     }
-    return { id: entry.id, name: String(entry.name ?? entry.manifest.name ?? entry.id), fields };
+    return { id: entry.id, name: String(entry.name ?? entry.manifest.name ?? entry.id), fields, binding: extensionSettingsBinding(entry) };
   }
 
   function publicFile(id) {
@@ -170,19 +180,25 @@ export function createExtensionSettingsService({ stateDir, getExtension } = {}) 
     }
   }
 
-  function readPublic(id, fields) {
+  function readDocument(id) {
     let stored;
     try {
       stored = readJsonFile(publicFile(id), {
-        missing: { schemaVersion: 1, values: {} },
+        missing: null,
         maxBytes: MAX_SETTINGS_FILE_BYTES
       });
     } catch (error) {
       throw mapStorageError(error, 'read');
     }
+    if (stored === null) return null;
     if (!isPlainRecord(stored) || stored.schemaVersion !== 1 || !isPlainRecord(stored.values)) {
       throw extensionError('EXTENSION_SETTINGS_CORRUPT', 'Extension settings have an unsupported format');
     }
+    return stored;
+  }
+
+  function readPublic(id, fields) {
+    const stored = readDocument(id) ?? { values: {} };
     const safe = {};
     const byKey = new Map(fields.map(field => [field.key, field]));
     for (const [key, value] of Object.entries(stored.values)) {
@@ -208,7 +224,9 @@ export function createExtensionSettingsService({ stateDir, getExtension } = {}) 
         values[field.key] = field.default ?? null;
       }
     }
-    return { id: extension.id, values };
+    const stored = readDocument(extension.id);
+    return { id: extension.id, values, revision: digest([extension.binding, stored]),
+      reviewRequired: stored !== null && digest(stored.binding ?? null) !== digest(extension.binding) };
   }
 
   function describe(params = {}) {
@@ -224,10 +242,16 @@ export function createExtensionSettingsService({ stateDir, getExtension } = {}) 
 
   function update(params = {}) {
     const extension = resolve(params);
+    const previousDocument = readDocument(extension.id);
+    if (params.expectedRevision !== undefined && params.expectedRevision !== digest([extension.binding, previousDocument])) {
+      throw extensionError('EXTENSION_SETTINGS_CONFLICT', 'Settings or the reviewed package changed; reload before saving');
+    }
     if (!isPlainRecord(params.values)) throw extensionError('INVALID_EXTENSION_SETTING', 'settings values must be an object');
     const fieldMap = new Map(extension.fields.map(field => [field.key, field]));
     const publicValues = readPublic(extension.id, extension.fields);
-    const nextPublicValues = { ...publicValues };
+    // An explicit edit only carries forward values bound to this exact package.
+    // Legacy values remain visible, but partial edits cannot consent to them.
+    const nextPublicValues = digest(previousDocument?.binding ?? null) === digest(extension.binding) ? { ...publicValues } : {};
     const privateValues = privateStore(extension.id);
     const secretChanges = [];
     for (const [key, value] of Object.entries(params.values)) {
@@ -269,7 +293,11 @@ export function createExtensionSettingsService({ stateDir, getExtension } = {}) 
         else privateValues.set(change.key, change.value);
         appliedSecrets.push(change);
       }
-      writeJsonAtomic(publicFile(extension.id), { schemaVersion: 1, values: nextPublicValues });
+      const same = digest(previousDocument?.binding ?? null) === digest(extension.binding)
+        && digest(publicValues) === digest(nextPublicValues)
+        && secretChanges.every(change => (change.wasConfigured ? change.previous : null) === change.value);
+      if (!same) writeJsonAtomic(publicFile(extension.id), { schemaVersion: 1, values: nextPublicValues,
+        binding: extension.binding, revision: crypto.randomUUID() });
     } catch (error) {
       let rollbackError = null;
       for (const change of appliedSecrets.reverse()) {
@@ -287,5 +315,23 @@ export function createExtensionSettingsService({ stateDir, getExtension } = {}) 
     return settingsView(extension, nextPublicValues, privateValues);
   }
 
-  return Object.freeze({ describe, get, update });
+  function runtimeSnapshot(params = {}) {
+    const extension = resolve(params);
+    if (!extension.fields.length) return null;
+    const stored = readDocument(extension.id);
+    if (stored !== null && digest(stored.binding ?? null) !== digest(extension.binding)) {
+      throw extensionError('EXTENSION_SETTINGS_REVIEW_REQUIRED', 'Save settings for the current reviewed package before applying them');
+    }
+    const publicValues = readPublic(extension.id, extension.fields), values = {};
+    for (const field of extension.fields) {
+      if (field.type === 'secretRef') continue;
+      const value = Object.hasOwn(publicValues, field.key) ? publicValues[field.key] : field.default ?? null;
+      if (field.required && (value === null || value === '')) valueError('required setting is missing');
+      values[field.key] = value;
+    }
+    return { profile: 'public-settings-v1', ...extension.binding, values,
+      revision: publicSettingsRevision(extension.binding, values) };
+  }
+
+  return Object.freeze({ describe, get, update, runtimeSnapshot });
 }

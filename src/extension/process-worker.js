@@ -34,6 +34,7 @@ function validateFrame(frame) {
     case 'ping':
     case 'pong':
     case 'shutdown': return true;
+    case 'configure': return isPlainObject(frame.configuration);
     default: return false;
   }
 }
@@ -190,12 +191,22 @@ export async function runExtensionWorker({ input = process.stdin, output = proce
     ? createExtensionPrivateStorage({ file: storageFile }) : null;
   const host = createVmExtensionHost({
     manifest, source, storage, capabilityExecutor: requestCapability,
+    packageFingerprint: process.env.CETAMESH_EXTENSION_PACKAGE_FINGERPRINT,
     logger: (line) => log(`${line.level}: ${line.message}`)
   });
   if (!host.available()) throw Object.assign(new Error(host.loadError()?.message || 'Extension failed to load'), { code: 'EXTENSION_LOAD_FAILED' });
 
   const handleFrame = (frame) => {
     if (!validateFrame(frame)) return failProtocol('malformed or unsupported frame');
+    if (frame.kind === 'configure') {
+      try {
+        const receipt = host.configure(frame.configuration);
+        send({ v: PROTOCOL_VERSION, id: frame.id, kind: 'configured', receipt });
+      } catch {
+        send(errorFrame(frame.id, '$settings', { code: 'EXTENSION_SETTINGS_ACK_MISMATCH', message: 'Worker rejected configuration' }));
+      }
+      return;
+    }
     if (frame.kind === 'ping') {
       send({ v: PROTOCOL_VERSION, id: frame.id, kind: 'pong' });
       return;

@@ -311,7 +311,14 @@ export interface ExtensionSettingField {
 }
 export type ExtensionSettingValue = string | number | boolean | null | { configured: boolean };
 export interface ExtensionSettingsDescription { id: string; name: string; available: boolean; fields: ExtensionSettingField[] }
-export interface ExtensionSettingsSnapshot { id: string; values: Record<string, ExtensionSettingValue> }
+export interface ExtensionSettingsApplication {
+  support: 'restart-and-ack' | 'not-applicable' | 'unsupported' | 'unknown';
+  status: 'applied' | 'applying' | 'pending' | 'needs-review' | 'needs-reconciliation' | 'not-applicable' | 'unsupported' | 'unknown';
+  desiredRevision: string | null; effectiveRevision: string | null;
+  generation: number | null; effectiveGeneration: number | null;
+  secretConsumption: 'unsupported' | 'not-applicable' | 'unknown'; errorCode: string | null;
+}
+export interface ExtensionSettingsSnapshot { id: string; values: Record<string, ExtensionSettingValue>; revision?: string | null; reviewRequired?: boolean; application?: ExtensionSettingsApplication }
 export type IntegrationRestoreStatus = 'restored' | 'partial' | 'deprecated' | 'legacy-unsupported' | 'unknown';
 export interface IntegrationToolSetting {
   id: string; name: string; enabled: boolean; available: boolean; restorable: boolean;
@@ -725,8 +732,8 @@ export const agentClient = {
 export const extensionSettingsClient = {
   describe: (id: string) => uiCall<ExtensionSettingsDescription>('ui.extensions.settings.describe', { id }),
   get: (id: string) => uiCall<ExtensionSettingsSnapshot>('ui.extensions.settings.get', { id }),
-  update: (id: string, values: Record<string, string | number | boolean | null>) =>
-    uiCall<ExtensionSettingsSnapshot>('ui.extensions.settings.update', { id, values })
+  update: (id: string, values: Record<string, string | number | boolean | null>, expectedRevision?: string) =>
+    uiCall<ExtensionSettingsSnapshot>('ui.extensions.settings.update', { id, values, expectedRevision })
 };export const pluginClient = {
   catalog: (query = '', category = '', view = 'all') => uiCall<{ available: boolean; configured: boolean; offline: boolean; reason: string | null; plugins: Plugin[] }>('ui.plugins.catalog', { query, category, view }),
   status: () => uiCall<{ catalogAvailable: boolean; configured: boolean; offline: boolean; developerMode: boolean; plugins: Plugin[]; installed: Plugin[]; integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null }[]; mcp: McpServer[] }>('ui.plugins.status', {}),

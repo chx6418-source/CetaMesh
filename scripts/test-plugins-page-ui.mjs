@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
 const requireUi = createRequire(new URL('../desktop-ui/package.json', import.meta.url));
 const { build } = requireUi('esbuild');
 const result = await build({ entryPoints: [fileURLToPath(new URL('../desktop-ui/src/app/PluginsPage.tsx', import.meta.url))],
@@ -15,6 +16,54 @@ assert.equal(typeof module.exports.McpRuntimeFacts, 'function', 'MCP detail must
 const React = requireUi('react');
 const { renderToStaticMarkup } = requireUi('react-dom/server');
 const render = (component, props) => renderToStaticMarkup(React.createElement(component, props));
+const settingsApplication = { support: 'restart-and-ack', status: 'applied', generation: 8, effectiveGeneration: 8,
+  desiredRevision: 'a'.repeat(64), effectiveRevision: 'a'.repeat(64), secretConsumption: 'unsupported', errorCode: null };
+const appliedSettings = render(module.exports.ExtensionSettingsFacts, { application: settingsApplication });
+assert.match(appliedSettings, /公开设置已由当前宿主确认/);
+assert.match(appliedSettings, /当前不支持插件消费秘密字段/);
+assert.match(appliedSettings, /内容相同则保留当前宿主/);
+const failedSettings = render(module.exports.ExtensionSettingsFacts, { application: { ...settingsApplication,
+  status: 'needs-reconciliation', generation: 9, errorCode: 'EXTENSION_SETTINGS_ACK_TIMEOUT' } });
+assert.match(failedSettings, /应用失败/);
+assert.match(failedSettings, /EXTENSION_SETTINGS_ACK_TIMEOUT/);
+assert.doesNotMatch(failedSettings, /公开设置已由当前宿主确认/);
+assert.match(render(module.exports.ExtensionSettingsFacts, {}), /尚无设置生效证据/);
+assert.doesNotMatch(render(module.exports.ExtensionSettingsFacts, { application: settingsApplication, enabled: false }), /公开设置已由当前宿主确认/);
+assert.doesNotMatch(render(module.exports.ExtensionSettingsFacts, { application: settingsApplication, runtimeGeneration: 9 }), /公开设置已由当前宿主确认/);
+const receiptCases = [
+  ['revision mismatch', { ...settingsApplication, effectiveRevision: 'b'.repeat(64) }],
+  ['internal generation mismatch', { ...settingsApplication, generation: 9 }],
+  ['missing receipt', { ...settingsApplication, effectiveRevision: null, effectiveGeneration: null, generation: null }],
+  ['unsupported applied', { ...settingsApplication, support: 'unsupported' }],
+  ['missing desired revision', { ...settingsApplication, desiredRevision: null }],
+  ['invalid matching revisions', { ...settingsApplication, desiredRevision: 'invalid', effectiveRevision: 'invalid' }],
+  ['zero generation', { ...settingsApplication, generation: 0, effectiveGeneration: 0 }],
+  ['unsafe generation', { ...settingsApplication, generation: Number.MAX_SAFE_INTEGER + 1, effectiveGeneration: Number.MAX_SAFE_INTEGER + 1 }],
+  ['negative generation', { ...settingsApplication, generation: -1, effectiveGeneration: -1 }]
+];
+const receiptFailures = [];
+for (const [name, application] of [...receiptCases, ['valid', settingsApplication]]) {
+  const ui = createDesktopUiService({ services: { extensionService: {
+    execute: async ({ method }) => method === 'ext.settings.describe' ? { fields: [] }
+      : { id: 'test.settings-receipt', values: {}, application }
+  } } });
+  const shouldBeApplied = name === 'valid';
+  for (const method of ['ui.extensions.settings.get', 'ui.extensions.settings.update']) {
+    const projected = await ui.execute({ method, params: { id: 'test.settings-receipt', values: {} } });
+    if ((projected.application.status === 'applied') !== shouldBeApplied) receiptFailures.push(name + ': ' + method + ' DTO');
+    const markup = render(module.exports.ExtensionSettingsFacts, { application: projected.application, enabled: true, runtimeGeneration: 8 });
+    if (markup.includes('公开设置已由当前宿主确认') !== shouldBeApplied) receiptFailures.push(name + ': ' + method + ' projected SSR');
+  }
+  if (render(module.exports.ExtensionSettingsFacts, { application }).includes('公开设置已由当前宿主确认') !== shouldBeApplied)
+    receiptFailures.push(name + ': direct SSR');
+}
+for (const [name, currentFacts] of [['unknown catalog generation', { runtimeGeneration: null }],
+  ['invalid catalog generation', { runtimeGeneration: Number.NaN }], ['zero catalog generation', { runtimeGeneration: 0 }],
+  ['disabled catalog', { enabled: false }]]) {
+  if (render(module.exports.ExtensionSettingsFacts, { application: settingsApplication, ...currentFacts }).includes('公开设置已由当前宿主确认'))
+    receiptFailures.push(name + ': catalog SSR');
+}
+assert.deepEqual(receiptFailures, [], 'Only a complete matching current configuration receipt may be presented as applied');
 const availability = { installed: true, enabled: true, loaded: false, runtime: { state: 'stopped', generation: 4 },
   connection: 'not-applicable', authentication: 'not-applicable', discoveredCapabilities: ['content.read'],
   lastCall: { capability: 'content.read', status: 'completed', generation: 4, current: true }, error: null };

@@ -15,14 +15,15 @@ export function createExtensionPrivateStorage({ file } = {}) {
       return Object.hasOwn(cache, name) ? cache[name] : null;
     },
     set(key, value) {
-      cache[String(key)] = value === undefined ? null : value;
-      writeJsonAtomic(filePath, cache);
+      const next = { ...cache, [String(key)]: value === undefined ? null : value };
+      writeJsonAtomic(filePath, next);
+      cache = next;
       return true;
     },
     delete(key) {
       const name = String(key);
       const existed = Object.hasOwn(cache, name);
-      if (existed) { delete cache[name]; writeJsonAtomic(filePath, cache); }
+      if (existed) { const next = { ...cache }; delete next[name]; writeJsonAtomic(filePath, next); cache = next; }
       return existed;
     },
     has(key) { return Object.hasOwn(cache, String(key)); },
