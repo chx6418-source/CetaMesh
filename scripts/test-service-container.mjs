@@ -91,7 +91,10 @@ try {
   assert.equal(genericModelProvider.supportsReasoning('gpt-4o-mini'), false);
   const dshHealth = await services.agentService.execute({ method: 'agent.health', params: { provider: 'dsh' } });
   assert.equal(dshHealth.available, false);
-  assert.equal(dshHealth.reason, 'not_connected');
+  assert.equal(dshHealth.dshExecution.transport, 'sdk', 'Task execution health belongs to the SDK approval bridge');
+  assert.equal(dshHealth.dshExecution.legacyConnection.reason, 'not_connected', 'legacy connection remains a separate observation');
+  if(process.platform==='win32')assert.equal(dshHealth.reason,'DSH_SDK_SUPERVISOR_REQUIRED');
+  assert.equal(dshHealth.taskEligible,false,'absence of the verified task transport cannot imply execution eligibility');
   assert.equal(networkAttempts, 0, 'constructing Core services does not make network requests');
 
   const dshCalls = [];
@@ -131,6 +134,7 @@ try {
     goal: 'Provider-bound session fixture', workspaceId: fallbackWorkspace.id
   });
   const originalExecutionConsent = fallbackServices.agentBroker.assertExecutionConsent;
+  const originalAgentCapabilities = fallbackServices.agentBroker.capabilities;
   const originalAgentHealth = fallbackServices.agentBroker.health;
   const originalCreateAgentSession = fallbackServices.agentBroker.createSession;
   const originalSendAgent = fallbackServices.agentBroker.send;
@@ -139,6 +143,28 @@ try {
   const originalCloseAgent = fallbackServices.agentBroker.closeSession;
   let providerSessionIndex = 0;
   const sentAgentInstructions = [];
+  fallbackServices.agentBroker.createSession = async (provider) => ({ sessionId: `${provider}-fixture-${++providerSessionIndex}` });
+  fallbackServices.agentBroker.send = async request => { sentAgentInstructions.push(request); return { accepted: true }; };
+  assert.equal(originalAgentCapabilities('dsh').workspaceBoundary,'unverified',
+    'an unverified SDK bridge must not advertise a usable Task boundary');
+  const refusedAssignment = () => fallbackServices.capabilityService.broker.execute({
+    actor:{kind:'owner',id:'desktop'},taskId:brokerSessionTask.id,workspaceId:fallbackWorkspace.id,
+    capability:'agent.run',input:{agentProvider:'dsh',content:'refuse unavailable execution'},reason:'unverified transport regression'});
+  await assert.rejects(refusedAssignment,{code:'PROVIDER_UNAVAILABLE'});
+  fallbackServices.agentBroker.health = async () => ({available:true,installed:true,authenticated:true,sessionCapable:true,compatible:true});
+  try{await assert.rejects(refusedAssignment,{code:'AGENT_BOUNDARY_UNSUPPORTED'});}
+  finally{fallbackServices.agentBroker.health=originalAgentHealth;}
+  assert.equal(providerSessionIndex,0,'real unavailable/unverified DSH admission must refuse before Session creation');
+  assert.equal(sentAgentInstructions.length,0,'unverified boundary never sends to the provider');
+  // This section tests composition identity/rollback with controlled provider
+  // leaves, not DSH SDK execution. Keep the real unavailable observation above;
+  // verified SDK tools/approval/close are exercised by the SDK transport suites.
+  fallbackServices.agentBroker.capabilities = provider => provider==='dsh'
+    ? {...originalAgentCapabilities(provider),workspaceBoundary:'staged-capability-broker'} : originalAgentCapabilities(provider);
+  fallbackServices.agentBroker.assertExecutionConsent = (provider,scope) => {
+    if(provider!=='dsh')return originalExecutionConsent(provider,scope);
+    assert.equal(scope.workspaceId,fallbackWorkspace.id);
+  };
   fallbackServices.agentBroker.createSession = async (provider) => ({ sessionId: `${provider}-fixture-${++providerSessionIndex}` });
   fallbackServices.agentBroker.health = async () => ({ available: true, installed: true,
     authenticated: true, sessionCapable: true, compatible: true });
@@ -161,7 +187,7 @@ try {
         // This dispatch-only fixture already stubs createSession/send; simulate the approved scope
         // without depending on an installed CLI. Real approval/dispatch is covered by Native suites.
         fallbackServices.agentBroker.assertExecutionConsent = (id, scope) => {
-          if (id !== 'codex') return originalExecutionConsent(id, scope);
+          if (id !== 'codex' && id !== 'dsh') return originalExecutionConsent(id, scope);
           assert.equal(scope.workspaceId, fallbackWorkspace.id);
         };
       } else assert.ok(['capability-broker', 'staged-capability-broker'].includes(boundary), provider + ' is Task/Workspace-bound');
@@ -260,6 +286,7 @@ try {
     fallbackServices.agentBroker.send = originalSend;
   } finally {
     fallbackServices.agentBroker.assertExecutionConsent = originalExecutionConsent;
+    fallbackServices.agentBroker.capabilities = originalAgentCapabilities;
     fallbackServices.agentBroker.health = originalAgentHealth;
     fallbackServices.agentBroker.createSession = originalCreateAgentSession;
     fallbackServices.agentBroker.send = originalSendAgent;
@@ -267,6 +294,8 @@ try {
     fallbackServices.agentBroker.cancel = originalCancelAgent;
     fallbackServices.agentBroker.closeSession = originalCloseAgent;
   }
+  assert.equal(fallbackServices.agentBroker.capabilities('dsh').workspaceBoundary,'unverified');
+  assert.equal(fallbackServices.agentBroker.assertExecutionConsent,originalExecutionConsent);
 
   const w02TaskRuntime = fallbackServices.taskService.runtime;
   const w02WorkspaceRoot = path.join(root, 'chat-delete-agent-startup-workspace');
