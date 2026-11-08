@@ -92,9 +92,9 @@ Managed owns optional version-1 protocol envelopes under its Agent state directo
 using the existing atomic JSON primitive. Each envelope is bounded to 8 MiB and
 binds actor, Task, Workspace and Session, the current authorization/configuration
 revision, original message fingerprint, turn/run and checkpoint phase. Within a
-turn, checkpoints retain the exact append-only non-system transcript; current
-system headers may refresh on a new turn or approval continuation. Header changes
-invalidate prior synopsis projections. Completed final responses are also
+turn, checkpoints retain the exact append-only ordered body, including in-turn
+system feedback. Only the leading contiguous system headers may refresh on a new
+turn or approval continuation; header changes invalidate prior synopsis projections. Completed final responses are also
 checkpointed. Optional synopsis references retain their exact prefix anchors.
 Raw protocol and private continuation never enter public Agent status or events.
 
@@ -120,6 +120,13 @@ completed. No private/native/tool execution stack is injected by this gap path.
 The existing context warning event reports the gap. Corrupt, oversized or
 future-version envelopes remain refusals, not gap fallbacks. Existing Chat/Task/
 settings schemas remain unchanged; prior readers ignore the optional Agent files.
+
+A completed legacy envelope with a known structured Core post-write feedback
+message promoted into its leading headers has unusable order. After the same
+execution recovery gates clear, it takes the Task-only gap path with reason
+`legacy-transcript-order` and original provenance. Its bytes and completion phase
+remain unchanged; the message cannot prove stop, authorize replay or supply a
+guessed original position. Feedback in the ordered body is retained normally.
 
 Approval continuation may use a trusted in-process `restoreMessages` callback
 from its exact still-live Managed waiting turn. The coordinator first fences the

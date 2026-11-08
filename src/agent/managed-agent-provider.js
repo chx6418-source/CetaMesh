@@ -9,7 +9,7 @@ import { safeModelErrorDetails } from '../model/types.js';
 import { defineAgentProvider, agentProviderError, normalizePromptContent, AGENT_EVENT_PROTOCOL_DSH } from './agent-provider.js';
 import { PRODUCT_IDENTITY_PROMPT } from '../context/product-context.js';
 import { classifyAgentFailure } from './failure-recovery.js';
-import { createManagedHistorySource, MANAGED_HISTORY_MAX_BYTES, managedHistorySettled } from './managed-history-source.js';
+import { createManagedHistorySource, MANAGED_HISTORY_MAX_BYTES, managedHistorySettled, splitManagedHistoryMessages, managedHistoryHasLegacyOrder } from './managed-history-source.js';
 
 const MAX_TEXT = 128 * 1024;
 const MAX_HISTORY = 512 * 1024;
@@ -204,12 +204,13 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
       const current = await historyAuthority(s);
       if (current.revision !== authority.revision || JSON.stringify(current.task.agentHistory) !== JSON.stringify(lineage)) fail('CONTEXT_SYNOPSIS_STALE', 'Managed Task lineage changed during cold source authorization');
       const origin = source ? { sessionId: source.binding.sessionId, sourceFingerprint: source.sourceFingerprint, revision: source.revision } : null;
-      const complete = source?.phase === 'turn-complete' && !source.pendingCallIds.length && managedHistorySettled(source.messages);
-      if (complete && !skipped.length) s.messages = copy(source.messages.filter(row => row.role !== 'system'));
+      const legacyOrder = source?.phase === 'turn-complete' && managedHistoryHasLegacyOrder(source.messages);
+      const complete = source?.phase === 'turn-complete' && !legacyOrder && !source.pendingCallIds.length && managedHistorySettled(source.messages);
+      if (complete && !skipped.length) s.messages = copy(splitManagedHistoryMessages(source.messages).body);
       s.historyDerivedFrom = origin;
       if (!complete || skipped.length || source?.historyGap) {
         s.historyGap = { version: 1, representation: 'retained-history-gap', retainedOriginal: source?.historyGap?.retainedOriginal ?? Boolean(source), noReplay: true,
-          reason: !source ? 'missing-source' : !complete ? 'incomplete-source' : skipped.length ? 'missing-predecessor' : 'inherited-gap',
+          reason: !source ? 'missing-source' : legacyOrder ? 'legacy-transcript-order' : !complete ? 'incomplete-source' : skipped.length ? 'missing-predecessor' : 'inherited-gap',
           retainedOrigin: source?.historyGap ? source.historyGap.retainedOrigin : origin, sourcePhase: source?.phase ?? null,
           omittedMessageCount: complete && !skipped.length ? source?.historyGap?.omittedMessageCount ?? 0 : source?.messages.length ?? 0,
           skippedSessionIds: [...new Set([...skipped, ...(source?.historyGap?.skippedSessionIds ?? [])])].slice(0, 100),
@@ -243,15 +244,15 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
     if (JSON.stringify(payload.binding) !== JSON.stringify(authority.binding)
       || payload.revision !== null && payload.revision !== authority.revision) fail('CONTEXT_SYNOPSIS_STALE', 'Managed checkpoint authority changed');
     if (!s.historyTurnHeaders || s.historyTurnId !== turn.id) {
-      const first = payload.messages.findIndex(row => row.role !== 'system');
-      const protocol = payload.messages.slice(first < 0 ? payload.messages.length : first);
-      if (JSON.stringify(protocol) !== JSON.stringify(s.messages)) fail('CONTEXT_SYNOPSIS_STALE', 'Managed checkpoint does not match original Owner history');
-      s.historyTurnHeaders = copy(payload.messages.slice(0, first < 0 ? payload.messages.length : first));
+      const { headers, body } = splitManagedHistoryMessages(payload.messages);
+      if (JSON.stringify(body) !== JSON.stringify(s.messages)) fail('CONTEXT_SYNOPSIS_STALE', 'Managed checkpoint does not match original Owner history');
+      s.historyTurnHeaders = copy(headers);
       s.historyTurnId = turn.id;
     }
     const row = historySource.write({ ...payload, revision: authority.revision, derivedFrom: s.historyDerivedFrom, historyGap: s.historyGap });
-    s.historyTurnHeaders = copy(row.messages.filter(message => message.role === 'system'));
-    s.messages = copy(row.messages.filter(message => message.role !== 'system'));
+    const { headers, body } = splitManagedHistoryMessages(row.messages);
+    s.historyTurnHeaders = copy(headers);
+    s.messages = copy(body);
     s.historyRevision = row.revision;
   }
   async function resolveModelHistoryContext(request) {
@@ -405,7 +406,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
         assertNotAborted(controller.signal);
         if (result.usage && typeof result.usage === 'object') usage = result.usage;
         if (result.resolvedModel) turn.accounting.model = result.resolvedModel;
-        if (Array.isArray(result.messages)) s.messages = result.messages.filter((message) => message?.role !== 'system');
+        if (Array.isArray(result.messages)) s.messages = splitManagedHistoryMessages(result.messages).body;
         if (result.status === 'pending') {
           s.waitingForApproval = result.approvalId ?? null;
           s.waitingTurn = turn;
@@ -704,7 +705,7 @@ export function createManagedAgentProvider({ modelRuntime, capabilityExecutor, t
             return context;
           }
         });
-        if (Array.isArray(result.messages)) s.messages = result.messages.filter((message) => message?.role !== 'system');
+        if (Array.isArray(result.messages)) s.messages = splitManagedHistoryMessages(result.messages).body;
         s.lastUsage = result.usage ?? s.lastUsage;
         if (result.status === 'pending') {
           waitingTurns.delete(String(approvalId));

@@ -13,13 +13,37 @@ const sourcePointer = value => value && Object.keys(value).every(key => ['sessio
   && /^[a-f0-9]{64}$/.test(value.sourceFingerprint) && /^[a-f0-9]{64}$/.test(value.revision);
 const validGap = value => value && value.version === 1 && value.representation === 'retained-history-gap'
   && typeof value.retainedOriginal === 'boolean' && value.noReplay === true
-  && ['missing-source', 'incomplete-source', 'missing-predecessor', 'inherited-gap'].includes(value.reason)
+  && ['missing-source', 'incomplete-source', 'missing-predecessor', 'inherited-gap', 'legacy-transcript-order'].includes(value.reason)
   && (value.retainedOrigin === null || sourcePointer(value.retainedOrigin))
   && Number.isSafeInteger(value.omittedMessageCount) && value.omittedMessageCount >= 0
   && Array.isArray(value.skippedSessionIds) && value.skippedSessionIds.length <= 100
   && value.skippedSessionIds.every(id => typeof id === 'string' && id.length > 0 && id.length <= 240);
 const privateProtocol = value => value && typeof value === 'object' && Object.entries(value)
   .some(([key, child]) => /continuation|reasoning|thinking|signature|encrypted_content/i.test(key) || privateProtocol(child));
+// Only the leading system prefix is refreshable context. Core feedback after
+// conversation starts belongs to the exact ordered transcript, including its role.
+export function splitManagedHistoryMessages(messages) {
+  const first = messages.findIndex(message => message.role !== 'system');
+  const boundary = first < 0 ? messages.length : first;
+  return { headers: messages.slice(0, boundary), body: messages.slice(boundary) };
+}
+export function managedHistoryHasLegacyOrder(messages) {
+  const marker = 'CetaMesh post-write verification feedback (JSON reference data):\n';
+  // This known Core fact only belongs after a tool receipt. A legacy leading
+  // copy proves lost ordering, never effect settlement or recovery authority.
+  return splitManagedHistoryMessages(messages).headers.some(message => {
+    if (typeof message.content !== 'string' || !message.content.startsWith(marker)) return false;
+    let fact;
+    try { fact = JSON.parse(message.content.slice(marker.length)); } catch { return false; }
+    return fact?.kind === 'post-write-verification'
+      && ['not-run', 'pending', 'passed', 'failed', 'unknown'].includes(fact.state)
+      && Array.isArray(fact.sourceWriteIds) && fact.sourceWriteIds.every(id => typeof id === 'string')
+      && (fact.configDigest === null || typeof fact.configDigest === 'string' && /^[a-f0-9]{64}$/.test(fact.configDigest))
+      && (fact.operationRef === null || typeof fact.operationRef === 'string')
+      && (fact.code === undefined || typeof fact.code === 'string')
+      && Object.keys(fact).every(key => ['kind', 'state', 'sourceWriteIds', 'configDigest', 'operationRef', 'code'].includes(key));
+  });
+}
 export function managedHistorySettled(messages) {
   const pending = new Set();
   for (const message of messages) {
@@ -67,8 +91,8 @@ export function createManagedHistorySource({ stateDir } = {}) {
   function write(payload) {
     const previous = read(payload.binding, { missing: true });
     if (previous) {
-      const before = previous.messages.filter(row => row.role !== 'system');
-      const after = payload.messages.filter(row => row.role !== 'system');
+      const before = splitManagedHistoryMessages(previous.messages).body;
+      const after = splitManagedHistoryMessages(payload.messages).body;
       if (!same(after.slice(0, before.length), before)) fail('CONTEXT_SYNOPSIS_STALE', 'Managed checkpoint cannot replace retained protocol history.');
       if (previous.turnId === payload.turnId && previous.revision !== payload.revision) fail('CONTEXT_SYNOPSIS_STALE', 'Managed turn authorization changed.');
     }
@@ -76,7 +100,7 @@ export function createManagedHistorySource({ stateDir } = {}) {
       runId: payload.runId ?? null, phase: payload.phase, messages: payload.messages,
       sourceFingerprint: fingerprintHistorySource({ messages: payload.messages, sourceBinding: payload.binding }),
       synopsis: payload.synopsis ?? (previous?.turnId === payload.turnId
-        && same(previous.messages.filter(row => row.role === 'system'), payload.messages.filter(row => row.role === 'system')) ? previous.synopsis : null), pendingCallIds: payload.pendingCallIds ?? [],
+        && same(splitManagedHistoryMessages(previous.messages).headers, splitManagedHistoryMessages(payload.messages).headers) ? previous.synopsis : null), pendingCallIds: payload.pendingCallIds ?? [],
       ...(payload.derivedFrom ? { derivedFrom: payload.derivedFrom } : previous?.derivedFrom ? { derivedFrom: previous.derivedFrom } : {}) };
     if (payload.historyGap ?? previous?.historyGap) row.historyGap = payload.historyGap ?? previous.historyGap;
     row.integrity = hash(row);

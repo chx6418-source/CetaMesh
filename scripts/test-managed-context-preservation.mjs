@@ -84,6 +84,31 @@ async function sendTurn(id, content) {
   throw Error('Managed turn did not settle');
 }
 try {
+  const { createManagedHistorySource: createOrderedStore } = await import('../src/agent/managed-history-source.js');
+  const orderedStore = createOrderedStore({ stateDir });
+  const orderedBinding = { sessionId: 'ordered-source', taskId: 'ordered-task', workspaceId: 'ordered-workspace', actorKind: 'agent', actorId: 'ordered-agent' };
+  const orderedBody = [
+    { role: 'user', content: 'Preserve Core feedback at its original position.' },
+    { role: 'system', content: 'Core feedback before tool dispatch' },
+    { role: 'assistant', content: null, tool_calls: [{ id: 'ordered-read', type: 'function', function: { name: 'filesystem.read', arguments: '{}' } }] },
+    { role: 'tool', tool_call_id: 'ordered-read', content: '{"status":"completed"}' },
+    { role: 'system', content: 'Core feedback after tool settlement' },
+    { role: 'assistant', content: 'Finished.' }
+  ];
+  const orderedPayload = { binding: orderedBinding, turnId: 'ordered-turn', revision: 'a'.repeat(64), phase: 'turn-complete', pendingCallIds: [],
+    messages: [{ role: 'system', content: 'Old dynamic header' }, ...orderedBody] };
+  orderedStore.write(orderedPayload);
+  const orderedBytes = fs.readFileSync(retainedFile(orderedBinding.sessionId));
+  for (const change of ['tamper', 'reorder', 'promote-to-header']) {
+    const messages = structuredClone(orderedPayload.messages);
+    if (change === 'tamper') messages[2].content += ' changed';
+    if (change === 'reorder') [messages[2], messages[5]] = [messages[5], messages[2]];
+    if (change === 'promote-to-header') messages.splice(0, 0, messages.splice(2, 1)[0]);
+    assert.throws(() => orderedStore.write({ ...orderedPayload, messages }), { code: 'CONTEXT_SYNOPSIS_STALE' }, change);
+    assert.deepEqual(fs.readFileSync(retainedFile(orderedBinding.sessionId)), orderedBytes);
+  }
+  const refreshed = orderedStore.write({ ...orderedPayload, messages: [{ role: 'system', content: 'Current authorized dynamic header' }, ...orderedBody] });
+  assert.deepEqual(refreshed.messages.slice(1), orderedBody, 'only the leading dynamic header may refresh');
   services = compose();
   workspaceId = (await services.workspaceService.execute({ method: 'workspace.create', params: { name: 'Managed history isolated fixture', root: project } })).workspace.id;
   taskId = services.taskService.runtime.create({ goal: 'Preserve history with current Task authorization.', workspaceId }).id;
@@ -95,6 +120,12 @@ try {
   mode = 'retrieve';
   const reason = await sendTurn(first, 'Read the first original retained source.');
   assert.equal(reason.kind, 'completed', JSON.stringify(reason));
+  // A completed raw source may contain Core system feedback between settled
+  // protocol messages. Cold hydration and the next turn must keep its position.
+  const completed = JSON.parse(fs.readFileSync(retainedFile(first)));
+  const coldFeedback = { role: 'system', content: 'CetaMesh post-write verification feedback (JSON reference data):\n'
+    + JSON.stringify({ kind: 'post-write-verification', state: 'not-run', code: 'POST_WRITE_NOT_CONFIGURED', sourceWriteIds: ['settled-write'], configDigest: null, operationRef: null }) };
+  createOrderedStore({ stateDir }).write({ ...completed, messages: [...completed.messages, coldFeedback] });
   const sourceBytes = fs.readFileSync(retainedFile(first));
   const source = JSON.parse(sourceBytes);
   assert.equal(source.phase, 'turn-complete');
@@ -108,6 +139,19 @@ try {
   assert.equal(cold.kind, 'completed', JSON.stringify(cold));
   assert.deepEqual(fs.readFileSync(retainedFile(first)), sourceBytes, 'cold source remains byte-identical');
   assert.ok(fs.existsSync(retainedFile(second)), 'fresh session owns its newly authorized source envelope');
+  const coldBodyStart = source.messages.findIndex(row => row.role !== 'system');
+  const coldBody = source.messages.slice(coldBodyStart);
+  const assertRetainedBody = () => {
+    const messages = JSON.parse(fs.readFileSync(retainedFile(second))).messages;
+    const start = messages.findIndex(row => row.role !== 'system');
+    assert.deepEqual(messages.slice(start, start + coldBody.length), coldBody, 'completed and subsequent turns retain exact cold body, including system feedback');
+    const digest = value => crypto.createHash('sha256').update(JSON.stringify(value)).digest('hex');
+    assert.equal(digest(messages.slice(start, start + coldBody.length)), digest(coldBody), 'cold and subsequent body JSON hashes remain exact');
+  };
+  assertRetainedBody();
+  assert.equal((await sendTurn(second, 'Continue once more without replaying historical tools.')).kind, 'completed');
+  assertRetainedBody();
+  assert.equal(sourceReads, 1, 'cold and subsequent turns never replay the retained history-read tool');
   const { fingerprintHistorySource } = await import('../src/context/history-synopsis.js');
   const { createManagedHistorySource, MANAGED_HISTORY_MAX_BYTES } = await import('../src/agent/managed-history-source.js');
   const ownerStore = createManagedHistorySource({ stateDir });
@@ -117,6 +161,45 @@ try {
     row.integrity = crypto.createHash('sha256').update(JSON.stringify(row)).digest('hex');
     return JSON.stringify(row);
   }
+  // Prior versions could promote actual Core feedback into the header even in
+  // a completed envelope. Its original position cannot be reconstructed safely.
+  const legacyOrdered = structuredClone(source);
+  legacyOrdered.messages.splice(1, 0, { role: 'system', content: 'CetaMesh post-write verification feedback (JSON reference data):\n'
+    + JSON.stringify({ kind: 'post-write-verification', state: 'not-run', code: 'POST_WRITE_NOT_CONFIGURED', sourceWriteIds: ['legacy-write'], configDigest: null, operationRef: null }) });
+  const legacyOrderedBytes = encodeSource(legacyOrdered);
+  fs.writeFileSync(retainedFile(first), legacyOrderedBytes);
+  let legacyTask = services.taskService.runtime.get({ id: taskId }).task;
+  services.taskService.runtime.attachAgent({ id: taskId, expectedRev: legacyTask.rev, provider: 'cetamesh', sessionId: first });
+  const legacyOrderSession = await createAttached(); mode = 'gap';
+  const legacyCalls = modelCalls, savedStatus = services.agentBroker.status;
+  for (const status of [{ running: true }, { running: false, state: 'unknown' }]) {
+    services.agentBroker.status = async assignment => assignment.sessionId === first ? status : savedStatus(assignment);
+    try { assert.equal((await sendTurn(legacyOrderSession, 'Do not use malformed order as stop proof.')).error.code, 'REQUEST_RECOVERY_REQUIRED'); }
+    finally { services.agentBroker.status = savedStatus; }
+    assert.equal(modelCalls, legacyCalls);
+  }
+  fs.writeFileSync(path.join(project, 'legacy-order-gate.txt'), 'before');
+  const { OWNER_ACTOR: legacyOwner } = await import('../src/capability/types.js');
+  const legacyApproval = await services.capabilityService.broker.execute({ requestId: 'legacy-order-pending', actor: legacyOwner,
+    taskId, workspaceId, capability: 'filesystem.write', input: { path: 'legacy-order-gate.txt', expectedHash: crypto.createHash('sha256').update('before').digest('hex'), content: 'after' } });
+  assert.equal(legacyApproval.status, 'pending');
+  assert.equal((await sendTurn(legacyOrderSession, 'Do not use malformed order to bypass approval.')).error.code, 'REQUEST_RECOVERY_REQUIRED');
+  assert.equal(modelCalls, legacyCalls);
+  services.capabilityService.broker.approvals.cancel(legacyApproval.approvalId, 'owned-legacy-order-fixture');
+  assert.equal((await sendTurn(legacyOrderSession, 'Gates clear; continue from current Task with an explicit order gap.')).kind, 'completed');
+  const legacyGap = JSON.parse(fs.readFileSync(retainedFile(legacyOrderSession))).historyGap;
+  assert.equal(legacyGap.reason, 'legacy-transcript-order');
+  assert.equal(legacyGap.retainedOrigin.sourceFingerprint, legacyOrdered.sourceFingerprint);
+  assert.equal(legacyGap.sourcePhase, 'turn-complete', 'gap classification never rewrites the old completion fact');
+  assert.equal(legacyGap.noReplay, true);
+  assert.equal(fs.readFileSync(retainedFile(first), 'utf8'), legacyOrderedBytes);
+  assert.equal(fs.readFileSync(path.join(project, 'legacy-order-gate.txt'), 'utf8'), 'before');
+  const inheritedLegacy = await createAttached();
+  assert.equal((await sendTurn(inheritedLegacy, 'Retain the original order-gap provenance.')).kind, 'completed');
+  assert.equal(JSON.parse(fs.readFileSync(retainedFile(inheritedLegacy))).historyGap.retainedOrigin.sourceFingerprint, legacyOrdered.sourceFingerprint);
+  assert.equal(fs.readFileSync(retainedFile(first), 'utf8'), legacyOrderedBytes);
+  fs.writeFileSync(retainedFile(first), sourceBytes); mode = 'cold';
+  console.log('PASS completed legacy promoted feedback remains byte-identical; active/unknown/pending gates refuse and cleared fresh continuation retains explicit order gap without replay');
   const settingsFile = services.settingsService.store.file;
   const settingsBefore = fs.existsSync(settingsFile) ? fs.readFileSync(settingsFile) : null;
   const rejected = [];

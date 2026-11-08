@@ -60,6 +60,17 @@ async function scenario(control) {
       let body = ''; for await (const chunk of req) body += chunk;
       const request = JSON.parse(body); requests.push(request);
       const step = requests.length - 1;
+      if (step > 0) {
+        const orderedBody = messages => messages.slice(messages.findIndex(row => row.role !== 'system'));
+        const previous = orderedBody(requests[step - 1].messages);
+        assert.deepEqual(orderedBody(request.messages).slice(0, previous.length), previous,
+          'every approval preserves exact prior body order and Core system feedback');
+        assert.equal(sha(JSON.stringify(orderedBody(request.messages).slice(0, previous.length))), sha(JSON.stringify(previous)),
+          'approval continuation preserves the exact serialized body hash');
+        const writeIndex = request.messages.findIndex(row => row.tool_call_id === 'introduce-error');
+        const feedbackIndex = request.messages.findIndex(row => row.role === 'system' && row.content?.startsWith('CetaMesh post-write verification feedback'));
+        assert.ok(feedbackIndex > writeIndex && writeIndex > 0, 'actual Core post-write feedback stays after its write receipt');
+      }
       const receipt = id => JSON.parse(request.messages.findLast(row => row.role === 'tool' && row.tool_call_id === id)?.content ?? 'null');
       let tool;
       if (step === 0) tool = call('introduce-error', 'filesystem.write', {path: 'math.mjs', expectedHash: sha(original), content: broken});
