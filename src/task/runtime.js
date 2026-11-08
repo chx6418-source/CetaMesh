@@ -1164,7 +1164,7 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   }
 
   /** Persist one observed Broker tool result against the current Task owner. */
-  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode, hasChanges, retryCount, source, resultSha256, changes, operationId, postWriteVerification } = {}) {
+  function recordToolOutcome({ id, provider, sessionId, eventId, runId, phase, capability, status, filePath, tool, exitCode, hasChanges, retryCount, source, resultSha256, changes, operationId, postWriteVerification, diagnostics, verificationStatus } = {}) {
     const current = requireTask(id);
     const sourceId = normalizeText(eventId, 'eventId', 240, { required: true });
     if (current.executionEvidence?.some(item => item.eventId === sourceId && item.provider === provider && item.sessionId === sessionId)) return { task: current, changed: false };
@@ -1195,7 +1195,10 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
         status: resultStatus,
         ...(['native-result', 'core-import', 'core-test'].includes(source) && /^[a-f0-9]{64}$/.test(resultSha256 ?? '')
           ? { source, resultSha256 } : {}),
-        ...(source==='core-test'&&typeof operationId==='string'?{operationId:operationId.slice(0,160)}:{}),
+        ...((['core-test','core-import'].includes(source)||verificationStatus)&&typeof operationId==='string'?{operationId:operationId.slice(0,160)}:{}),
+        ...(source === 'core-test' && diagnostics ? {diagnostics:{stdout:redactText(String(diagnostics.stdout??'')).slice(0,8000),stderr:redactText(String(diagnostics.stderr??'')).slice(0,8000),timedOut:diagnostics.timedOut===true}} : {}),
+        ...(verificationStatus ? {verificationStatus:{state:String(verificationStatus.state??'not-run').slice(0,40),code:String(verificationStatus.code??'').slice(0,100),
+          approvalId:typeof verificationStatus.approvalId==='string'?verificationStatus.approvalId.slice(0,240):null}} : {}),
         ...(source === 'core-test' && name === 'test.run' && postWriteVerification
           ? { postWriteVerification: normalizePostWriteVerificationBinding(postWriteVerification) } : {}),
         ...(source === 'core-import' && Array.isArray(changes) ? { changes: changes.slice(0,500).map(row => ({

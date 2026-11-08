@@ -428,6 +428,7 @@ export function createCetaMeshServices(options = {}) {
         ? managedAgent.checkpointModelHistory(payload) : undefined,
     resolvePostWriteVerification: ({ scope, signal }) => scope?.workspaceId
       ? workspaceService.resolvePostWriteVerification({ workspaceId: scope.workspaceId, signal }) : null,
+    resolveImportedWriteReceipts: request => capabilityService.importedWriteReceipts(request),
     stateDir,
     actorResolver: ({ actorKind, actorId, sessionId, scope }) => {
       if (actorKind === 'owner') return OWNER_ACTOR;

@@ -202,6 +202,7 @@ export function createToolExecutionCoordinator({
   timeoutMs = 300000,
   actorResolver = null,
   resolvePostWriteVerification = null,
+  resolveImportedWriteReceipts = null,
   resolveHistoryContext = null,
   onMessagesCheckpoint = null,
   evidenceStore = null,
@@ -735,6 +736,13 @@ export function createToolExecutionCoordinator({
       const check = current.checks.find(item => item.requestId === row.requestId);
       if (check) check.state = row.result.postWriteVerification?.state ?? 'unknown';
       if (row.serverVerification) current.pairs.push({ callId: row.callId, input: row.input, content: row.content });
+    } else if (row.capability === 'workspace.apply' && row.result?.status === 'completed' && typeof resolveImportedWriteReceipts === 'function') {
+      const receipts = resolveImportedWriteReceipts({taskId:row.scope.taskId,workspaceId:row.scope.workspaceId,requestId:row.requestId});
+      const key = value => process.platform === 'win32' ? value.replaceAll('\\','/').toLowerCase() : value.replaceAll('\\','/');
+      for (const receipt of receipts) {
+        current.writes.push(receipt);
+        current.postimages = [...(current.postimages??[]).filter(prior=>key(prior.path)!==key(receipt.path)),receipt];
+      }
     } else if (row.capability === 'filesystem.write' && row.result?.status === 'completed') {
       const operationId = 'tool:' + crypto.createHash('sha256').update(row.requestId).digest('hex');
       const proof = capabilityBroker.operationRecordForTask?.({ taskId: row.scope.taskId,

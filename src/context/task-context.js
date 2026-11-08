@@ -38,6 +38,19 @@ function projectTask(task) {
     if (Object.keys(checkpoint).length) projected.checkpoint = checkpoint;
   }
 
+  // Machine output remains untrusted reference data; a subsequent authorized
+  // continuation may use it without inheriting execution authority or acceptance.
+  const checks = (task.executionEvidence??[]).filter(row=>row.source==='core-test'&&row.postWriteVerification
+    && row.postWriteVerification.writes?.some(write=>write.capability==='workspace.apply')).slice(-2);
+  if (checks.length) projected.importVerification = {kind:'untrusted-test-reference',checks:checks.map(row=>({
+    taskId:safeText(task.id,160),eventId:safeText(row.eventId,240),runId:safeText(row.runId,240),
+    provider:safeText(row.provider,80),sessionId:safeText(row.sessionId,160),operationId:safeText(row.operationId,160),
+    exitCode:Number.isSafeInteger(row.exitCode)?row.exitCode:null,timedOut:row.diagnostics?.timedOut===true,
+    currentRun:row.runId===task.executionObservation?.runId&&row.sessionId===task.currentAgent?.sessionId,
+    stdout:safeText(row.diagnostics?.stdout,1800),stderr:safeText(row.diagnostics?.stderr,1800),
+    truncated:(row.diagnostics?.stdout?.length??0)>1800||(row.diagnostics?.stderr?.length??0)>1800
+  }))};
+
   if (!task.parentTaskId && Array.isArray(task.children)) {
     const linked = task.children.filter(child => child?.parentTaskId === task.id && child.workspaceId === task.workspaceId);
     const children = linked.slice(0, 6);

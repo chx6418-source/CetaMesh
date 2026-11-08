@@ -49,17 +49,19 @@ export function planPostWriteVerification({ config, writeReceipts = [], knownWri
     if (typeof row.path !== 'string' || !row.path) continue;
     const key = pathKey(row.path);
     if (previouslyChecked.has(key) || config.includeExtensions.some(ext => row.path.toLowerCase().endsWith(ext))) {
-      paths.set(key, { eventId: row.eventId, requestId: row.requestId, path: row.path, sha256: row.sha256 });
+      paths.set(key, { eventId: row.eventId, requestId: row.requestId, path: row.path, sha256: row.sha256,
+        ...(row.capability === 'workspace.apply' ? {capability:row.capability,operationId:row.operationId,action:row.action} : {}) });
     }
   }
   if (!isDigest(config.configDigest) || !isDigest(config.sourceDigest) || paths.size > 24
-    || [...paths.values()].some(row => !isDigest(row.sha256) || typeof row.requestId !== 'string' || !row.requestId || !row.eventId)) {
+    || [...paths.values()].some(row => !(row.capability === 'workspace.apply' && row.action === 'delete' && row.sha256 === null) && !isDigest(row.sha256)
+      || typeof row.requestId !== 'string' || !row.requestId || !row.eventId)) {
     return skipped('POST_WRITE_SOURCE_UNAVAILABLE');
   }
   return { kind: 'post-write-verification', state: 'requested',
     input: { tool: config.tool, args: [...config.args], timeoutMs: config.timeoutMs },
     binding: { configDigest: config.configDigest, sourceDigest: config.sourceDigest,
-      sourceWriteIds: [...paths.values()].map(row => row.eventId), writes: [...paths.values()] } };
+      sourceWriteIds: [...new Set([...paths.values()].map(row => row.eventId))], writes: [...paths.values()] } };
 }
 
 /** Bounded model feedback, separate from Broker transport and semantic acceptance. */

@@ -161,6 +161,7 @@ export interface Task {
   checkpoint: { summary: string; nextAction: string } | null; result: { summary: string } | null;
   artifacts: { id: string; kind: string; label: string; createdAt: string | number | null }[];
   executionEvidence: { eventId: string; capability: string; status: string; tool: string | null;
+    verification?:{state:string;code:string;runId:string;operationId:string;stdout:string;stderr:string};
     exitCode: number | null; filePath: string | null; taskRev: number | null; at: string | number | null }[];
   agentHistory: { provider: string; sessionId: string; attachedAt: string | number | null; detachedAt: string | number | null; note: string }[];
   execution?: { state: string; hadToolActivity: boolean; hasEvidence: boolean };
@@ -390,6 +391,8 @@ type UiMethod =
   | 'ui.task.overview' | 'ui.task.get' | 'ui.task.outcome.verify' | 'ui.task.child.create' | 'ui.task.child.review' | 'ui.task.child.complete' | 'ui.task.child.verify' | 'ui.task.complete' | 'ui.task.create' | 'ui.task.start' | 'ui.task.pause' | 'ui.task.resume' | 'ui.task.recovery.inspect' | 'ui.task.reconcile' | 'ui.task.cancel' | 'ui.task.handoff'
   | 'ui.workshop.proposals' | 'ui.workshop.proposal' | 'ui.workshop.review' | 'ui.workshop.retry' | 'ui.workshop.task.status' | 'ui.workshop.deliver'
   | 'ui.workspace.version' | 'ui.workspace.list' | 'ui.workspace.open' | 'ui.workspace.create'
+  | 'ui.workspace.verification.get' | 'ui.workspace.verification.update'
+  | 'ui.workspace.verification.retry'
   | 'ui.memory.overview' | 'ui.memory.get' | 'ui.memory.create' | 'ui.memory.update' | 'ui.memory.pin' | 'ui.memory.delete'
   | 'ui.memory.experience.transition' | 'ui.memory.experience.revise' | 'ui.memory.experience.rollback'
   | 'ui.memory.candidates.confirm' | 'ui.memory.candidates.confirmBatch'
@@ -784,6 +787,14 @@ export const aboutClient = {
 };
 export const feedbackClient = {
   links: () => uiCall<{ configured: boolean; entries: { id: string; label: string; description: string; kind: 'feedback' | 'security'; url: string | null }[]; securityNotice: string; message: string }>('ui.feedback.links', {})
+};
+export interface WorkspaceVerificationConfig {enabled:boolean;tool:'npm'|'cargo';args:string[];includeExtensions:string[];timeoutMs:number;maxRunsPerTurn:number}
+export interface WorkspaceVerificationCheck {taskId:string;eventId:string;runId:string;provider:string;state:string;code:string;approvalId:string|null;operationId:string|null;exitCode:number|null;diagnostics:{stdout:string;stderr:string}|null;at:number;currentRun:boolean;canRetry?:boolean}
+export interface WorkspaceVerificationView {config:WorkspaceVerificationConfig|null;configDigest:string|null;checks:WorkspaceVerificationCheck[]}
+export const workspaceVerificationClient = {
+  get:(id:string)=>uiCall<WorkspaceVerificationView>('ui.workspace.verification.get',{id}),
+  retry:(id:string,taskId:string,approvalId:string)=>uiCall<{status:string;approvalId:string}>('ui.workspace.verification.retry',{id,taskId,approvalId}),
+  update:(id:string,config:WorkspaceVerificationConfig|null,expectedConfigDigest:string|null)=>uiCall<WorkspaceVerificationView>('ui.workspace.verification.update',{id,config,expectedConfigDigest})
 };
 export type WorkspaceSummary = { id: string; name: string; status: string; lastActivity: string | number | null;
   activitySource?: 'opened' | 'created'; managedIsolation?: boolean; taskId?: string; parentWorkspaceId?: string | null;

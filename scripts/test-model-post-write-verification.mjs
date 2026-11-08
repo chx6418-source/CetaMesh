@@ -17,6 +17,9 @@ import { createCapabilityService } from '../src/capability/service.js';
 import { createIsolatedTestRunner } from '../src/workspace/isolated-runner.js';
 import { createToolExecutionCoordinator } from '../src/model/tool-execution.js';
 import { verifyPostWriteCurrentSource } from '../src/task/outcome-verification.js';
+import { createDesktopUiService } from '../src/desktop/ui-service.js';
+import { buildTaskContext } from '../src/context/task-context.js';
+import { buildProductContext } from '../src/context/product-context.js';
 
 const sha = value => crypto.createHash('sha256').update(value).digest('hex');
 const original = 'export const add = (a, b) => a;\n';
@@ -238,7 +241,7 @@ const owner = { kind: 'owner', id: 'desktop' };
 // Authorization/recovery regressions use a deterministic model leaf and the
 // actual Workspace/Task/Broker/Approval/Runner, separate from the HTTP proof.
 async function coreFixture({ settings = config, grants = ['filesystem.read', 'filesystem.write', 'test.run'], calls,
-  maxCalls = 24, loseTestReceipt = false, runnerAvailable = true, loseWriteReceipt = false, verifierPrefix = '' } = {}) {
+  maxCalls = 24, loseTestReceipt = false, runnerAvailable = true, loseWriteReceipt = false, verifierPrefix = '', provider = 'cetamesh' } = {}) {
   const root = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-post-write-core-')));
   const project = path.join(root, 'project'), stateDir = path.join(root, 'state'); fs.mkdirSync(project);
   const source = [verifierPrefix, "import { add } from './math.mjs'; import assert from 'node:assert/strict'; import fs from 'node:fs';",
@@ -253,8 +256,8 @@ async function coreFixture({ settings = config, grants = ['filesystem.read', 'fi
     resolvePostWriteVerification: request => workspaceService.resolvePostWriteVerification(request) });
   let task = tasks.create({ goal: 'Exercise only suite-owned current writes and fresh fixed tests', workspaceId: workspace.id,
     acceptanceCriteria: ['Independent Owner review remains required'] });
-  task = tasks.start({ id: task.id, expectedRev: task.rev, provider: 'cetamesh', sessionId: 'verification-session' }).task;
-  tasks.beginExecutionObservation({ id: task.id, provider: 'cetamesh', sessionId: 'verification-session', runId: 'verification-run', phase: 'user' });
+  task = tasks.start({ id: task.id, expectedRev: task.rev, provider, sessionId: 'verification-session' }).task;
+  tasks.beginExecutionObservation({ id: task.id, provider, sessionId: 'verification-session', runId: 'verification-run', phase: 'user' });
   const actualRunner = createIsolatedTestRunner({ resolveWorkspace: id => workspaceService.describeWorkspace(id) });
   const runner = loseTestReceipt ? { async run(input) { await actualRunner.run(input);
     throw Object.assign(new Error('Owned fault after actual test process exit'), { code: 'R02_TEST_RECEIPT_LOST', effectStatus: 'unknown' }); } } : actualRunner;
@@ -271,6 +274,7 @@ async function coreFixture({ settings = config, grants = ['filesystem.read', 'fi
     const next = responses.shift(); if (next instanceof Error) throw next;
     return { text: 'Fixture report only', toolCalls: next ?? [] }; } };
   const coordinatorOptions = { stateDir, modelRuntime, capabilityBroker: capabilities.broker, maxCalls, finalSynthesisAtLimit: true,
+    resolveImportedWriteReceipts: request => capabilities.importedWriteReceipts(request),
     actorResolver: ({ actorKind }) => actorKind === 'owner' ? owner : capabilities.principalForTask(task.id),
     resolvePostWriteVerification: ({ scope, signal }) => workspaceService.resolvePostWriteVerification({ workspaceId: scope.workspaceId, signal }) };
   const coordinator = createToolExecutionCoordinator(coordinatorOptions);
@@ -286,7 +290,7 @@ async function coreFixture({ settings = config, grants = ['filesystem.read', 'fi
     messages: [{ role: 'user', content: 'Perform only the owned fixture plan and report observed verification.' }],
     manifest: capabilities.broker.list().filter(row => row.inputSchema && row.description), ...callbacks };
   let lastResume;
-  capabilities.setApprovalDecisionListener(async event => { lastResume = await coordinator.resumeApproval({ ...event, ...callbacks });
+  capabilities.setApprovalDecisionListener(async event => { if (provider !== 'cetamesh') return null; lastResume = await coordinator.resumeApproval({ ...event, ...callbacks });
     return { resumed: lastResume.status !== 'pending', pending: lastResume.status === 'pending', approvalId: lastResume.approvalId }; });
   const fixture = { root, project, stateDir, workspace, workspaceService, task, tasks, capabilities, coordinator, coordinatorOptions, options,
     requests, responses, source, callbacks, get lastResume() { return lastResume; },
@@ -647,6 +651,255 @@ async function boundedCoreChecks() {
   }
 }
 
+async function importedVerification() {
+  const f = await coreFixture({ provider: 'fixture-native' });
+  const binding = { taskId: f.task.id, workspaceId: f.workspace.id, provider: 'fixture-native',
+    sessionId: 'verification-session', runId: 'verification-run', phase: 'user' };
+  const change = (name, content) => ({ action: content === null ? 'delete' : 'write', path: name,
+    expectedHash: fs.existsSync(path.join(f.project, name)) ? sha(fs.readFileSync(path.join(f.project, name))) : null,
+    hash: content === null ? null : sha(content), ...(content === null ? {} : { content }) });
+  try {
+    fs.writeFileSync(path.join(f.project, 'obsolete.mjs'), '// remove me\n');
+    const first = await f.capabilities.applyAgentWorkspaceChanges({ ...binding, requestId: 'fixture-import-one',
+      changes: [change('math.mjs', broken), change('新增.mjs', '// UTF-8 保留\r\n'), change('obsolete.mjs', null)] });
+    assert.equal(first.status, 'pending'); assert.equal(f.starts(), 0);
+    const imported = await f.decide(first);
+    assert.equal(imported.status, 'completed', 'a successful import is independent of test approval');
+    assert.equal(fs.readFileSync(path.join(f.project, 'math.mjs'), 'utf8'), broken);
+    const check = f.capabilities.broker.approvals.list().find(row => row.request.capability === 'test.run');
+    assert.ok(check, 'settled native import must queue a distinct fresh test approval: '+JSON.stringify(f.tasks.get({id:f.task.id}).task.executionEvidence));
+    assert.notEqual(check.id, first.approvalId); assert.equal(f.starts(), 0);
+    f.tasks.observeExecution({ id: f.task.id, ...binding, state: 'awaiting-review' });
+    await f.decide({ approvalId: check.id });
+    assert.equal(f.starts(), 1);
+    let tests = f.tasks.get({ id: f.task.id }).task.executionEvidence.filter(row => row.source === 'core-test');
+    assert.equal(tests.length, 1); assert.notEqual(tests[0].exitCode, 0);
+    assert.match(tests[0].diagnostics?.stderr ?? '', /R02_OWNED_FIXED_ASSERTION/);
+    const context = buildTaskContext({task:f.tasks.get({id:f.task.id}).task,workspace:f.workspace});
+    assert.match(JSON.stringify(context),/R02_OWNED_FIXED_ASSERTION/,'next authorized continuation receives retained failed-test diagnostics as Task reference data');
+    const sensitiveTask=structuredClone(f.tasks.get({id:f.task.id}).task);
+    sensitiveTask.executionEvidence.find(row=>row.source==='core-test').diagnostics.stderr+='\nAuthorization: Bearer fixture_secret_123456\n'+'.'.repeat(9000);
+    const projected=buildProductContext({task:sensitiveTask,workspace:f.workspace});
+    assert.doesNotMatch(projected,/fixture_secret_123456/);assert.match(projected,/untrusted-test-reference/);
+    f.responses.splice(0,f.responses.length,[]);
+    await f.coordinator.run({...f.options,turnId:'explicit-diagnostic-followup',messages:[{role:'system',content:projected},{role:'user',content:'Read this retained diagnostic; do not execute tools.'}]});
+    assert.match(JSON.stringify(f.requests.at(-1).messages),/R02_OWNED_FIXED_ASSERTION/);
+    assert.doesNotMatch(JSON.stringify(f.requests.at(-1).messages),/fixture_secret_123456/);
+    assert.equal(f.starts(),1,'authorized read-only continuation cannot rerun a test from diagnostic text');
+    assert.equal(tests[0].postWriteVerification.writes.length, 3, 'one import event binds all matching create/update/delete paths');
+    assert.equal(verifyPostWriteCurrentSource(f.tasks.get({id:f.task.id}).task, tests[0], {workspaceRoot:f.project,
+      postWriteVerification:await f.workspaceService.resolvePostWriteVerification({workspaceId:f.workspace.id})}).status, 'VERIFIED');
+    f.tasks.observeExecution({ id: f.task.id, ...binding, state: 'running' });
+    const repair = await f.capabilities.applyAgentWorkspaceChanges({ ...binding, requestId: 'fixture-import-repair',
+      changes: [change('math.mjs', repaired), change('obsolete.mjs', '// recreated\n')] });
+    await f.decide(repair);
+    const next = f.capabilities.broker.approvals.list().find(row => row.request.capability === 'test.run');
+    assert.ok(next); assert.notEqual(next.request.operationId, check.request.operationId);
+    await f.decide({ approvalId: next.id }); assert.equal(f.starts(), 2);
+    tests = f.tasks.get({ id: f.task.id }).task.executionEvidence.filter(row => row.source === 'core-test');
+    assert.equal(tests.at(-1).exitCode, 0);
+    assert.match(tests.at(-1).diagnostics.stdout, /R02_OWNED_PASS/);
+    const ui=createDesktopUiService({services:{workspaceService:f.workspaceService,taskService:{runtime:f.tasks},capabilityService:f.capabilities}});
+    const status=await ui.execute({method:'ui.workspace.verification.get',params:{id:f.workspace.id}});
+    assert.deepEqual(status.checks.map(row=>row.state),['passed','failed'],'settled checks replace pending projections without duplicate or false pending rows');
+    assert.notEqual(f.tasks.get({id:f.task.id}).task.status, 'completed');
+    assert.deepEqual(createTaskStore({stateDir:f.stateDir}).get(f.task.id).executionEvidence.filter(row=>row.source==='core-test'), tests);
+    const third=await f.capabilities.applyAgentWorkspaceChanges({...binding,requestId:'fixture-import-budget',changes:[change('math.mjs',repaired+'// third\n')]});
+    await f.decide(third);assert.equal(f.starts(),2);
+    assert.equal(f.tasks.get({id:f.task.id}).task.executionEvidence.at(-1).verificationStatus.code,'VERIFICATION_BUDGET_EXHAUSTED');
+    console.log('PASS real native import create/update/delete -> distinct approved failing Node test -> separately approved repair -> fresh passing test');
+  } finally { await f.close(); }
+}
+
+async function verificationOwnerSurface() {
+  const f = await coreFixture({settings:null});
+  try {
+    const ui = createDesktopUiService({services:{workspaceService:f.workspaceService,taskService:{runtime:f.tasks},capabilityService:f.capabilities}});
+    const read = () => ui.execute({method:'ui.workspace.verification.get',params:{id:f.workspace.id}});
+    const initial = await read(); assert.equal(initial.config,null); assert.equal(initial.configDigest,null);
+    const saved = await ui.execute({method:'ui.workspace.verification.update',params:{id:f.workspace.id,config,expectedConfigDigest:null}});
+    assert.equal(saved.config.enabled,true); assert.equal(f.starts(),0);
+    assert.deepEqual(createWorkspaceService({stateDir:f.stateDir}).readPostWriteVerificationConfig({workspaceId:f.workspace.id}),{...config,configDigest:saved.configDigest});
+    await assert.rejects(ui.execute({method:'ui.workspace.verification.update',params:{id:f.workspace.id,config:{...config,enabled:false},expectedConfigDigest:null}}),{code:'POST_WRITE_CONFIG_CONFLICT'});
+    assert.equal((await read()).config.enabled,true);
+    console.log('PASS Owner Core verification settings persist without executing and stale saves fail closed');
+  } finally {await f.close();}
+}
+
+async function importedNegatives() {
+  const cases=[
+    {name:'disabled',settings:{...config,enabled:false},code:'POST_WRITE_DISABLED'},
+    {name:'zero-budget',settings:{...config,maxRunsPerTurn:0},code:'VERIFICATION_BUDGET_EXHAUSTED'},
+    {name:'not-configured',settings:null,code:'POST_WRITE_NOT_CONFIGURED'},
+    {name:'unmatched',settings:{...config,includeExtensions:['.rs']},code:'POST_WRITE_NO_MATCH'},
+    {name:'missing-grant',grants:['filesystem.read','filesystem.write'],code:'POST_WRITE_TEST_GRANT_REQUIRED'},
+    {name:'rejected-import',rejectImport:true},
+    {name:'unknown-import',unknownImport:true},
+    {name:'changed-config',alter:async f=>f.workspaceService.execute({method:'workspace.settings',params:{id:f.workspace.id,patch:{postWriteVerification:{...config,timeoutMs:31000}}}}),code:'POST_WRITE_CONFIG_CHANGED'},
+    {name:'changed-source',alter:async f=>fs.appendFileSync(path.join(f.project,'verify.mjs'),'// changed verifier\n'),code:'POST_WRITE_SOURCE_CHANGED'},
+    {name:'changed-byte',alter:async f=>fs.writeFileSync(path.join(f.project,'math.mjs'),original),code:'POST_WRITE_SOURCE_CHANGED'},
+    {name:'cancelled-run',alter:async f=>f.tasks.observeExecution({id:f.task.id,provider:'fixture-native',sessionId:'verification-session',runId:'verification-run',phase:'user',state:'cancelled'}),code:'POST_WRITE_RUN_CHANGED'},
+    {name:'new-run',alter:async f=>f.tasks.beginExecutionObservation({id:f.task.id,provider:'fixture-native',sessionId:'verification-session',runId:'replacement-run',phase:'user'}),code:'POST_WRITE_RUN_CHANGED'},
+    {name:'forged-operation',forge:'operationId'},
+    {name:'forged-postimage',forge:'sha256'},
+    {name:'rejected-test',rejectTest:true},
+    {name:'unknown-test',loseTestReceipt:true},
+    {name:'oversize-scope',many:true,code:'POST_WRITE_SOURCE_UNAVAILABLE'}
+  ];
+  for(const options of cases) {
+    const f=await coreFixture({...options,provider:'fixture-native'});
+    try {
+      if(options.unknownImport){const actual=f.workspaceService.applyChanges;f.workspaceService.applyChanges=async args=>{await actual(args);throw Object.assign(Error('Owned lost import receipt'),{code:'OWNED_IMPORT_UNKNOWN',effectStatus:'unknown'});};}
+      const changes=options.many?Array.from({length:25},(_,i)=>({action:'write',path:'source-'+i+'.mjs',expectedHash:null,content:'// '+i,hash:sha('// '+i)}))
+        :[{action:'write',path:'math.mjs',expectedHash:sha(original),content:broken,hash:sha(broken)}];
+      const request={taskId:f.task.id,workspaceId:f.workspace.id,provider:'fixture-native',sessionId:'verification-session',runId:'verification-run',phase:'user',requestId:'import-'+options.name,changes};
+      const imported=await f.capabilities.applyAgentWorkspaceChanges(request);assert.equal(f.starts(),0);
+      if(options.unknownImport)await assert.rejects(f.decide(imported),{code:'OWNED_IMPORT_UNKNOWN'});
+      else await f.decide(imported,!options.rejectImport);
+      const test=f.capabilities.broker.approvals.list().find(row=>row.request.capability==='test.run');
+      if(options.rejectImport||options.unknownImport||options.code&&!options.alter){
+        assert.equal(test,undefined,options.name);assert.equal(f.starts(),0);
+        if(options.code)assert.equal(f.tasks.get({id:f.task.id}).task.executionEvidence.at(-1).verificationStatus.code,options.code);
+      } else {
+        assert.ok(test,options.name);assert.equal(f.starts(),0);
+        if(options.forge){const request=structuredClone(test.request);request.requestId='forged-'+options.forge;request.operationId='forged:'+sha(options.forge);
+          request.origin.postWriteVerification.writes[0][options.forge]=options.forge==='sha256'?'0'.repeat(64):'import:'+ '0'.repeat(64);
+          await assert.rejects(f.capabilities.broker.execute(request),{code:'POST_WRITE_RECEIPT_UNVERIFIED'});
+          await f.decide({approvalId:test.id},false);assert.equal(f.starts(),0);}
+        else if(options.alter){await options.alter(f);await assert.rejects(f.decide({approvalId:test.id}),{code:options.code});assert.equal(f.starts(),0);}
+        else if(options.rejectTest){await f.decide({approvalId:test.id},false);assert.equal(f.starts(),0);}
+        else if(options.loseTestReceipt){await assert.rejects(f.decide({approvalId:test.id}),{code:'R02_TEST_RECEIPT_LOST'});assert.equal(f.starts(),1);}
+        assert.equal(fs.readFileSync(path.join(f.project,'math.mjs'),'utf8'),options.name==='changed-byte'?original:broken,'test refusal never rolls back a successful import');
+        assert.equal(f.capabilities.broker.approvals.list().filter(row=>row.request.capability==='test.run').length,0);
+      }
+    } finally {await f.close();}
+  }
+  const f=await coreFixture({calls:[structuredCall('managed-import','workspace.apply',{changes:[{action:'write',path:'math.mjs',expectedHash:sha(original),content:repaired,hash:sha(repaired)}]})]});
+  try {
+    let pending=await f.coordinator.run(f.options),decisions=0;
+    while(pending.status==='pending'){await f.decide(pending);decisions++;pending=f.lastResume;}
+    assert.equal(decisions,2,'Managed import barrier uses exactly import approval and one independent test approval');assert.equal(f.starts(),1);
+    assert.ok(f.tasks.get({id:f.task.id}).task.executionEvidence.some(row=>row.source==='core-test'&&row.postWriteVerification.writes[0].capability==='workspace.apply'));
+  } finally {await f.close();}
+  const restart=await coreFixture({provider:'fixture-native'});let cold;
+  try {
+    const request={taskId:restart.task.id,workspaceId:restart.workspace.id,provider:'fixture-native',sessionId:'verification-session',runId:'verification-run',phase:'user',requestId:'retained-import',
+      changes:[{action:'write',path:'math.mjs',expectedHash:sha(original),content:repaired,hash:sha(repaired)}]};
+    const imported=await restart.capabilities.applyAgentWorkspaceChanges(request);await restart.decide(imported);
+    const pending=restart.capabilities.broker.approvals.list().find(row=>row.request.capability==='test.run');assert.ok(pending);
+    await assert.rejects(restart.capabilities.applyAgentWorkspaceChanges(request));
+    assert.equal(restart.capabilities.broker.approvals.list().filter(row=>row.request.capability==='test.run').length,1,'duplicate source cannot queue another verification');
+    await restart.capabilities.close();
+    const coldTasks=createTaskRuntime({stateDir:restart.stateDir,resolveWorkspace:id=>restart.workspaceService.describeWorkspace(id)});
+    coldTasks.recoverInterrupted(); // Same startup command used by createTaskService.
+    cold=createCapabilityService({stateDir:restart.stateDir,workspaceService:restart.workspaceService,taskRuntime:coldTasks,
+      isolatedRunner:createIsolatedTestRunner({resolveWorkspace:id=>restart.workspaceService.describeWorkspace(id)})});
+    assert.equal(cold.broker.approvals.list().filter(row=>row.request.capability==='test.run').length,1,'restart retains the exact approval without inventing a new request');
+    await assert.rejects(cold.execute({method:'capability.approval.decide',params:{id:pending.id,approve:true}}),error=>['POST_WRITE_RUN_CHANGED','TASK_NOT_RUNNING','TASK_NOT_AUTHORIZED','AGENT_ASSIGNMENT_EXPIRED'].includes(error.code));
+    assert.equal(restart.starts(),0,'cold interrupted Run cannot execute a retained test');
+    assert.equal(fs.readFileSync(path.join(restart.project,'math.mjs'),'utf8'),repaired);
+  } finally {await cold?.close();await restart.close();}
+  console.log('PASS imported check opt-in/grant/limits, rejected and unknown imports/tests, source/config/run changes, and Managed single-check barrier');
+}
+
+async function mixedImportedVerification() {
+  for(const reload of [false,true]) {
+    const f=await coreFixture({provider:'fixture-native'});let restored;
+    try {
+      const binding={taskId:f.task.id,workspaceId:f.workspace.id,provider:'fixture-native',sessionId:'verification-session',runId:'verification-run',phase:'user'};
+      const requestId='mixed-direct-write',content='export const independent = 1;\n';
+      const direct=await f.capabilities.broker.execute({actor:f.options.actor,taskId:f.task.id,workspaceId:f.workspace.id,requestId,
+        operationId:'tool:'+sha(requestId),capability:'filesystem.write',input:{path:'direct.mjs',content},
+        origin:{targetKind:'agent',phase:'user',sessionId:binding.sessionId,runId:binding.runId}});
+      await f.decide(direct);
+      f.tasks.recordToolOutcome({id:f.task.id,...binding,eventId:'direct-event',capability:'filesystem.write',status:'completed',filePath:'direct.mjs'});
+      // Storage reconstruction only; full cold-start recovery is independently tested above.
+      const tasks=reload?createTaskRuntime({stateDir:f.stateDir,resolveWorkspace:id=>f.workspaceService.describeWorkspace(id)}):f.tasks;
+      if(reload){
+        await f.capabilities.close();
+        // Older completed receipts predate the trusted execution projection.
+        // Their consumed original approval must reconstruct the same identity.
+        const journal=path.join(f.stateDir,'capability','dispatches.json');
+        const retained=JSON.parse(fs.readFileSync(journal,'utf8'));
+        for(const row of Object.values(retained))if(row.requestId===requestId&&row.operationProof)delete row.operationProof.execution;
+        fs.writeFileSync(journal,JSON.stringify(retained));
+        restored=createCapabilityService({stateDir:f.stateDir,workspaceService:f.workspaceService,taskRuntime:tasks,
+          isolatedRunner:createIsolatedTestRunner({resolveWorkspace:id=>f.workspaceService.describeWorkspace(id)})});
+      }
+      const capabilities=restored??f.capabilities;
+      const decide=approvalId=>capabilities.execute({method:'capability.approval.decide',params:{id:approvalId,approve:true}});
+      const imported=await capabilities.applyAgentWorkspaceChanges({...binding,requestId:'mixed-import',changes:[{action:'write',path:'math.mjs',expectedHash:sha(original),content:repaired,hash:sha(repaired)}]});
+      await decide(imported.approvalId);
+      const checks=capabilities.broker.approvals.list().filter(row=>row.request.capability==='test.run');
+      assert.equal(checks.length,1,'mixed direct/native import must reconstruct cumulative real Broker proof after reload='+reload);
+      assert.deepEqual(checks[0].request.origin.postWriteVerification.writes.map(row=>row.path).sort(),['direct.mjs','math.mjs']);
+      const directBinding=checks[0].request.origin.postWriteVerification.writes.find(row=>row.path==='direct.mjs');
+      assert.equal(directBinding.requestId,requestId);assert.equal(directBinding.sha256,sha(content));
+      await decide(checks[0].id);assert.equal(f.starts(),1);
+      const evidence=tasks.get({id:f.task.id}).task.executionEvidence.findLast(row=>row.source==='core-test');assert.equal(evidence.exitCode,0);
+    } finally {await restored?.close();await f.close();}
+  }
+  console.log('PASS mixed direct write/native import retains real completed cumulative Broker provenance across storage reload');
+}
+
+async function expiredImportedVerification() {
+  const f=await coreFixture({provider:'fixture-native',settings:{...config,maxRunsPerTurn:1}}),realNow=Date.now;
+  try {
+    const binding={taskId:f.task.id,workspaceId:f.workspace.id,provider:'fixture-native',sessionId:'verification-session',runId:'verification-run',phase:'user'};
+    const imported=await f.capabilities.applyAgentWorkspaceChanges({...binding,requestId:'expiry-import',changes:[{action:'write',path:'math.mjs',expectedHash:sha(original),content:repaired,hash:sha(repaired)}]});
+    await f.decide(imported);
+    const old=f.capabilities.broker.approvals.list().find(row=>row.request.capability==='test.run');assert.ok(old);
+    Date.now=()=>old.expiresAt+1;
+    const ui=createDesktopUiService({services:{workspaceService:f.workspaceService,taskService:{runtime:f.tasks},capabilityService:f.capabilities}});
+    const read=()=>ui.execute({method:'ui.workspace.verification.get',params:{id:f.workspace.id}});
+    const view=await read();assert.equal(f.capabilities.broker.approvals.list().length,0);
+    assert.equal(view.checks[0].state,'not-run','expired Approval-owner row cannot remain actionable pending');
+    assert.equal(view.checks[0].code,'APPROVAL_EXPIRED');assert.equal(view.checks[0].canRetry,true);assert.equal(f.starts(),0);
+    const retry=()=>ui.execute({method:'ui.workspace.verification.retry',params:{id:f.workspace.id,taskId:f.task.id,approvalId:old.id}});
+    const [first,duplicate]=await Promise.all([retry(),retry()]);
+    assert.equal(first.status,'pending');assert.equal(duplicate.approvalId,first.approvalId);assert.notEqual(first.approvalId,old.id);
+    assert.equal(f.capabilities.broker.approvals.get(old.id).fingerprint,old.fingerprint,'old expired row remains unchanged');
+    assert.equal(f.capabilities.broker.approvals.list().length,1);assert.equal(f.starts(),0,'explicit renewal requests a fresh approval only');
+    assert.equal((await read()).checks[0].approvalId,first.approvalId);
+    await assert.rejects(f.decide({approvalId:old.id}),{code:'APPROVAL_EXPIRED'});
+    await f.decide({approvalId:first.approvalId});assert.equal(f.starts(),1,'expired reservation did not consume the single allowed actual check');
+    await assert.rejects(retry(),{code:'POST_WRITE_RETRY_NOT_AVAILABLE'});
+    assert.equal((await read()).checks[0].state,'passed');
+    console.log('PASS Approval-owner expiry, explicit fresh approval recovery, double-click dedup and single-run budget');
+  } finally {Date.now=realNow;await f.close();}
+}
+
+async function importedRetryRefusals() {
+  for(const scenario of ['live','rejected','config','source','grant','cancelled','unknown']) {
+    const f=await coreFixture({provider:'fixture-native',loseTestReceipt:scenario==='unknown'}),realNow=Date.now;
+    try {
+      const binding={taskId:f.task.id,workspaceId:f.workspace.id,provider:'fixture-native',sessionId:'verification-session',runId:'verification-run',phase:'user'};
+      const imported=await f.capabilities.applyAgentWorkspaceChanges({...binding,requestId:'retry-refusal-'+scenario,
+        changes:[{action:'write',path:'math.mjs',expectedHash:sha(original),content:repaired,hash:sha(repaired)}]});
+      await f.decide(imported);const approval=f.capabilities.broker.approvals.list().find(row=>row.request.capability==='test.run');assert.ok(approval);
+      const ui=createDesktopUiService({services:{workspaceService:f.workspaceService,taskService:{runtime:f.tasks},capabilityService:f.capabilities}});
+      if(scenario==='rejected')await f.decide({approvalId:approval.id},false);
+      if(scenario==='unknown')await assert.rejects(f.decide({approvalId:approval.id}),{code:'R02_TEST_RECEIPT_LOST'});
+      if(scenario!=='live')Date.now=()=>approval.expiresAt+1;
+      if(scenario==='config')await f.workspaceService.execute({method:'workspace.settings',params:{id:f.workspace.id,patch:{postWriteVerification:{...config,timeoutMs:31000}}}});
+      if(scenario==='source')fs.appendFileSync(path.join(f.project,'math.mjs'),'// changed after approval\n');
+      if(scenario==='grant')f.capabilities.grantTask(f.task.id,{capabilities:['filesystem.read','filesystem.write']});
+      if(scenario==='cancelled')f.tasks.observeExecution({id:f.task.id,...binding,state:'cancelled'});
+      const codes={live:'POST_WRITE_RETRY_NOT_AVAILABLE',rejected:'POST_WRITE_RETRY_NOT_AVAILABLE',unknown:'POST_WRITE_RETRY_NOT_AVAILABLE',config:'POST_WRITE_CONFIG_CHANGED',source:'POST_WRITE_SOURCE_CHANGED',grant:'PERMISSION_DENIED',cancelled:'POST_WRITE_RUN_CHANGED'};
+      await assert.rejects(ui.execute({method:'ui.workspace.verification.retry',params:{id:f.workspace.id,taskId:f.task.id,approvalId:approval.id}}),{code:codes[scenario]});
+      assert.equal(f.starts(),scenario==='unknown'?1:0);
+      assert.equal(f.capabilities.broker.approvals.get(approval.id).fingerprint,approval.fingerprint);
+    } finally {Date.now=realNow;await f.close();}
+  }
+  console.log('PASS explicit imported-check retry refuses live, rejected, consumed unknown, changed config/source/grant/Run');
+}
+
+await expiredImportedVerification();
+await importedRetryRefusals();
+await mixedImportedVerification();
+await verificationOwnerSurface();
+await importedVerification();
+await importedNegatives();
 ownerConfiguration();
 await cumulativeIgnoredPostimages();
 await sourceProofWithoutAcceptance();

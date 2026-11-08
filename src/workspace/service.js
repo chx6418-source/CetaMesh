@@ -294,7 +294,7 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     },
 
     'workspace.settings': async (p) => {
-      const entry = registry.updateSettings(String(p?.id ?? ''), p?.patch);
+      const entry = registry.updateSettings(String(p?.id ?? ''), p?.patch, {expectedPostWriteConfigDigest:p?.expectedPostWriteConfigDigest});
       record(entry, 'user', 'settings', JSON.stringify(p?.patch ?? {}).slice(0, 200));
       return { workspace: await workspaceSummary(entry) };
     },

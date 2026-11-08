@@ -15,15 +15,31 @@ export function normalizePostWriteVerificationBinding(value) {
     || Object.keys(value).some(key => !['configDigest', 'sourceDigest', 'sourceWriteIds', 'writes'].includes(key))
     || !Array.isArray(value.sourceWriteIds) || value.sourceWriteIds.length < 1 || value.sourceWriteIds.length > 24
     || value.sourceWriteIds.some(id => !identifier(id)) || new Set(value.sourceWriteIds).size !== value.sourceWriteIds.length
-    || !Array.isArray(value.writes) || value.writes.length !== value.sourceWriteIds.length
-    || value.writes.some((row, index) => !row || !identifier(row.eventId) || !identifier(row.requestId) || row.eventId !== value.sourceWriteIds[index]
-      || !digest(row.sha256) || typeof row.path !== 'string' || row.path.length > 1024
+    || !Array.isArray(value.writes) || value.writes.length < 1 || value.writes.length > 24
+    || value.sourceWriteIds.some(id => !value.writes.some(row => row?.eventId === id))
+    || value.writes.some(row => !row || !identifier(row.eventId) || !identifier(row.requestId) || !value.sourceWriteIds.includes(row.eventId)
+      || (row.capability === 'workspace.apply' ? !identifier(row.operationId) || !['write','delete'].includes(row.action)
+        || (row.action === 'delete' ? row.sha256 !== null : !digest(row.sha256)) : row.capability !== undefined || !digest(row.sha256))
+      || typeof row.path !== 'string' || row.path.length > 1024
       || row.path.split(/[\\/]/).some(part => !part || part === '.' || part === '..') || /^[\\/]|:/.test(row.path)
-      || Object.keys(row).some(key => !['eventId', 'requestId', 'path', 'sha256'].includes(key)))) {
+      || Object.keys(row).some(key => !['eventId', 'requestId', 'path', 'sha256', 'capability', 'operationId', 'action'].includes(key)))
+    || new Set(value.writes.map(row => process.platform === 'win32' ? row.path.toLowerCase().replaceAll('\\','/') : row.path.replaceAll('\\','/'))).size !== value.writes.length) {
     throw Object.assign(new Error('A bounded current Core write receipt is required'), { code: 'POST_WRITE_BINDING_INVALID' });
   }
   return { configDigest: value.configDigest, sourceDigest: value.sourceDigest, sourceWriteIds: [...value.sourceWriteIds],
-    writes: value.writes.map(row => ({ eventId: row.eventId, requestId: row.requestId, path: row.path, sha256: row.sha256 })) };
+    writes: value.writes.map(row => ({ eventId: row.eventId, requestId: row.requestId, path: row.path, sha256: row.sha256,
+      ...(row.capability === 'workspace.apply' ? {capability:row.capability,operationId:row.operationId,action:row.action} : {}) })) };
+}
+
+/** Import rows are derived from the Task's actual Core receipt, never model input. */
+export function postWriteSourceRows(row) {
+  if (row?.status !== 'completed') return [];
+  if (row.capability === 'filesystem.write' && typeof row.filePath === 'string') return [{eventId:row.eventId,path:row.filePath}];
+  if (row.capability !== 'workspace.apply' || row.source !== 'core-import' || typeof row.operationId !== 'string'
+    || !row.eventId?.startsWith('core-import:') || !Array.isArray(row.changes)
+    || crypto.createHash('sha256').update(JSON.stringify(row.changes)).digest('hex') !== row.resultSha256) return [];
+  return row.changes.map(change => ({eventId:row.eventId,requestId:row.eventId.slice(12),path:change.path,sha256:change.sha256,
+    capability:'workspace.apply',operationId:row.operationId,action:change.action}));
 }
 
 /** Interpret retained old per-check and new cumulative Core receipts together. */
@@ -41,8 +57,10 @@ export function currentPostWriteVerificationImages(task, { throughIndex = task.e
     const binding = normalizePostWriteVerificationBinding(row.postWriteVerification);
     for (const write of binding.writes) {
       const key = pathKey(write.path);
-      const sourceIndex = evidence.findIndex(source => source.eventId === write.eventId && source.capability === 'filesystem.write'
-        && source.status === 'completed' && current(source) && typeof source.filePath === 'string' && pathKey(source.filePath) === key);
+      const sourceIndex = evidence.findIndex(source => current(source) && postWriteSourceRows(source).some(candidate =>
+        candidate.eventId === write.eventId && pathKey(candidate.path) === key && (write.capability === 'workspace.apply'
+          ? candidate.capability === write.capability && candidate.operationId === write.operationId && candidate.requestId === write.requestId
+            && candidate.action === write.action && candidate.sha256 === write.sha256 : candidate.capability === undefined)));
       if (sourceIndex < 0 || sourceIndex >= index) invalid();
       const previous = images.get(key);
       if (!previous || sourceIndex > previous.sourceIndex) images.set(key, { write, sourceIndex });
@@ -54,18 +72,33 @@ export function currentPostWriteVerificationImages(task, { throughIndex = task.e
     const required = new Map();
     for (let index = 0; index <= throughIndex; index++) {
       const row = evidence[index];
-      if (row?.capability !== 'filesystem.write' || row.status !== 'completed' || !current(row) || typeof row.filePath !== 'string') continue;
-      const key = pathKey(row.filePath);
-      if (images.has(key) || includeExtensions.some(ext => row.filePath.toLowerCase().endsWith(ext))) required.set(key, index);
+      if (!current(row)) continue;
+      for (const source of postWriteSourceRows(row)) {
+        const key = pathKey(source.path);
+        if (images.has(key) || includeExtensions.some(ext => source.path.toLowerCase().endsWith(ext))) required.set(key, index);
+      }
     }
     if (required.size > 24 || [...required].some(([key, index]) => images.get(key)?.sourceIndex !== index)) invalid();
   }
   return [...images.values()].map(row => row.write);
 }
 
-function currentPostWriteImage(write, workspaceRoot) {
+export function currentPostWriteImage(write, workspaceRoot) {
   let handle;
   try {
+    if (write.capability === 'workspace.apply' && write.action === 'delete') {
+      // Resolve parent containment even for missing leaves; dangling links are not absence.
+      const root = fs.realpathSync.native(workspaceRoot);
+      if (fs.lstatSync(workspaceRoot).isSymbolicLink()) return false;
+      let cursor = root;
+      for (const part of write.path.replaceAll('\\','/').split('/')) {
+        if (!part || part === '.' || part === '..' || part.includes(':')) return false;
+        cursor = path.join(cursor,part);
+        try { const stat = fs.lstatSync(cursor); if (stat.isSymbolicLink() || !stat.isDirectory() && cursor !== path.resolve(root,write.path)) return false; }
+        catch (error) { return error.code === 'ENOENT'; }
+      }
+      return false;
+    }
     const resolve = () => resolveTaskArtifactOpen({ artifact: { ref: write.path }, workspaceRoot, forPreview: true }).canonicalPath;
     const file = resolve();
     if (path.relative(path.resolve(workspaceRoot, write.path), file)) return false;

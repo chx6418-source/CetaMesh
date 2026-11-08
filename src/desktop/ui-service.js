@@ -20,6 +20,7 @@ import { chatConfigurationObservations } from './chat-configuration.js';
 import { safeModelIdentifier } from '../model/model-discovery.js';
 import { normalizeSkillReferences } from '../context/skill-references.js';
 import { normalizeExperience } from '../memory/experience.js';
+import { redactText } from '../logging/redact.js';
 
 // Narrow, renderer-safe DTO adapter for the privileged Desktop WebView.
 // Business state stays in existing Core services; this module owns no persistent data.
@@ -273,6 +274,9 @@ function projectTask(value) {
     return { eventId: string(evidence.eventId, 240), capability: string(evidence.capability, 100),
       status: string(evidence.status, 40), tool: string(evidence.tool, 100) || null,
       exitCode: Number.isSafeInteger(evidence.exitCode) ? evidence.exitCode : null,
+      ...(evidence.postWriteVerification||evidence.verificationStatus?{verification:{state:evidence.verificationStatus?.state??(evidence.exitCode===0&&evidence.diagnostics?.timedOut!==true?'passed':'failed'),
+        code:string(evidence.verificationStatus?.code,100),runId:string(evidence.runId,240),operationId:string(evidence.operationId,160),
+        stdout:redactText(string(evidence.diagnostics?.stdout,4000)),stderr:redactText(string(evidence.diagnostics?.stderr,4000))}}:{}),
       filePath: string(evidence.filePath, 500) || null, taskRev: Number.isSafeInteger(evidence.taskRev) ? evidence.taskRev : null,
       at: scalar(evidence.at) };
   }) : [];
@@ -939,6 +943,46 @@ export function createDesktopUiService({ services = {}, system = services.system
   const onboarding = (method, params) => call(system.onboarding, method, params);
   const capability = (method, params) => call(services.capabilityService, method, params, true);
   const workspace = (method, params) => call(services.workspaceService, method, params);
+  function workspaceVerification(id) {
+    const snapshot = services.workspaceService.readPostWriteVerificationConfig({workspaceId:id});
+    const {configDigest,...config} = snapshot??{};
+    const rows = services.taskService?.runtime.list({workspaceId:id,limit:20}).tasks??[];
+    const checks = rows.filter(row=>row.workspaceId===id).flatMap(row=>(row.executionEvidence??[])
+      .filter(evidence=>evidence.postWriteVerification||evidence.verificationStatus).slice(-8).reverse().map(evidence=>({
+        taskId:row.id,eventId:string(evidence.eventId,240),runId:string(evidence.runId,240),provider:string(evidence.provider,80),
+        state:evidence.verificationStatus?.state??(evidence.exitCode===0&&evidence.diagnostics?.timedOut!==true?'passed':'failed'),
+        code:string(evidence.verificationStatus?.code,100),approvalId:evidence.verificationStatus?.approvalId??null,
+        operationId:string(evidence.operationId,160)||null,exitCode:Number.isSafeInteger(evidence.exitCode)?evidence.exitCode:null,
+        diagnostics:evidence.diagnostics?{stdout:redactText(string(evidence.diagnostics.stdout,4000)),stderr:redactText(string(evidence.diagnostics.stderr,4000))}:null,
+        at:evidence.at,currentRun:evidence.runId===row.executionObservation?.runId&&evidence.sessionId===row.currentAgent?.sessionId
+      }))).sort((a,b)=>(b.at??0)-(a.at??0)).slice(0,20);
+    const pendingApprovals=services.capabilityService?.broker.approvals.list()??[];
+    for (const approval of pendingApprovals) {
+      const request=approval.request;
+      if (request.workspaceId!==id||!request.origin?.postWriteVerification) continue;
+      if (!checks.some(row=>row.approvalId===approval.id)) checks.unshift({taskId:request.taskId,eventId:request.requestId,runId:request.origin.runId,
+        provider:request.actor.assignment?.provider,state:'pending',code:'',approvalId:approval.id,operationId:request.operationId,exitCode:null,diagnostics:null,at:approval.createdAt,currentRun:true});
+    }
+    const seen=new Set(),currentChecks=[];
+    for(const check of checks) {
+      const key=check.taskId+':'+(check.operationId??check.eventId);if(seen.has(key))continue;seen.add(key);
+      if(check.state==='pending') {
+        const operation=services.capabilityService?.broker.operationRecordForTask({taskId:check.taskId,workspaceId:id,operationId:check.operationId});
+        if(operation?.status==='started')check.state='running';
+        else if(['outcome-unknown','reconciled'].includes(operation?.status))check.state='unknown';
+        else if(check.approvalId) {
+          try {const approval=services.capabilityService.broker.approvals.get(check.approvalId);
+            if(approval.status==='pending'&&!pendingApprovals.some(row=>row.id===approval.id)) {
+              check.state='not-run';check.code='APPROVAL_EXPIRED';
+              check.canRetry=services.capabilityService.importedVerificationRetryAvailable({taskId:check.taskId,workspaceId:id,approvalId:approval.id});
+            } else if(approval.status!=='pending'){check.state=approval.status==='consumed'?'unknown':'not-run';check.code='APPROVAL_'+approval.status.toUpperCase();}}
+          catch{check.state='unknown';check.code='APPROVAL_EVIDENCE_UNAVAILABLE';}
+        }
+      }
+      currentChecks.push(check);
+    }
+    return {config:snapshot?config:null,configDigest:configDigest??null,checks:currentChecks.slice(0,20)};
+  }
   const skillSourceSnapshot = () => {
     const current = services.settingsService?.store.get();
     if (!current) throw uiError('SERVICE_UNAVAILABLE', 'Skill source settings are unavailable');
@@ -1730,6 +1774,21 @@ export function createDesktopUiService({ services = {}, system = services.system
     'ui.workspace.list': async () => {
       const result = await workspace('workspace.list', {});
       return { workspaces: (result.workspaces ?? []).map(projectWorkspace), activeId: string(result.activeId, 128) || null };
+    },
+    'ui.workspace.verification.get': async p => workspaceVerification(idParam(p)),
+    'ui.workspace.verification.retry': async p => {
+      const workspaceId=idParam(p),taskId=boundedText(p.taskId,'taskId',128),approvalId=boundedText(p.approvalId,'approvalId',240);
+      const result=await services.capabilityService.retryImportedVerification({workspaceId,taskId,approvalId});
+      emit('approval.pending',{approvalId:result.approvalId,taskId,workspaceId});
+      return selected(result,['status','approvalId','expiresAt','requestId']);
+    },
+    'ui.workspace.verification.update': async p => {
+      const id=idParam(p);
+      if (!Object.hasOwn(p,'config')||!Object.hasOwn(p,'expectedConfigDigest')
+        || p.expectedConfigDigest!==null&&!/^[a-f0-9]{64}$/.test(p.expectedConfigDigest??'')) throw uiError('INVALID_PARAMS','Exact current verifier configuration is required');
+      await workspace('workspace.settings',{id,patch:{postWriteVerification:p.config},expectedPostWriteConfigDigest:p.expectedConfigDigest});
+      emit('workspace.updated',{workspaceId:id,status:'verification-configured'});
+      return workspaceVerification(id);
     },
     'ui.workspace.open': async p => {
       const result = await workspace('workspace.open', { id: idParam(p) });

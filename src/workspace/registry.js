@@ -9,7 +9,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { atomicWriteConfig, readRawConfig } from '../config/loader.js';
 import { assertSafeRootForm, canonicalizeRoot } from './boundary.js';
-import { normalizePostWriteVerification } from '../model/post-write-verification.js';
+import { normalizePostWriteVerification, postWriteVerificationSnapshot } from '../model/post-write-verification.js';
 
 const SCHEMA_VERSION = 1;
 const ACTIVITY_LIMIT = 100;
@@ -219,9 +219,13 @@ export function createWorkspaceRegistry({ file, now = () => Date.now() } = {}) {
       return state.activeId;
     },
 
-    updateSettings(id, patch) {
+    updateSettings(id, patch, {expectedPostWriteConfigDigest} = {}) {
       const entry = requireEntry(id);
       const patchObject = patch && typeof patch === 'object' && !Array.isArray(patch) ? patch : {};
+      if (expectedPostWriteConfigDigest !== undefined
+        && expectedPostWriteConfigDigest !== (postWriteVerificationSnapshot(entry.settings.postWriteVerification)?.configDigest??null)) {
+        fail('POST_WRITE_CONFIG_CONFLICT','Verifier settings changed; reload the current configuration before saving');
+      }
       // Validate before mutating any settings; saving is never execution consent.
       const postWriteVerification = patchObject.postWriteVerification === undefined ? undefined
         : normalizePostWriteVerification(patchObject.postWriteVerification);

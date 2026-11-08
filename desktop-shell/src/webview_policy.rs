@@ -54,6 +54,8 @@ const UI_METHODS: &[&str] = &[
     "ui.developer.forge.invoke",
     "ui.chat.attachment.import",
     "ui.workspace.version", "ui.workspace.list", "ui.workspace.open", "ui.workspace.create",
+    "ui.workspace.verification.get", "ui.workspace.verification.update",
+    "ui.workspace.verification.retry",
     "ui.workspace.git.status.page", "ui.workspace.git.history", "ui.workspace.git.branches",
     "ui.workspace.git.commit.detail", "ui.workspace.git.preview", "ui.workspace.git.review",
     "ui.memory.overview", "ui.memory.get", "ui.memory.create", "ui.memory.update", "ui.memory.pin", "ui.memory.delete",
