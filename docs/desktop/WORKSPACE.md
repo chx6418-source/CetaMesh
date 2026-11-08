@@ -227,6 +227,65 @@ Registered regressions include `test-owner-session-recovery`,
 `test-chat-failure-feedback-ui`. Controlled fault tests, rendered component tests
 and actual native/model acceptance are separate evidence.
 
+## Protected raw file sets
+
+Branch switching prepares converted target bytes and an index in an owned
+temporary directory. Git never checks out directly over live Workspace files.
+The existing Workspace transaction owner publishes at most 100 exact regular
+file changes, with 10 MiB per file and 64 MiB per original or target set. On
+Windows, the existing Desktop executable provides a fixed headless primitive:
+exclusive file handles protect the raw SHA-256 preimage check, backup, write or
+delete, flush and readback. Handle-relative child opens and directory leases
+reject reparse points, hard links, active writers and writable mappings. An
+unavailable host is a known pre-execution refusal, not an unknown execution.
+
+The transient, root-partitioned journal uses an explicit schema version 2 for
+`protected-raw-byte-set-v1`. Workspace registration, Task storage and legacy
+text-import journals retain their existing schemas. Older transaction readers
+refuse the new journal and preserve its preimages; they must not roll it back or
+delete it as a completed version-1 import. A downgrade with a pending raw journal
+therefore requires finishing that operation with a compatible Core first.
+
+A native terminal receipt is bounded at 256 KiB by both producer and reader and
+binds the exact request digest, opaque owner facts,
+file hashes and native node identities. It proves only the file phase; normal
+index replacement and the physical worktree HEAD CAS remain separate existing
+Git phases. Missing or partial receipts retain the original journal and block
+replay. After restart, the Workspace owner can read a completed receipt, verify
+its original backups and current raw postimages, and expose it for a fresh Git
+approval to finish only missing phases. It does not reconstruct an execution
+stack or repeat file writes. A changed manifest generation, receipt or user file
+refuses that continuation and preserves evidence.
+
+Known completion may carry `cleanupPending`. Retiring a journal first requires
+its original directory identity and a successful rename, which a live native
+directory lease prevents. Before deleting its artifacts, Core flushes a bounded
+`retirement-<nonce>.json` containing the terminal v2 manifest in the same journal.
+Preparation uses a bounded `retirement-pending.json` inside the verified retired
+directory, followed by atomic create-new hardlink publication after write and
+fsync, then pending-name removal. Existing destination evidence is never
+replaced. A crash between publication and pending removal permits only the exact
+same-node two-link pair under the verified directory and terminal proof; extra
+links or a mismatched peer remain refused. Other journal artifacts and source
+files retain their existing hardlink restrictions. Interrupted
+preparation leaves the terminal manifest authoritative; pending bytes grant no
+cleanup authority. A corrupt published record remains refused.
+This cleanup-only record binds the root, request digest and directory node; it
+is removed last, after the retired directory is gone. The record and directory
+represent one pending cleanup, including when the final directory removal or
+record unlink fails. Missing, corrupt or mismatched evidence remains refused.
+Completed private cleanup can resume after restart without restoring files or
+overwriting later user work, and cannot authorize Git adoption. These boundaries do not
+make files, index and HEAD one atomic transaction and do not promise power-loss
+durability. Capability authorization and unknown-effect protections still apply.
+
+Registered native regressions include `test-workspace-native-byte-transaction`,
+`test-workspace-byte-recovery`, `test-git-branch-byte-preservation`,
+`test-git-branch-file-race` and `test-git-branch-conversion`. The root test runner
+requires an explicit trusted `CETAMESH_TEST_WORKSPACE_NATIVE` test-host path;
+absence is `NOT_RUN_ENVIRONMENT`. A fixture override is not a renderer or model
+parameter and does not imply native product or release acceptance.
+
 ## Projections, compatibility and maintenance
 
 UI status is derived from real recovery/Git state; timestamps identify whether

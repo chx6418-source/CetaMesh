@@ -549,7 +549,12 @@ export async function fileSearchAsync(rootReal, { query = '', glob = '', searchP
 
 // ── Git（只读直接执行；commit 由 service 层按策略审批后调用） ────────────────
 
-export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile, literalPaths = false, signal, input, repository, referenceBackend } = {}) {
+export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile, literalPaths = false, signal, input, repository, referenceBackend,
+  binaryOutput = false, maxOutputBytes = GIT_MAX_BUFFER } = {}) {
+  if (typeof binaryOutput !== 'boolean' || !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1
+    || maxOutputBytes > (binaryOutput ? 10 * 1024 * 1024 : GIT_MAX_BUFFER)) {
+    fail('GIT_OUTPUT_INVALID', 'Git output mode and byte bound must be explicit trusted Core options');
+  }
   if (input !== undefined && (typeof input !== 'string' || Buffer.byteLength(input, 'utf8') > 64 * 1024)) {
     fail('GIT_INPUT_INVALID', 'Git stdin must be a bounded literal string');
   }
@@ -605,7 +610,8 @@ export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile,
         cwd,
         windowsHide: true,
         timeout: timeoutMs,
-        maxBuffer: GIT_MAX_BUFFER,
+        maxBuffer: maxOutputBytes,
+        encoding: binaryOutput ? null : 'utf8',
         signal,
         env
       },
@@ -617,7 +623,7 @@ export async function gitRun(cwd, args, { timeoutMs = GIT_TIMEOUT_MS, indexFile,
           reject(failure);
           return;
         }
-        resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
+        resolve({ stdout: binaryOutput ? stdout ?? Buffer.alloc(0) : String(stdout ?? ''), stderr: String(stderr ?? '') });
       }
     );
     if (input !== undefined) {

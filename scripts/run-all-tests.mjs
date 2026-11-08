@@ -39,6 +39,9 @@ export const CATEGORIES = ['core', 'architecture', 'security', 'runtime', 'integ
 // ── 登记表：scripts/test-*.mjs 的每一个文件都必须出现在这里（或能从 package.json 映射）。
 // requires 的取值见 probeAvailability()；category 取值见 CATEGORIES。
 const REGISTRY = {
+  'test-git-binary-output.mjs': { category: 'security', timeoutMs: 60000, note: 'Native Git bounded raw stdout preserves arbitrary blob bytes and drains overflow without changing source objects' },
+  'test-workspace-native-byte-transaction.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 180000, note: 'Existing Workspace owner with actual protected Windows byte writes, v2 journal, old-reader refusal and exact native receipts' },
+  'test-workspace-byte-recovery.mjs': { category: 'security', requires: ['workspace-native'], timeoutMs: 180000, note: 'Cold read-only adoption of terminal native file receipts, stale evidence refusal and completed private cleanup without replay' },
   'test-chat-history-context.mjs': { category: 'integration', timeoutMs: 180000, note: 'Existing Chat private history owner, atomic transcript checkpoints and source-bound coordinator retrieval without account generation' },
   'test-chat-history-product.mjs': { category: 'integration', timeoutMs: 180000, note: 'Ordinary composed Core Chat, real loopback model wire, source Broker read, file receipt and restart without replay' },
   'test-managed-configuration-observation.mjs': { category: 'integration', timeoutMs: 180000, note: 'Actual Managed loopback wire model/effort through approval continuation, Agent Follow, persisted Chat observations and restart' },
@@ -503,6 +506,7 @@ async function probeAvailability() {
     'reference-browser-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_REFERENCE_BROWSER === '1',
     'dsh-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_REAL_DSH === '1',
     'dsh-sdk-synthetic': Boolean(process.env.CETAMESH_TEST_DSH_RUNTIME && process.env.CETAMESH_TEST_DSH_SUPERVISOR),
+    'workspace-native': process.platform === 'win32' && path.isAbsolute(process.env.CETAMESH_TEST_WORKSPACE_NATIVE ?? '') && fs.existsSync(process.env.CETAMESH_TEST_WORKSPACE_NATIVE),
     'ui-motion-live': process.platform === 'win32' && process.env.WHALEBRIDGE_TEST_UI_MOTION === '1',
     gateway: gatewayConfigPresent && !!gatewayEndpoint && await probeTcp(Number(gatewayEndpoint.port)||(gatewayEndpoint.protocol==='https:'?443:80),gatewayEndpoint.hostname),
     // A live TCP listener may be the user’s real desktop bridge; this suite mutates roles/allowlists and sends a test QQ message.
