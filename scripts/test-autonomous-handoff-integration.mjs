@@ -147,11 +147,18 @@ async function scenario(machineContract,coldNative=false,control='approve',longC
   fs.rmSync(root,{recursive:true,force:true,maxRetries:5,retryDelay:100});
  }
 }
-await scenario(false);
-await scenario(true);
-await scenario(true,false,'approve',true);
-await scenario(true,true);
-await scenario(true,true,'unconfirmed-stop');
-await scenario(true,true,'reject');
-await scenario(true,true,'revoke');
-await scenario(true,true,'revoke-bootstrap');
+const cases=[
+ ['uncontracted report',[false]],
+ ['machine verification',[true]],
+ ['compacted verification',[true,false,'approve',true]],
+ ['cold native preparation',[true,true]],
+ ['unconfirmed native stop',[true,true,'unconfirmed-stop']],
+ ['rejected native preparation',[true,true,'reject']],
+ ['revoked native preparation',[true,true,'revoke']],
+ ['revoked bootstrap',[true,true,'revoke-bootstrap']],
+];
+for(const [name,args] of cases){
+ const started=performance.now();console.log('START handoff case: '+name);
+ await scenario(...args);
+ console.log('PASS handoff case: '+name+' ('+Math.round(performance.now()-started)+' ms)');
+}

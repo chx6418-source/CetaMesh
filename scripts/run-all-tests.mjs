@@ -196,7 +196,9 @@ const REGISTRY = {
   'test-real-managed-stability.mjs': { category: 'environment', requires: ['real-managed'], timeoutMs: 2400000, note: 'Ten consecutive real Managed Tasks with scoped approvals, current Core tests, Owner verification and persisted restart state; API acceptance' },
   'test-real-readonly-collaboration.mjs': { category: 'environment', requires: ['real-managed'], timeoutMs: 300000, note: 'Real Managed readonly children in parallel with actual scoped reads, Owner verification and denied extra readers/writers; API acceptance' },
   'test-real-agent-recovery.mjs': { category: 'environment', requires: process.env.CETAMESH_TEST_RECOVERY_CODEX_RESTART_ONLY==='1'||process.env.CETAMESH_TEST_RECOVERY_SUBSCRIPTION_PAUSE==='1'?['real-codex']:['real-managed','real-codex'], timeoutMs: 900000, note: 'Real scoped Owner recovery; account-only restart and separately approved linked-budget pause/resume forbid paid Model API' },
-  'test-autonomous-handoff-integration.mjs': { category: 'integration', note: 'Managed Task autonomous handoff through existing Broker and Continuity', timeoutMs: 60000 },
+  // This suite grew from two to eight sequential Core scenarios. Include fixture
+  // setup and cleanup in its aggregate budget; keep each scenario's own limits.
+  'test-autonomous-handoff-integration.mjs': { category: 'integration', note: 'Eight sequential Managed Task handoff scenarios through existing Broker and Continuity', timeoutMs: 240000 },
   'test-autonomous-handoff-late-events.mjs': { category: 'integration', note: 'Actual Core late source/acceptance events, single dispatch, policy/run/session fences and bounded close', timeoutMs: 120000 },
   'test-task-outcome-verification.mjs': { category: 'security', note: 'Task outcomes require observed tool, diff, test and file evidence' },
   'test-tool-outcome-unknown.mjs': { category: 'security', note: 'Uncertain side effects stop automatic tool replay' },
