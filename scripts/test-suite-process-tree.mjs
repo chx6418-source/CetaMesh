@@ -93,7 +93,22 @@ await assert.rejects(taskkillFixture(rootSuccess,goneChild,pid=>pid===childPid?u
 await assert.rejects(taskkillFixture(rootSuccess,goneChild,()=>{throw Object.assign(Error('probe denied'),{code:'EPERM'});}),/could not confirm/,'an inaccessible process is not assumed exited');
 await assert.rejects(taskkillFixture('',goneChild,absent),/could not confirm/,'root disappearance alone cannot prove that its descendants exited');
 await assert.rejects(taskkillFixture(rootSuccess,goneChild.replace('There is no running instance of the task.','Access is denied.'),absent),/could not confirm/,'permission failures remain failures even if the root disappeared');
-console.log('PASS taskkill close race requires affirmative tree termination, rooted parent evidence, exact benign errors and every reported PID confirmed absent');
+const unsupportedPid=9051;
+const unsupportedChild=goneChild.replace('PID 2952','PID '+unsupportedPid).replace('There is no running instance of the task.','The operation attempted is not supported.');
+const mixedSuccess=rootSuccess+childSuccess,mixedErrors=goneGrandchild+unsupportedChild;
+const mixedMembers=[rootPid,childPid,grandchildPid,unsupportedPid],mixedProbes=[];
+await assert.doesNotReject(taskkillFixture(mixedSuccess,mixedErrors,pid=>{mixedProbes.push(pid);return absent();},mixedMembers),
+ 'mixed taskkill missing/unsupported diagnostics require independent absence proof for the complete reported tree');
+assert.deepEqual(mixedProbes.slice().sort(),mixedMembers.slice().sort(),'every reported member, including SUCCESS and unsupported records, is probed');
+for(const livePid of [rootPid,childPid,unsupportedPid])await assert.rejects(taskkillFixture(mixedSuccess,mixedErrors,pid=>pid===livePid?undefined:absent(),mixedMembers),/could not confirm/,'any reported live member keeps the tree unconfirmed');
+await assert.rejects(taskkillFixture(mixedSuccess,mixedErrors,pid=>{if(pid===unsupportedPid)throw Object.assign(Error('probe denied'),{code:'EPERM'});return absent();},mixedMembers),/could not confirm/,'unsupported is not proof of exit when its PID is inaccessible');
+await assert.rejects(taskkillFixture(mixedSuccess,mixedErrors,pid=>{if(pid===unsupportedPid)throw Error('probe failed');return absent();},mixedMembers),/probe failed/,'unexpected native probe failures remain failures');
+await assert.doesNotReject(taskkillFixture(rootSuccess,unsupportedChild,absent,[rootPid,unsupportedPid]),'unsupported alone requires positive root termination and independent absence of both reported members');
+await assert.rejects(taskkillFixture('',unsupportedChild,absent,[rootPid,unsupportedPid]),/could not confirm/,'unsupported alone is not affirmative tree termination evidence');
+await assert.rejects(taskkillFixture(mixedSuccess,mixedErrors+'unknown diagnostic\r\n',absent,mixedMembers),/could not confirm/,'additional diagnostics cannot be hidden by unsupported records');
+await assert.rejects(taskkillFixture(mixedSuccess,mixedErrors.replace('There is no running instance of the task.','Access is denied.'),absent,mixedMembers),/could not confirm/,'permission errors mixed with unsupported remain unconfirmed');
+await assert.rejects(taskkillFixture(rootSuccess,unsupportedChild.replace('child process of PID 7200','child process of PID 9999'),absent,[rootPid,unsupportedPid]),/could not confirm/,'unsupported records still require owned rooted parent evidence');
+console.log('PASS taskkill close race requires affirmative tree termination, rooted parent evidence, exact diagnostics and every reported PID independently confirmed absent');
 
 const tempRoot = path.resolve(process.env.WHALEBRIDGE_TEST_TMPDIR || os.tmpdir());
 const fixtureRoot = fs.mkdtempSync(path.join(tempRoot, 'suite-process-tree-'));
