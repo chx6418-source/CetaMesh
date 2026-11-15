@@ -107,9 +107,32 @@ export function createAcpAgentProvider({descriptor, launch, resolveTaskWorkspace
     })();
     try { await s.stopPromise; } catch (error) { s.stopPromise = null; throw error; }
   }
-  function emit(s,type,turn,data = {}) {
+  function emitNow(s,type,turn,data = {}) {
     const seq = ++s.sequence;
     s.buffer.push({type:'event',seq,timestamp:new Date().toISOString(),source:policy.id,eventId:`${policy.id}:${s.id}:${seq}`,event:{type,data:{turn,taskId:s.taskId,workspaceId:s.workspaceId,attemptId:s.stage?.versionContext?.attemptId??null,runId:s.run?.runId??s.lastRun?.runId??null,phase:s.run?.phase??s.lastRun?.phase??'unknown',...data}}});
+  }
+  function flushText(s) {
+    const pending=s.pendingText;
+    if(!pending)return;
+    s.pendingText=null;clearImmediate(pending.timer);
+    emitNow(s,'assistant/chunk',pending.turn,{chunk:{type:'text-delta',text:pending.text}});
+  }
+  function emit(s,type,turn,data = {}) {
+    if(type==='assistant/chunk'&&data.chunk?.type==='text-delta') {
+      if(s.pendingText?.turn!==turn)flushText(s);
+      if(!s.pendingText) {
+        s.pendingText={turn,text:'',timer:setImmediate(()=>{
+          if(s.closed||s.disconnected){s.pendingText=null;return;}
+          flushText(s);
+        })};
+      }
+      // The existing per-turn text bound also bounds this pending batch. Publish
+      // once per I/O turn so token bursts cannot evict tools or terminal evidence.
+      s.pendingText.text+=data.chunk.text;
+      return;
+    }
+    flushText(s);
+    emitNow(s,type,turn,data);
   }
   function end(s,run,kind,error = null) {
     if (s.run !== run) return;

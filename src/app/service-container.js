@@ -1,4 +1,11 @@
 import {createProviderAuthAdapters} from '../agent/auth/index.js';
+import {readJsonFile} from '../storage/json-file.js';
+import {createReverseLabAnalyzer} from '../reverselab/static-analysis.js';
+import {createLocalEngineService} from '../plugin-center/local-engines.js';
+import {registerAgentOsCapabilities} from '../agentos/capability.js';
+import {registerReverseLabSessions} from '../reverselab/session.js';
+import {registerReverseLabCapability} from '../reverselab/capability.js';
+import {REVERSELAB_ID} from '../reverselab/contracts.js';
 import {createPersonaLibrary} from '../simulation/persona-assets.js';
 import {createSimulationService} from '../simulation/service.js';
 import {createSimulationProjectBridge} from '../simulation/project-bridge.js';
@@ -86,7 +93,8 @@ export function createCetaMeshServices(options = {}) {
   const log = options.log ?? (() => {});
   const uiEventBus = createDesktopUiEventBus();
   const runtimeFailures = createRuntimeFailureRegistry();
-  const settingsService = options.settingsService ?? createSettingsService({ stateDir });
+  const settingsService = options.settingsService ?? createSettingsService({ stateDir,
+    validateCodexTransport:transport=>agentService.validateCodexTransport(transport) });
   const dshDesktop = options.dshDesktop ?? createDshDesktopIntegration({ platform: options.platform ?? process.platform });
 
   const workspaceService = createWorkspaceService({
@@ -111,6 +119,8 @@ export function createCetaMeshServices(options = {}) {
     ownedArtifactRoot: path.join(dataRoot, 'artifacts'),
     resolveWorkspace: workspaceId => workspaceService.describeWorkspace(workspaceId),
     workspacesOverlap: workspaceService.workspacesOverlap,
+    resolveIsolatedChildWorkspace: input => capabilityService?.resolveIsolatedChildWorkspace(input),
+    resolveIsolatedChildResult: input => capabilityService.resolveIsolatedChildResult(input),
     resolvePostWriteVerification: ({ workspaceId, signal }) =>
       workspaceService.resolvePostWriteVerification({ workspaceId, signal }),
     resolveMemory: memoryId => memoryService?.runtime.get({ principal: DESKTOP_USER_PRINCIPAL, id: memoryId }).memory
@@ -167,7 +177,9 @@ export function createCetaMeshServices(options = {}) {
     claudeOptions: { taskOptions: agentTaskOptions, requestNativeApproval: nativeApprovalBridge,
       runtimeConfiguration: options.agentClaudeOptions?.taskOptions?.verifiedRuntime ? undefined : agentRuntimeConfiguration, resourceRoot, ...options.agentClaudeOptions,
       resolveAuthProfile:provider=>runtimeAuthService.taskProfile(provider) },
-    workbuddyOptions: options.agentWorkBuddyOptions, codexRouterOptions: options.agentCodexRouterOptions,
+    workbuddyOptions: options.agentWorkBuddyOptions, codexRouterOptions: {
+      ...(Object.hasOwn(options.agentCodexRouterOptions??{},'rolloutEnabled') ? {} : {
+        selectTransport:()=>settingsService.store.get().settings.agents.codexTransport??'exec'}),...options.agentCodexRouterOptions},
     desktopStatus: () => dshDesktop.status() });
   const agentBroker = agentService.broker;
 
@@ -542,8 +554,19 @@ export function createCetaMeshServices(options = {}) {
   agentBroker.onTurnEnd(payload => continuityService.runtime.observeAgentTurn(payload)
     .catch(error => log('Continuity 回合观察失败：' + String(error?.message ?? error))));
 
+  const reverseLabRoot=path.join(resourceRoot,'plugins','reverselab');
+  let reverseLabLock=null;
+  try{reverseLabLock=readJsonFile(path.join(reverseLabRoot,'engine.lock.json'),{missing:null});}
+  catch(error){log('ReverseLab optional engine lock unavailable: '+String(error.code??'READ_FAILED'));}
+  const reverseLabAnalyzer=createReverseLabAnalyzer({engine:{root:path.join(reverseLabRoot,'engine'),manifestSha256:reverseLabLock?.manifestSha256}});
+  const localEngineService=createLocalEngineService({stateDir,capabilityService,taskRuntime:taskService.runtime});
+  localEngineService.attach('agentos',registerAgentOsCapabilities({broker:capabilityService.broker,stateDir,engines:localEngineService}));
+  localEngineService.attach('reverselab',registerReverseLabSessions({broker:capabilityService.broker,stateDir,engines:localEngineService,taskRuntime:taskService.runtime}));
   const extensionService = createExtensionService({ stateDir, capabilityBroker: capabilityService.broker,
-    isTrustedVmExtension: options.isTrustedVmExtension });
+    isTrustedVmExtension: options.isTrustedVmExtension,staticAnalysisHealth:()=>reverseLabAnalyzer.health(),
+    stopCapabilities:id=>id===REVERSELAB_ID?reverseLabAnalyzer.stop():null });
+  registerReverseLabCapability({broker:capabilityService.broker,workspaceService,taskRuntime:taskService.runtime,
+    analyzer:reverseLabAnalyzer,extensionRuntime:extensionService.runtime});
   const meshService = createMeshService({ stateDir, settingsStore: settingsService.store, autoRestore:false,
     isEnabled: () => settingsService.store.get().settings.devices.meshEnabled === true });
   const channelService = createChannelService({ stateDir, dataRoot, config, broker: capabilityService.broker,
@@ -689,6 +712,7 @@ export function createCetaMeshServices(options = {}) {
     allowedHosts: options.pluginCatalogAllowedHosts ?? releaseConfig.config.pluginService.allowedHosts,
     currentVersion: aboutService.about.info().version,
     fetchImpl: options.pluginCenterFetchImpl ?? null,
+    localEngineService,
     extensionRuntime: extensionService.runtime,
     settingsStore: settingsService.store,
     log
@@ -764,7 +788,7 @@ export function createCetaMeshServices(options = {}) {
   const desktopUiService = createDesktopUiService({
     services: {
       chatService, taskService, workshopService, workspaceService, memoryService, capabilityService, agentBroker, continuityService, platformRuntime,
-      agentService, pluginCenterService, integrationService, extensionService, settingsService, systemServices,
+      agentService, pluginCenterService, localEngineService, integrationService, extensionService, settingsService, systemServices,
       toolExecutionCoordinator, usageLedger, modelRuntime,modelConfiguration,forgeService,simulationService,onebotConfiguration,
       skillContentService, skillSourceAuthorizer
     },
@@ -800,6 +824,8 @@ export function createCetaMeshServices(options = {}) {
     continuityService,
     autonomousHandoff,
     extensionService,
+    reverseLabAnalyzer,
+    localEngineService,
     pluginCenterService,
     meshService,
     channelService,

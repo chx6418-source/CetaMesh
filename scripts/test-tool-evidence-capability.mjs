@@ -28,6 +28,17 @@ try {
  const request = (extra = {}) => ({ actor, ...scope, capability: 'context.evidence.read', input: { id: ref.id }, origin: { sessionId: 's1' }, ...extra });
  const result = await service.broker.execute(request());
  assert.equal(result.result.content, 'preserved result');
+ const readEvidence = evidenceStore.read;
+ evidenceStore.read = options => readEvidence({ ...options, authorizeSource: source => {
+   const pendingAuthorization = options.authorizeSource(source);
+   service.grantTask(task.id, { capabilities: ['context.evidence.read'] });
+   return pendingAuthorization;
+ } });
+ try {
+   await assert.rejects(service.broker.execute(request()), { code: 'TOOL_EVIDENCE_DENIED' }, 'revocation during asynchronous source validation prevents evidence release');
+ } finally { evidenceStore.read = readEvidence; }
+ actor = service.grantTask(task.id, { capabilities: ['filesystem.read', 'context.evidence.read'] });
+ assert.equal((await service.broker.execute(request())).result.content, 'preserved result', 'restored source grants recover ordinary evidence retrieval');
  await assert.rejects(service.broker.execute(request({ origin: { sessionId: 'foreign' } })), e => e.code === 'TOOL_EVIDENCE_DENIED');
  await assert.rejects(service.broker.execute(request({ origin: null })), e => e.code === 'TOOL_EVIDENCE_DENIED');
  await assert.rejects(service.broker.execute(request({ actor: { kind: 'extension', id: 'x', grants: actor.grants } })), e => e.code === 'PERMISSION_DENIED');

@@ -163,3 +163,51 @@ store is used. Related logical Task operations retain their original Task scope.
 controlled failures. `test-git-workspace-ui` exercises production Chromium UI and
 the existing approval panel. Neither substitutes for installed WebView2, external
 accounts, arbitrary process-crash or release acceptance.
+
+## Explicit dirty-scope checkpoints
+
+The ordinary Git Workspace provides Owner-explicit checkpoint capture, bounded
+saved-file preview, and exact restore review. `workspace.git.checkpoint.capture`
+writes only a private Workspace-owned StateDir artifact and adds no project-write
+approval. Capture is Owner-only. The `list`, `preview`, `review` and `restore`
+capabilities are separate exact IDs; old Agent grants do not expand, and Extension
+access remains unsupported. Restore always needs once-only approval, including
+Owner requests carrying an approval flag.
+
+A checkpoint contains the complete bounded Git dirty-path set, including rename
+ends, deletions, untracked files and binary bytes, plus the independent normal
+index bytes and saved staged blobs. It is not a project backup: ignored files and
+unchanged files are not copied. Capture rejects sensitive paths, reparse points,
+conflicts, split indexes, unborn repositories and oversized scopes. Bounds are
+100 files, 8000 path characters, 10 MiB per file, 64 MiB of working bytes, 96 MiB
+of combined working/staged content, 32 MiB of index and 132 MiB of serialized
+artifact. At most 20 artifacts are retained; no existing checkpoint is pruned
+automatically. Validation precedes atomic publication, and content-addressed IDs
+plus per-payload hashes detect changed artifacts. List/preview do not hash current
+project files; previews return at most 64000 bytes and identify binary/truncation.
+
+Saved restore requires the original physical repository, HEAD and local HEAD ref.
+The Owner must explicitly return to that branch/commit first; this is not an
+automatic cross-branch merge. Review binds the artifact digest and exact current
+working hashes/modes, index, HEAD and dirty set. Unrelated later staged content
+blocks restoring the old index; unrelated working files are preserved. Head mode
+additionally requires the complete current dirty scope to still match capture.
+The dirty-switch UI saves first, reviews this cleanup, and then requires a fresh
+independent branch review/approval. It never invokes stash or force checkout/reset.
+
+Restore publishes working bytes through the existing native Workspace transaction,
+verifies their postimages, replaces the normal index through its owned lock, and
+independently observes the final bytes and index. Original native preimages remain
+until the existing durable Capability receipt is saved and acknowledged. The same
+journal binds the exact `git.checkpoint.restore` invocation; it cannot be adopted
+as `git.branch.switch` recovery or vice versa. Interrupted file/index effects retain
+the artifact and native journal and block further writes. This batch does not
+provide automatic continuation of an unknown checkpoint effect: Owner inspection
+of the actual files, index and retained evidence is required. The UI reports that
+state without replay or a subsequent automatic branch switch.
+
+`test-git-checkpoints` covers real isolated Core, Git and native byte effects,
+including independent staged/working data and an interrupted normal-index phase.
+The existing `test-git-workspace-ui` exercises capture, preview and two separate
+restore approvals through production Chromium controls. Both require the verified
+native test host for byte publication; they do not claim installed-app acceptance.

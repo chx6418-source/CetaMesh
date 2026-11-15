@@ -2,8 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { execFileSync } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
+import { createTaskStore as createOldTaskStore } from './fixtures/task-store-v1-reader.mjs';
 import { createTaskRuntime } from '../src/task/runtime.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { createToolExecutionCoordinator } from '../src/model/tool-execution.js';
@@ -75,11 +74,7 @@ try {
  assert.equal(subscriptionTask.delegationPolicy.allowSubscriptionOnly,true);
  assert.throws(()=>compat.setDelegationPolicy({id:subscriptionTask.id,expectedRev:subscriptionTask.rev,actor:{kind:'owner',id:'desktop'},
   policy:{expiresAt:now+60000,maxDelegations:1,allowUnknownCost:false,allowSubscriptionOnly:'yes'}}),{code:'INVALID_DELEGATION_POLICY'});
- const storeSource=execFileSync('git',['show','HEAD:src/task/store.js'],{encoding:'utf8'})
-  .replace("'../storage/json-file.js'",JSON.stringify(new URL('../src/storage/json-file.js',import.meta.url).href))
-  .replace("'./types.js'",JSON.stringify(new URL('../src/task/types.js',import.meta.url).href));
- const legacyModule=path.join(root,'legacy-task-v1-reader.mjs');fs.writeFileSync(legacyModule,storeSource);
- const legacyStore=(await import(pathToFileURL(legacyModule).href)).createTaskStore({stateDir:compatDir,now:()=>now});
+ const legacyStore=createOldTaskStore({stateDir:compatDir,now:()=>now});
  const legacyRead=legacyStore.get(subscriptionTask.id);assert.equal(legacyRead.delegationPolicy.allowSubscriptionOnly,true);
  legacyStore.update(legacyRead.id,legacyRead.rev,row=>{row.progress.note='Legacy writer observation';return row;});
  const reloadedSubscription=createTaskRuntime({stateDir:compatDir,now:()=>now}).get({id:subscriptionTask.id}).task;

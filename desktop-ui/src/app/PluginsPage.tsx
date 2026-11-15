@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { productToolsClient, approvalClient, bridge, extensionSettingsClient, hostClient, oneBotClient, pluginClient, taskClient, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type OneBotSettings, type OneBotMigrationPreview, type Plugin, type Task } from '../bridge/typed-client';
+import { productToolsClient, approvalClient, bridge, extensionSettingsClient, hostClient, oneBotClient, pluginClient, taskClient, uiCall, type Approval, type ApprovalDecisionResult, type DesktopEventData, type ExtensionSettingsDescription, type ExtensionSettingsSnapshot, type IntegrationSettings, type OneBotSettings, type OneBotMigrationPreview, type Plugin, type Task } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
 import { Button, Input, SearchInput, Select, Tabs } from '../components/primitives/inputs';
 import { Sheet } from '../components/primitives/overlays';
@@ -7,6 +7,7 @@ import { Badge, Banner, Card, LoadingState, Surface } from '../components/primit
 import { ApprovalCard } from './ApprovalCard';
 import { BionicReadiness } from './BionicReadiness';
 import { ForgeTools } from './ForgeTools';
+import { ExternalPluginCard, ExternalPluginPanel, reviewExternalPackage, externalPluginCategory, type ExternalPackageReview, type ExternalPlugin, type ExternalPluginInventory } from './LocalPluginEngines';
 import { OneBotConnectionForm, type OneBotConnectionDraft } from './OneBotConnectionForm';
 import { ErrorNotice, Heading, EmptyNotice, StatusBadge, availabilityReasonLabel, messageOf } from './PagePresentation';
 import { ApprovalOperationSummary } from './StatusPresentation';
@@ -111,6 +112,8 @@ export function PluginsPage() {
   const [forgeTasks, setForgeTasks] = useState<Task[]>([]);
   const [forgeTasksError, setForgeTasksError] = useState('');
   const [view, setView] = useState('all');
+  const [externalInventory, setExternalInventory] = useState<ExternalPluginInventory>({ engines: [] });
+  const [externalEditor, setExternalEditor] = useState<{ plugin: ExternalPlugin | null; packageReview?: ExternalPackageReview } | null>(null);
   const [category, setCategory] = useState('all');
   const [query, setQuery] = useState('');
   const [catalog, setCatalog] = useState<{ available: boolean; configured: boolean; offline: boolean; reason: string | null; plugins: Plugin[] } | null>(null);
@@ -134,7 +137,6 @@ export function PluginsPage() {
   const serverRequest=useRef(0);
   const [mcpConfigDraft, setMcpConfigDraft] = useState({ timeoutMs: '', note: '',url:'',credentialRef:'',allowedTools:'' });
   const [review, setReview] = useState<PluginReview | null>(null);
-  const [developerMode, setDeveloperMode] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
@@ -157,6 +159,11 @@ export function PluginsPage() {
   const refreshCatalog = useCallback(async () => {
     const request = ++catalogRequest.current, connection = ++connectionsRequest.current, epoch = lifetime.current;
     setLoading(true);
+    const currentCatalog = () => epoch === lifetime.current && request === catalogRequest.current && activeTab.current === 'catalog';
+    void uiCall<ExternalPluginInventory>('ui.plugins.engines.list').then(
+      result => { if (currentCatalog()) setExternalInventory({ engines: (result.engines ?? []).filter(plugin => plugin.root), errorCode: result.errorCode }); },
+      cause => { if (currentCatalog()) setExternalInventory({ engines: [], errorCode: messageOf(cause) }); }
+    );
     try {
       const [catalogResult, statusResult] = await Promise.all([
         pluginClient.catalog(query.trim(), category === 'all' ? '' : category, view), pluginClient.status()
@@ -165,7 +172,6 @@ export function PluginsPage() {
       setCatalog(catalogResult);
       setSelectedPlugin(current => current ? catalogResult.plugins.find(item => item.id === current.id)
         ?? statusResult.plugins.find(item => item.id === current.id) ?? null : null);
-      setDeveloperMode(statusResult.developerMode);
       if (connection === connectionsRequest.current) { setIntegrations(statusResult.integrations); applyMcpServers(statusResult.mcp, connection); }
       setError('');
     } catch (cause) { if (epoch === lifetime.current && request === catalogRequest.current && activeTab.current === 'catalog') {
@@ -216,20 +222,34 @@ export function PluginsPage() {
   }), [refreshCatalog, refreshConnections, tab]);
 
   async function stage(plugin: Plugin) {
+    const epoch=lifetime.current;
     setBusy(plugin.id); setError(''); setNotice('');
     try {
       const result = await pluginClient.stage(plugin.id);
+      if(result.externalPackageReview){
+        if(epoch!==lifetime.current||activeTab.current!=='catalog'){await uiCall('ui.plugins.engines.package.cancel',{token:result.externalPackageReview.token});return;}
+        setSelectedPlugin(null);setExternalEditor({plugin:externalInventory.engines.find(row=>row.id===result.externalPackageReview?.id)??null,packageReview:result.externalPackageReview});return;
+      }
       setReview({ id: plugin.id, stageId: result.stageId, action: plugin.installed && plugin.status === 'update' ? 'update' : 'install', installable: result.installable, requiresReview: result.requiresReview, permissions: result.permissions, summary: result.summary, trust: result.trust });
     } catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(''); }
   }
   async function stageLocalPackage() {
+    const epoch=lifetime.current;
     setError(''); setNotice('');
     try {
       const selected = await hostClient.pickExtensionPackage();
-      if (!selected.path) return;
+      if (!selected.path||epoch!==lifetime.current||activeTab.current!=='catalog') return;
       setBusy('local-package');
+      try {
+        const packageReview = await reviewExternalPackage(selected.path);
+        if(epoch!==lifetime.current||activeTab.current!=='catalog'){await uiCall('ui.plugins.engines.package.cancel',{token:packageReview.token});return;}
+        setExternalEditor({plugin:null,packageReview});return;
+      } catch(cause) {
+        if(!cause||typeof cause!=='object'||!('code' in cause)||cause.code!=='ENGINE_PACKAGE_NOT_SUPPORTED')throw cause;
+      }
       const result = await pluginClient.stageLocal(selected.path);
+      if(epoch!==lifetime.current||activeTab.current!=='catalog')return;
       setReview({ id: result.plugin.id, stageId: result.stageId, action: 'install', installable: result.installable, requiresReview: true, permissions: result.permissions, summary: result.summary, trust: 'local-unverified · Owner Review' });
     } catch (cause) { setError(messageOf(cause)); }
     finally { setBusy(''); }
@@ -392,6 +412,8 @@ export function PluginsPage() {
     finally { setBusy(''); }
   }
   async function openPlugin(plugin: Plugin) {
+    const external=externalInventory.engines.find(row=>row.id===plugin.id&&plugin.kind==='external-runtime');
+    if(external){setExternalEditor({plugin:external});return;}
     const request = ++extensionSettingsRequest.current;
     const catalogObservation = catalogRequest.current;
     setError(''); setNotice('');
@@ -502,9 +524,15 @@ export function PluginsPage() {
     } catch (cause) { if(epoch===serverRequest.current)setError(messageOf(cause)); }
     finally { if(epoch===serverRequest.current)setBusy(''); }
   }
-  const plugins = catalog?.plugins ?? [];
+  const catalogPlugins = catalog?.plugins ?? [];
   const connectionRows = integrations.filter(item => tab === 'tools' ? item.kind === 'tool-pack' : item.kind !== 'tool-pack').filter(item => `${item.name} ${item.reason ?? ''}`.toLowerCase().includes(query.toLowerCase()));
-  const categories = ['all', ...new Set(plugins.map(plugin => plugin.category).filter(Boolean))];
+  const externalPlugins = externalInventory.engines.filter(plugin =>
+    (view === 'all' || view === 'installed') && (category === 'all' || category === externalPluginCategory) &&
+    (plugin.name + ' ' + plugin.id).toLowerCase().includes(query.trim().toLowerCase()));
+  const plugins=catalogPlugins.filter(plugin=>!externalPlugins.some(external=>external.id===plugin.id&&external.version===plugin.version));
+  const hasPlugins = plugins.length > 0 || externalPlugins.length > 0;
+  const categories = ['all', ...new Set([...plugins.map(plugin => plugin.category).filter(Boolean),
+    ...(externalInventory.engines.length ? [externalPluginCategory] : [])])];
   return <div className="content-page plugins-page">
     <Heading eyebrow="EXTENSIONS & CONNECTORS" title="插件中心" description="管理插件、服务连接和开发工具，查看真实可用状态。" action={<Button icon="add" variant="primary" onClick={() => { setTab('catalog'); setView('all'); }}>添加插件</Button>} />
     <Banner><span className="banner-icon"><Icon name="approval" size={20} /></span><span className="grow"><strong>安装前先查看权限</strong><small>插件详情与权限清单会在安装前显示；高风险操作仍由 Core 审批。</small></span><span className="banner-link">仅安装可信来源</span></Banner>
@@ -513,9 +541,13 @@ export function PluginsPage() {
     <ApprovalOperationSummary operations={approvalOperations} onCancel={id => { void approvalClient.cancel(id).then(() => refreshApprovals()).catch(cause => setError(messageOf(cause))); }} />
     {pendingApprovals.length > 0 && <section className="plugin-approval-inbox"><div className="section-heading"><h2>待处理审批</h2><Badge tone="warning">{pendingApprovals.length}</Badge></div>{pendingApprovals.map(approval => <ApprovalCard key={approval.id} approval={approval} onDecide={(id, approve) => { void decidePendingApproval(id, approve); }} />)}</section>}
     {tab === 'catalog' && <>
-    <div className="catalog-filters"><Tabs label="插件分类" selected={category} onChange={value => { ++catalogRequest.current; setCategory(value); }} items={categories.map(value => ({ id: value, label: value === 'all' ? '全部' : value }))} /><Tabs label="安装状态" selected={view} onChange={value => { ++catalogRequest.current; setView(value); }} items={[{ id: 'all', label: '全部' }, { id: 'recommended', label: '精选' }, { id: 'installed', label: '已安装' }, { id: 'update-available', label: '可更新' }]} />{developerMode && <Button compact onClick={() => void stageLocalPackage()} disabled={busy === 'local-package'}>{busy === 'local-package' ? '读取本地包…' : '导入本地扩展'}</Button>}<Button compact icon="update" onClick={() => void refreshCatalog()} disabled={loading}>刷新目录</Button></div>
+    {externalInventory.errorCode && <ErrorNotice error={externalInventory.errorCode === 'ENGINE_STORE_UNAVAILABLE' ? '外部插件记录暂时无法读取。' : externalInventory.errorCode} />}
+    <div className="catalog-filters"><Tabs label="插件分类" selected={category} onChange={value => { ++catalogRequest.current; setCategory(value); }} items={categories.map(value => ({ id: value, label: value === 'all' ? '全部' : value }))} /><Tabs label="安装状态" selected={view} onChange={value => { ++catalogRequest.current; setView(value); }} items={[{ id: 'all', label: '全部' }, { id: 'recommended', label: '精选' }, { id: 'installed', label: '已安装' }, { id: 'update-available', label: '可更新' }]} /><Button compact icon="add" onClick={() => void stageLocalPackage()} disabled={busy === 'local-package'}>{busy === 'local-package' ? '正在读取插件包…' : '导入插件包'}</Button><Button compact icon="update" onClick={() => void refreshCatalog()} disabled={loading}>刷新目录</Button></div>
       {catalog?.offline && <Banner>当前目录离线，显示 Core 缓存的插件信息。{catalog.reason ? ` ${catalog.reason}` : ''}</Banner>}
-      {loading && !plugins.length ? <LoadingState label="正在读取插件目录…" /> : plugins.length ? <div className="plugin-grid">{plugins.map(plugin => <Card className="plugin-card" key={plugin.id}><button className="plugin-card-main" onClick={() => void openPlugin(plugin)}><span className={`plugin-icon plugin-icon-${plugin.icon}`}><Icon name={(plugin.icon as IconName) || 'layers'} size={20} /></span><span className="plugin-card-copy"><strong>{plugin.name}</strong><span>{plugin.summary}</span><small>{plugin.developer} · v{plugin.version || '—'} · {plugin.category || plugin.kind}</small></span><StatusBadge value={!plugin.installed ? plugin.status === 'invalid' ? 'invalid' : 'not-installed' : plugin.status === 'update' ? 'update' : plugin.enabled ? 'enabled' : 'installed'} /></button><div className="plugin-card-actions"><Button compact variant="ghost" onClick={() => void openPlugin(plugin)}>查看详情 <Icon name="right" size={13} /></Button>{plugin.installed && plugin.status === 'update' ? <Button compact variant="primary" disabled={busy === plugin.id} onClick={() => void stage(plugin)}>查看更新并安装</Button> : !plugin.installed ? <Button compact variant="primary" disabled={busy === plugin.id} onClick={() => void stage(plugin)}>安装</Button> : plugin.enabled ? <Button compact disabled={busy === plugin.id} onClick={() => void pluginAction(plugin, 'disable')}>停用</Button> : <Button compact variant="primary" disabled={busy === plugin.id} onClick={() => void reviewEnable(plugin)}>启用</Button>}</div></Card>)}</div> : !loading && !error && <EmptyNotice icon="plugins" title="没有匹配的插件" detail={catalog?.reason || '调整搜索条件，或刷新插件目录。'} />}
+      {loading && !hasPlugins ? <LoadingState label="正在读取插件目录…" /> : hasPlugins ? <div className="plugin-grid">
+        {externalPlugins.map(plugin => <ExternalPluginCard key={'external:' + plugin.id} plugin={plugin} onOpen={() => setExternalEditor({ plugin })} />)}
+        {plugins.map(plugin => <Card className="plugin-card" key={plugin.id}><button className="plugin-card-main" onClick={() => void openPlugin(plugin)}><span className={`plugin-icon plugin-icon-${plugin.icon}`}><Icon name={(plugin.icon as IconName) || 'layers'} size={20} /></span><span className="plugin-card-copy"><strong>{plugin.name}</strong><span>{plugin.summary}</span><small>{plugin.developer} · v{plugin.version || '—'} · {plugin.category || plugin.kind}</small></span><StatusBadge value={!plugin.installed ? plugin.status === 'invalid' ? 'invalid' : 'not-installed' : plugin.status === 'update' ? 'update' : plugin.enabled ? 'enabled' : 'installed'} /></button><div className="plugin-card-actions"><Button compact variant="ghost" onClick={() => void openPlugin(plugin)}>查看详情 <Icon name="right" size={13} /></Button>{plugin.installed && plugin.status === 'update' ? <Button compact variant="primary" disabled={busy === plugin.id} onClick={() => void stage(plugin)}>查看更新并安装</Button> : !plugin.installed ? <Button compact variant="primary" disabled={busy === plugin.id} onClick={() => void stage(plugin)}>安装</Button> : plugin.enabled ? <Button compact disabled={busy === plugin.id} onClick={() => void pluginAction(plugin, 'disable')}>停用</Button> : <Button compact variant="primary" disabled={busy === plugin.id} onClick={() => void reviewEnable(plugin)}>启用</Button>}</div></Card>)}</div> : !loading && !error && <EmptyNotice icon="plugins" title="没有匹配的插件" detail={catalog?.reason || '调整搜索条件，或刷新插件目录。'} />}
+      {externalEditor && <ExternalPluginPanel plugin={externalEditor.plugin} packageReview={externalEditor.packageReview} onClose={() => setExternalEditor(null)} onChange={refreshCatalog} />}
     </>}
     {(tab === 'connections' || tab === 'tools') && <><div className="plugin-section-heading"><h2>{tab === 'tools' ? '开发工具' : '服务连接'}</h2><p className="muted">{tab === 'tools' ? '查看工具的启用状态与调用条件，进入详情管理权限。' : '先连接账号或本地服务，再查看可用能力。'}</p></div>{tab === 'connections' && <section className="forge-connections-section" aria-label="开发平台连接">{forgeTasksError && <ErrorNotice error={'任务列表读取失败：' + forgeTasksError} onRetry={() => void refreshForgeTasks()} />}<ForgeTools call={productToolsClient.call} tasks={forgeTasks}/></section>}<div className="connection-list">{connectionRows.length ? connectionRows.map(item => <Surface className="connection-row" key={item.id}><span className="connection-icon"><Icon name="plug" size={20} /></span><span className="grow"><strong>{item.name}</strong><small>{item.id} · {availabilityReasonLabel(item.reason) || item.lastError || (item.available ? item.status : '当前不可用')}</small></span><StatusBadge value={!item.enabled ? 'disabled' : item.available ? item.status : (item.reason === 'needs-setup' ? 'needs-setup' : item.reason === 'not-installed' ? 'not-installed' : 'unavailable')} available={item.enabled && item.eligible} /><Button compact onClick={() => void openIntegration(item)}>详情与设置</Button><Button compact variant={item.enabled ? 'default' : 'primary'} disabled={busy === item.id} onClick={() => void toggleIntegration(item)}>{item.enabled ? '停用' : '启用'}</Button></Surface>) : !error && <EmptyNotice icon="plug" title="没有已注册的集成" detail="Integration 状态由本机 Core 提供。安装扩展请前往插件中心。" />}</div></>}
     {tab === 'mcp' && <div className="connection-list">{servers.length ? servers.map(item => <Surface className="connection-row" key={item.id}><span className="connection-icon mcp-icon"><Icon name="layers" size={20} /></span><span className="grow"><strong>{item.name}</strong><small>{item.source === 'builtin' ? '内置服务 · 默认启动入口' : item.transport || '本机连接'} · {item.discoveredToolCount}/{item.toolCount ?? '?'} 个工具已发现{item.reason ? ` · ${availabilityReasonLabel(item.reason) || item.reason}` : ''}</small></span><StatusBadge value={mcpStatus(item)} available={isMcpCallable(item)} /><Button compact onClick={() => void openServer(item)}>查看工具</Button><Button compact variant={item.enabled ? 'default' : 'primary'} disabled={busy === item.id} onClick={() => void manageServer(item, item.enabled ? 'disable' : 'enable')}>{item.enabled ? '禁用' : '启用'}</Button><Button compact disabled={busy === item.id || !item.enabled || item.status === 'unsupported'} onClick={() => void manageServer(item, item.running ? 'stop' : 'start')}>{item.running ? '停止' : '启动'}</Button></Surface>) : !error && <EmptyNotice icon="layers" title="没有配置 MCP 服务" detail="MCP 服务与凭据由本机 Core 配置和管理。" />}</div>}

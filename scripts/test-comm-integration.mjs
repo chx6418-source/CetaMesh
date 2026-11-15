@@ -20,6 +20,10 @@ const services = createCetaMeshServices({stateDir:path.join(root,'state'),dataRo
     async close() {}
   })});
 try {
+  const ownedChat = await services.chatService.execute({method:'chat.sessions.create',params:{title:'History ownership negative'}});
+  await assert.rejects(services.chatService.checkpointModelHistory({phase:'settled-transcript',messages:[],
+    targetKind:'chat',binding:{sessionId:ownedChat.id,actorKind:OWNER_ACTOR.kind,actorId:OWNER_ACTOR.id},turnId:'not-owned'}),
+    {code:'CONTEXT_HISTORY_DENIED'}, 'an existing Chat cannot bypass its active-turn history owner');
   services.modelRegistry.register({id:'comm-model',label:'COMM model fixture',defaultModel:'fixture',supportsTools:true,
     health:async()=>({available:true,configured:true}),listModels:async()=>[{id:'fixture'}],chat:async()=>({text:'done'}),
     stream:async function*() {

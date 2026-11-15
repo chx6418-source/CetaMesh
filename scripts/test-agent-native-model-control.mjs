@@ -149,6 +149,75 @@ async function check(name, action) {
   catch (error) { failures++; console.log(`FAIL ${name}: ${error.code || error.name || 'Error'} ${error.stack?.split('\n').find(line => line.includes('test-agent-native-model-control.mjs'))?.trim() ?? ''}`); }
 }
 try {
+  await check('metadata-only native catalog never grants formal Task eligibility',async()=>{
+    // Reuse only the controlled native wire peer; omit Task runtime verification.
+    let closeCount=0;
+    const provider=createCodexAppServerProvider({catalogOptions:{metadataOnly:true,runtimeVersion:version,resolveIdentity:()=> 'e'.repeat(64),
+      launch(){const readable=new PassThrough(),writable=new PassThrough();let finish;const done=new Promise(resolve=>{finish=resolve;});
+        writable.on('data',chunk=>{for(const line of String(chunk).trim().split('\n')){const frame=JSON.parse(line);if(frame.id)readable.write(JSON.stringify({id:frame.id,result:frame.method==='model/list'?{data:modelRows,nextCursor:null}:{userAgent:'fixture'}})+'\n');}});
+        return{readable,writable,done,close(){closeCount++;finish({processTreeExitConfirmed:true});}};}}});
+    try{const catalog=await provider.modelCatalog();assert.equal(catalog.supported,true);assert.equal(catalog.runtimeVersion,version);
+      const health=await provider.health();assert.equal(health.taskEligible,false);assert.equal(health.reason,'CODEX_APP_SERVER_ACCOUNT_ISOLATION_UNVERIFIED');
+      await assert.rejects(provider.createSession({taskId:'blocked-native-auth',workspaceId:'workspace'}),{code:'CODEX_APP_SERVER_ACCOUNT_ISOLATION_UNVERIFIED'});
+      assert.equal(closeCount,1);
+    }finally{await provider.shutdown();}
+  });
+  await check('explicit dynamic transport affects new operations while existing sessions retain their owner',async()=>{
+    let transport='exec',execCreates=0,appCreates=0;
+    const leaf=name=>({id:'codex',capabilities:()=>({}),health:async()=>({transport:name}),modelCatalog:async()=>({transport:name}),
+      createSession:async()=>({sessionId:name==='exec'?'exec-'+(++execCreates):'app-'+(++appCreates)}),status:async()=>({transport:name}),closeSession:async()=>({closed:true}),shutdown:async()=>{}});
+    const router=createCodexProviderRouter({legacyProvider:leaf('exec'),appServerProvider:leaf('app-server'),selectTransport:()=>transport});
+    try{const old=await router.createSession({taskId:'old',workspaceId:'workspace'});transport='app-server';
+      assert.equal((await router.modelCatalog()).transport,'app-server');assert.equal((await router.status(old)).transport,'exec');
+      assert.equal((await router.createSession({taskId:'new',workspaceId:'workspace'})).sessionId,'app-1');
+      transport='invalid';await assert.rejects(router.createSession({}),{code:'CODEX_TRANSPORT_UNSUPPORTED'});
+    }finally{await router.shutdown();}
+  });
+  await check('Settings defaults to exec and refuses unverified App Server selection before persistence',async()=>{
+    const {createSettingsService}=await import('../src/settings/service.js');
+    const settings=createSettingsService({stateDir:path.join(root,'transport-settings')});
+    assert.equal(settings.store.get().settings.agents.codexTransport,'exec');
+    const rev=settings.store.get().revision;
+    await assert.rejects(settings.execute({method:'settings.update',params:{section:'agents',values:{codexTransport:'app-server'},expectedRev:rev}}),{code:'CODEX_APP_SERVER_ACCOUNT_ISOLATION_UNVERIFIED'});
+    assert.equal(settings.store.get().revision,rev);assert.equal(settings.store.get().settings.agents.codexTransport,'exec');
+    await settings.execute({method:'settings.update',params:{section:'general',values:{theme:'dark'}}});
+    assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(settings.store.file)).settings.agents,'codexTransport'),false,'inactive transport preference preserves the prior settings reader');
+    let release;
+    const held=createSettingsService({stateDir:path.join(root,'transport-settings-cas'),validateCodexTransport:()=>new Promise(resolve=>{release=resolve;})});
+    const saving=held.execute({method:'settings.update',params:{section:'agents',values:{codexTransport:'app-server'}}});
+    while(!release)await tick();
+    await held.execute({method:'settings.update',params:{section:'general',values:{theme:'dark'}}});
+    release();await assert.rejects(saving,{code:'SETTINGS_CONFLICT'});assert.equal(held.store.get().settings.agents.codexTransport,'exec');
+    const accepted=createSettingsService({stateDir:path.join(root,'transport-settings-approved'),validateCodexTransport:async()=>{}});
+    await accepted.execute({method:'settings.update',params:{section:'agents',values:{codexTransport:'app-server'}}});
+    assert.deepEqual(accepted.store.compatibility().features,['codex-app-server']);
+    assert.equal(accepted.store.compatibility().baseline.available,true);
+  });
+  await check('production Codex metadata launcher isolates its profile and requires supervised closure', async () => {
+    const { createCodexCatalogLauncher } = await import('../src/agent/codex-app-server-launcher.js');
+    const probeRoot=fs.mkdtempSync(path.join(root,'production-launcher-'));
+    const cwd=path.join(probeRoot,'cwd'),profileRoot=path.join(probeRoot,'profile');fs.mkdirSync(cwd);fs.mkdirSync(profileRoot);
+    let processOptions,started,stops=0,finish,reported;
+    const readable=new PassThrough(),writable=new PassThrough();
+    const done=new Promise(resolve=>{finish=resolve;});
+    const snapshot={executable:process.execPath,version,identity:'b'.repeat(64)};
+    const launcher=createCodexCatalogLauncher({stateDir:root,resolveExecutable:()=>snapshot,
+      environment:{SystemRoot:process.env.SystemRoot,PATH:'UNTRUSTED_SEARCH_PATH',CODEX_HOME:'USER_PROFILE',OPENAI_API_KEY:'SECRET',HTTP_PROXY:'http://proxy.invalid'},
+      createProcess(options){processOptions=options;return{async probeAsync(){return{available:true,stdout:'codex-cli '+version};},startSession(input){started=input;return{child:{stdout:readable,stdin:writable},done,shutdown(){stops++;finish({processTreeExitConfirmed:true,stdout:'not public',stderr:'not public'});},cleanupPermitted:()=>true};},async shutdown(){}};}});
+    assert.equal(await launcher.resolveIdentity(),snapshot.identity);
+    await assert.rejects(launcher.launch({cwd,profileRoot,purpose:'task',transport:'app-server',schemaVersion:version}),{code:'AGENT_BOUNDARY_UNSUPPORTED'});
+    const handle=await launcher.launch({cwd,profileRoot,purpose:'model-catalog',transport:'app-server',schemaVersion:version,onHandle:value=>{reported=value;}});
+    assert.equal(reported,handle);assert.equal(processOptions.executable,process.execPath);
+    assert.equal(processOptions.envSource.CODEX_HOME,profileRoot);
+    for(const key of ['OPENAI_API_KEY','OPENAI_BASE_URL','HTTP_PROXY','HTTPS_PROXY'])assert.equal(processOptions.envSource[key],undefined);
+    assert.notEqual(processOptions.envSource.PATH,'UNTRUSTED_SEARCH_PATH');
+    assert.equal(started.inputMode,'open');assert.deepEqual(started.args,['app-server','--strict-config','--stdio']);
+    assert.ok(fs.readFileSync(path.join(profileRoot,'config.toml'),'utf8').includes('requires_openai_auth = false'));
+    assert.equal(handle.readable,readable);assert.equal(handle.writable,writable);
+    await handle.close();assert.equal(stops,1);assert.equal((await handle.done).processTreeExitConfirmed,true);
+    assert.equal((await handle.done).stdout,undefined);
+    snapshot.version='0.0.0';await assert.rejects(launcher.resolveIdentity(),{code:'CODEX_APP_SERVER_VERSION_UNSUPPORTED'});
+  });
   await check('catalog-only discovery uses existing service and Broker without creating a Session or changing default transport', async () => {
     const fixture = catalogFixture();
     const legacy = { id: 'codex', capabilities: () => ({ workspaceBoundary: 'native-staged' }), health: async () => ({ available: true }) };

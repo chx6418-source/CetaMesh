@@ -47,6 +47,8 @@ const UI_METHODS: &[&str] = &[
     "ui.workspace.git.index.review", "ui.workspace.git.stage", "ui.workspace.git.unstage", "ui.workspace.git.commit.staged",
     "ui.workspace.git.branch.create",
     "ui.workspace.git.branch.review", "ui.workspace.git.branch.switch",
+    "ui.workspace.git.checkpoint.capture", "ui.workspace.git.checkpoint.list", "ui.workspace.git.checkpoint.preview",
+    "ui.workspace.git.checkpoint.review", "ui.workspace.git.checkpoint.restore",
     "ui.workspace.git.worktree.create",
     "ui.developer.forge.describe",
     "ui.developer.forge.credentials.save",
@@ -68,6 +70,10 @@ const UI_METHODS: &[&str] = &[
     "ui.extensions.settings.describe", "ui.extensions.settings.get", "ui.extensions.settings.update",
     "ui.plugins.catalog", "ui.plugins.status", "ui.plugins.detail", "ui.plugins.refresh", "ui.plugins.stage", "ui.plugins.stage-local", "ui.plugins.enable.review",
     "ui.plugins.install", "ui.plugins.enable", "ui.plugins.disable", "ui.plugins.uninstall",
+    "ui.plugins.engines.list", "ui.plugins.engines.review", "ui.plugins.engines.enable", "ui.plugins.engines.disable",
+    "ui.plugins.engines.authorize-task",
+    "ui.plugins.engines.workbench.open",
+    "ui.plugins.engines.package.review", "ui.plugins.engines.package.cancel", "ui.plugins.engines.package.install", "ui.plugins.engines.uninstall",
     "ui.plugins.integration.list", "ui.plugins.integration.settings", "ui.plugins.integration.manage", "ui.plugins.integration.action", "ui.plugins.integration.tool.toggle",
     "ui.channel.onebot.get", "ui.channel.onebot.configure", "ui.channel.onebot.migration.preview", "ui.channel.onebot.migration.apply",
     "ui.mcp.list", "ui.mcp.tools", "ui.mcp.manage", "ui.mcp.config.get", "ui.mcp.config.update",
@@ -83,7 +89,7 @@ pub fn allowed_while_blocked(method:&str)->bool {
 }
 
 fn is_allowed_method(method: &str) -> bool {
-    matches!(method, "app.diagnostics.status" | "app.diagnostics.run" | "app.diagnostics.history" | "app.diagnostics.read" | "app.diagnostics.export" | "app.diagnostics.feedback" | "app.previewBrowser.open" | "app.previewBrowser.layout" | "app.previewBrowser.command" | "app.windowAction" | "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.openArtifact" | "app.pickFolder" | "app.pickFiles" | "app.pickExtensionPackage" | "app.setWindowBehavior")
+    matches!(method, "app.diagnostics.status" | "app.diagnostics.run" | "app.diagnostics.history" | "app.diagnostics.read" | "app.diagnostics.export" | "app.diagnostics.feedback" | "app.previewBrowser.open" | "app.previewBrowser.layout" | "app.previewBrowser.command" | "app.windowAction" | "app.captionBackdrop" | "app.ping" | "app.about" | "app.status" | "app.openExternal" | "app.openArtifact" | "app.pickFolder" | "app.pickFiles" | "app.pickExtensionPackage" | "app.setWindowBehavior")
         || UI_METHODS.contains(&method)
 }
 
@@ -105,13 +111,30 @@ fn validate_artifact_open_params(params: &Value) -> Result<(), String> {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum WindowAction { State, Drag, Minimize, Maximize, Close, AppearanceLight, AppearanceDark, ResizeNorth, ResizeNorthEast, ResizeEast, ResizeSouthEast, ResizeSouth, ResizeSouthWest, ResizeWest, ResizeNorthWest }
+pub enum WindowAction { State, ChatModeChat, ChatModeSimulation, ChatModeProject, ChatModeHidden, Drag, Minimize, Maximize, Close, AppearanceLight, AppearanceDark, AppearancePalette { dark: bool, colors: [u32; 7], modal: bool }, ResizeNorth, ResizeNorthEast, ResizeEast, ResizeSouthEast, ResizeSouth, ResizeSouthWest, ResizeWest, ResizeNorthWest }
 
 pub fn window_action(params: &Value) -> Result<WindowAction, String> {
     let object = params.as_object().ok_or("window action must be an object")?;
+    let action = object.get("action").and_then(Value::as_str);
+    if object.contains_key("palette") && matches!(action, Some("appearanceLight" | "appearanceDark")) {
+        if object.len() != 3 { return Err("appearance requires only action, palette and modal".into()); }
+        let modal = object.get("modal").and_then(Value::as_bool).ok_or("modal must be boolean")?;
+        let palette = object.get("palette").and_then(Value::as_array).filter(|row| row.len() == 7).ok_or("palette requires seven colors")?;
+        let mut colors = [0u32; 7];
+        for (index, value) in palette.iter().enumerate() {
+            let color = value.as_str().filter(|s| s.len() == 7 && s.starts_with('#') && s[1..].bytes().all(|byte| byte.is_ascii_hexdigit())).ok_or("palette colors must be #RRGGBB")?;
+            let rgb = u32::from_str_radix(&color[1..], 16).map_err(|_| "invalid color")?;
+            colors[index] = ((rgb & 255) << 16) | (rgb & 0xff00) | (rgb >> 16);
+        }
+        return Ok(WindowAction::AppearancePalette { dark: action == Some("appearanceDark"), colors, modal });
+    }
     if object.len() != 1 { return Err("window action requires only action".to_owned()); }
     match object.get("action").and_then(Value::as_str) {
         Some("state") => Ok(WindowAction::State),
+        Some("chatModeChat") => Ok(WindowAction::ChatModeChat),
+        Some("chatModeSimulation") => Ok(WindowAction::ChatModeSimulation),
+        Some("chatModeProject") => Ok(WindowAction::ChatModeProject),
+        Some("chatModeHidden") => Ok(WindowAction::ChatModeHidden),
         Some("drag") => Ok(WindowAction::Drag),
         Some("minimize") => Ok(WindowAction::Minimize),
         Some("maximize") => Ok(WindowAction::Maximize),
@@ -260,6 +283,8 @@ pub fn parse_bridge_request(raw: &str) -> Result<BridgeRequest, String> {
     let params_object = params.as_object().ok_or("bridge params must be an object")?;
     if method.starts_with("app.previewBrowser.") {
         crate::reference_browser_policy::validate(method, params)?;
+    } else if method == "app.captionBackdrop" {
+        crate::caption_backdrop::validate_shape(params)?;
     } else if method == "app.windowAction" {
         window_action(params)?;
     } else if method == "app.setWindowBehavior" {
@@ -311,6 +336,16 @@ mod tests {
     }
     use super::*;
     #[test]
+    fn caption_pixels_are_scoped_to_a_bounded_presentation_route() {
+        let request=serde_json::json!({"id":"caption","method":"app.captionBackdrop","params":{"surface":null}});
+        assert!(parse_bridge_request(&request.to_string()).is_ok());
+        for params in [serde_json::json!({}),serde_json::json!({"surface":null,"path":"C:/private"}),serde_json::json!({"surface":{"url":"https://example.invalid/wallpaper"}})] {
+            let mut row=request.clone(); row["params"]=params;
+            assert!(parse_bridge_request(&row.to_string()).is_err());
+        }
+        assert!(!allowed_while_blocked("ui.chat.send"));
+    }
+    #[test]
     fn blocked_execution_preserves_only_cancellation_and_safe_recovery_reads(){
         for method in ["ui.events.next","ui.chat.status","ui.task.get","ui.approvals.list","ui.chat.stop","ui.task.pause","ui.task.cancel","ui.approvals.cancel"] {
             assert!(allowed_while_blocked(method),"blocked Core must still permit {method}");
@@ -350,8 +385,23 @@ mod tests {
     }
 
     #[test]
+    fn window_appearance_palette_is_bounded_and_presentation_only() {
+        let palette = serde_json::json!(["#ffffff", "#eeeeee", "#d0e0f0", "#222222", "#666666", "#558877", "#dddddd"]);
+        for action in ["appearanceLight", "appearanceDark"] {
+            assert!(window_action(&serde_json::json!({"action":action, "palette":palette, "modal":true})).is_ok(), "valid palette must reach the native caption");
+        }
+        for params in [
+            serde_json::json!({"action":"close", "palette":palette, "modal":false}),
+            serde_json::json!({"action":"appearanceLight", "palette":["#ffffff"], "modal":false}),
+            serde_json::json!({"action":"appearanceLight", "palette":["url(file:///C:/a)","#eeeeee","#d0e0f0","#222222","#666666","#558877","#dddddd"], "modal":false}),
+            serde_json::json!({"action":"appearanceLight", "palette":palette, "modal":"true"}),
+            serde_json::json!({"action":"appearanceDark", "palette":palette, "modal":false, "pid":12}),
+        ] { assert!(window_action(&params).is_err(), "unrelated authority and malformed appearance stay rejected"); }
+    }
+
+    #[test]
     fn window_actions_accept_only_local_window_operations() {
-        for action in ["state", "drag", "minimize", "maximize", "close", "appearanceLight", "appearanceDark", "resizeNorth", "resizeNorthEast", "resizeEast", "resizeSouthEast", "resizeSouth", "resizeSouthWest", "resizeWest", "resizeNorthWest"] {
+        for action in ["chatModeChat", "chatModeSimulation", "chatModeProject", "chatModeHidden", "state", "drag", "minimize", "maximize", "close", "appearanceLight", "appearanceDark", "resizeNorth", "resizeNorthEast", "resizeEast", "resizeSouthEast", "resizeSouth", "resizeSouthWest", "resizeWest", "resizeNorthWest"] {
             let request = serde_json::json!({"id":"chrome", "method":"app.windowAction", "params":{"action":action}});
             assert!(parse_bridge_request(&request.to_string()).is_ok(), "{action}");
         }

@@ -28,6 +28,24 @@ async function check(name, run) {
 }
 
 try {
+  await check('staging yields to Core IPC while copying a multi-file Workspace', async () => {
+    const copy = fs.copyFileSync;
+    let copied = 0, observed = null;
+    fs.copyFileSync = (...args) => {
+      const result = copy(...args);
+      if (++copied === 1) setImmediate(() => { observed = copied; });
+      return result;
+    };
+    try {
+      const files = Object.fromEntries(Array.from({ length: 96 }, (_, i) => [`file-${i}.txt`, `content-${i}`]));
+      const stage = await fixture(files);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(stage.baseline.size, 96);
+      assert.ok(observed > 0 && observed < 96, `Core event loop was starved until ${observed}/96 copies completed`);
+      for (const [name, content] of Object.entries(files)) assert.equal(fs.readFileSync(path.join(stage.root, name), 'utf8'), content);
+    } finally { fs.copyFileSync = copy; }
+  });
+
   await check('an excluded source root cannot become a successful empty staging Workspace', async () => {
     await assert.rejects(fixture({ 'safe.txt': 'safe' }, { excludedRoots: [root] }), { code: 'STAGING_PATH_DENIED' });
     await assert.rejects(fixture({ 'safe.txt': 'safe' }, { excludedRoots: [root], trustedSourceRoot: path.join(root, 'other') }), { code: 'STAGING_PATH_DENIED' });

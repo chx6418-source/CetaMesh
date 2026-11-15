@@ -114,9 +114,18 @@ try{
   const approval=await integration.execute({method:'mcp.invoke',params:{serverId:'remote',tool:'write',input:{value:'registry'}}});assert.equal(approval.status,'pending');
   const approved=await integration.broker.decide({id:approval.approvalId,approve:true,actor:OWNER_ACTOR});assert.equal(approved.result.content[0].text,'stored:registry');
   const old=await integration.execute({method:'mcp.invoke',params:{serverId:'remote',tool:'write',input:{value:'old-binding'}}});
+  const beforeRestart=integration.runtime.status('remote');
   await integration.execute({method:'mcp.config.update',params:{serverId:'remote',approved:true,config:{url:base+'/mcp-v2'}}});
   await assert.rejects(integration.broker.decide({id:old.approvalId,approve:true,actor:OWNER_ACTOR}));
-  assert.equal(integration.runtime.status('remote').status,'stopped');
+  const reconfigured=integration.runtime.status('remote');
+  assert.equal(reconfigured.status,'running');assert.equal(reconfigured.configurationCurrent,true);
+  assert.ok(reconfigured.generation>beforeRestart.generation,'configuration update replaces the old MCP execution generation');
+  assert.notEqual(reconfigured.liveConfigurationRevision,beforeRestart.liveConfigurationRevision);
+  const current=await integration.execute({method:'mcp.invoke',params:{serverId:'remote',tool:'write',input:{value:'new-binding'}}});
+  assert.equal(current.status,'pending','the new MCP generation still requires its own tool approval');
+  const currentResult=await integration.broker.decide({id:current.approvalId,approve:true,actor:OWNER_ACTOR});
+  assert.equal(currentResult.result.content[0].text,'stored:new-binding');
+  assert.equal(calls.at(-1).path,'/mcp-v2','the approved call reaches the current endpoint');
  }finally{await integration.close();}
  console.log('PASS registered remote MCP through production Integration Broker, explicit tool approval and configuration invalidation');
  const descriptor={id:'fixture',transport:'streamable-http',namespace:'mcp__fixture__',tools:[],url:base+'/mcp'};

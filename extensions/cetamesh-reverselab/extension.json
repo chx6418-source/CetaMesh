@@ -1,0 +1,19 @@
+{
+  "manifestVersion": 1,
+  "id": "org.cetamesh.reverselab",
+  "name": "ReverseLab",
+  "version": "0.1.0",
+  "type": "tool",
+  "entry": "analysis.json",
+  "publisher": "CetaMesh",
+  "description": "P1 static JavaScript application analysis with a separately pinned, offline REA 6.8.0 engine. Requires a reviewed Workspace scope. Other baseline operations are not exposed in P1.",
+  "permissions": ["analysis.static"],
+  "network": {"hosts": []},
+  "scope": {"workspace": null, "paths": ["apps", "results"]},
+  "capabilities": [
+    {"id": "analyze_javascript_application", "kind": "tool", "title": "分析 JavaScript 应用", "description": "Read an extracted application without executing it and write original REA Evidence to a fresh reviewed Workspace run path. Owner approval required.", "requires": ["analysis.static"],
+      "inputSchema": {"type": "object", "properties": {"path": {"type": "string", "minLength": 1, "maxLength": 500}, "outputPath": {"type": "string", "minLength": 1, "maxLength": 500}}, "required": ["path", "outputPath"], "additionalProperties": false}},
+    {"id": "health", "kind": "tool", "title": "ReverseLab 引擎状态", "description": "Report actual pinned engine asset integrity and active Worker count; this does not certify all Providers.", "requires": ["analysis.static"],
+      "inputSchema": {"type": "object", "properties": {}, "required": [], "additionalProperties": false}}
+  ]
+}

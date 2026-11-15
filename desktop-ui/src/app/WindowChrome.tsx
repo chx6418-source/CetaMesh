@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react';
-import { hostClient, type WindowAction } from '../bridge/typed-client';
+import { hostClient, type WindowAction, type NativeCaptionAppearance, type NativeCaptionBackdrop } from '../bridge/typed-client';
 import { useUi } from '../stores/ui';
+import { captionPalette } from '../theme/appearance';
+import { useCaptionWallpaper } from './useCaptionWallpaper';
 
 const edges = ['North', 'NorthEast', 'East', 'SouthEast', 'South', 'SouthWest', 'West', 'NorthWest'] as const;
 
@@ -23,15 +25,20 @@ export function createWindowDragGesture() {
 
 export function WindowChrome() {
   const theme = useUi(state => state.theme);
+  const appearance = useUi(state => state.appearance);
   const [native, setNative] = useState(() => typeof window !== 'undefined' && window.__CETAMESH_NATIVE_CHROME__ === true);
   const gesture = useRef(createWindowDragGesture());
   const [maximized, setMaximized] = useState(false);
   const [error, setError] = useState('');
-  async function command(action: WindowAction) {
+  const [backdrop, setBackdrop] = useState<NativeCaptionBackdrop | null>(null);
+  useCaptionWallpaper(native, backdrop, appearance, theme);
+  async function command(action: WindowAction, palette?: NativeCaptionAppearance) {
     try {
-      const state = await hostClient.windowAction(action);
+      const state = await hostClient.windowAction(action, palette);
       setMaximized(state.maximized);
       if (state.nativeChrome) { setNative(true); document.documentElement.dataset.windowChrome = 'native'; }
+      const next = state.captionBackdrop ?? null;
+      setBackdrop(previous => previous?.enabled === next?.enabled && previous?.frame.id === next?.frame.id ? previous : next);
       setError('');
     } catch (cause) { setError(cause instanceof Error ? cause.message : '窗口操作失败'); }
   }
@@ -44,10 +51,27 @@ export function WindowChrome() {
   useEffect(() => {
     if (!native) return;
     const media = window.matchMedia('(prefers-color-scheme: dark)');
-    const update = () => { void command(theme === 'dark' || theme === 'system' && media.matches ? 'appearanceDark' : 'appearanceLight'); };
+    let pending = 0, previous = '';
+    const update = () => {
+      pending = 0;
+      const dark = theme === 'dark' || theme === 'system' && media.matches;
+      const modal = !!document.querySelector('dialog[open], .cm-sheet-layer:not([inert])');
+      const styles = getComputedStyle(document.documentElement);
+      const colors = Object.fromEntries(['--background-soft', '--surface-hover', '--accent-soft', '--text-primary', '--text-secondary', '--accent-hover'].map(name => [name, styles.getPropertyValue(name)]));
+      const palette = captionPalette(colors, modal);
+      const signature = JSON.stringify([dark, palette, modal]);
+      if (signature === previous) return;
+      previous = signature;
+      void command(dark ? 'appearanceDark' : 'appearanceLight', { palette, modal });
+    };
+    const schedule = () => { if (!pending) pending = requestAnimationFrame(update); };
+    // Client dialogs dim the native caption too; ordinary streaming mutations are
+    // coalesced and deduplicated so they never generate repeated Host requests.
+    const observer = new MutationObserver(schedule);
+    observer.observe(document.body, { subtree: true, childList: true, attributes: true, attributeFilter: ['open', 'inert', 'aria-hidden'] });
     update(); media.addEventListener('change', update);
-    return () => media.removeEventListener('change', update);
-  }, [native, theme]);
+    return () => { media.removeEventListener('change', update); observer.disconnect(); cancelAnimationFrame(pending); };
+  }, [native, theme, appearance]);
   if (native) return error ? <span className="window-native-error" role="alert">{error}</span> : null;
   return <>
     <header className="window-chrome" aria-label="窗口标题栏">

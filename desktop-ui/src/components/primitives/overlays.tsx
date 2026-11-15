@@ -47,7 +47,7 @@ function SheetLayer({ title, onClose, children, reduced }: { title: string; onCl
   }, [present,suspended]);
   return <motion.div className="cm-sheet-layer" inert={!present||suspended} aria-hidden={suspended||undefined} style={suspended?{visibility:'hidden',pointerEvents:'none'}:undefined} initial="closed" animate="open" exit="closed">
     <motion.button className="cm-sheet-backdrop" aria-label="关闭侧栏" onClick={onClose} variants={{ closed: { opacity: 0 }, open: { opacity: 1 } }} transition={{ duration: reduced ? 0 : .2 }} />
-    <motion.aside ref={panel} role="dialog" aria-modal="true" tabIndex={-1} className="cm-sheet" aria-label={title} variants={{ closed: { opacity: 0, x: reduced ? 0 : 24 }, open: { opacity: 1, x: 0 } }} transition={reduced ? { duration: 0 } : { type: 'spring', stiffness: 380, damping: 38, mass: .9 }}><div className="row between"><h2>{title}</h2><IconButton label="关闭" icon="close" onClick={onClose} /></div>{children}</motion.aside>
+    <motion.aside ref={panel} role="dialog" aria-modal="true" tabIndex={-1} className="cm-sheet" aria-label={title} variants={{ closed: { opacity: 0, y: reduced ? 0 : 8, scale: reduced ? 1 : .99 }, open: { opacity: 1, y: 0, scale: 1 } }} transition={reduced ? { duration: 0 } : { duration: .18, ease: [.2, .75, .25, 1] }}><div className="row between"><h2>{title}</h2><IconButton label="关闭" icon="close" onClick={onClose} /></div>{children}</motion.aside>
   </motion.div>;
 }
 export function Popover({ summary, label, children, className = '', triggerClassName = '', width = 360, avoidOverlapWith }: { summary: ReactNode; label?: string; children: ReactNode | ((close: () => void) => ReactNode); className?: string; triggerClassName?: string; width?: number; avoidOverlapWith?:string }) {

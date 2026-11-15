@@ -21,6 +21,18 @@ function compatible(version, minVersion, maxVersion) {
   return true;
 }
 
+function registryCompatible(version,plugin){
+  const range=plugin.distribution?.compatibility;
+  if(!range)return true;
+  // Unsupported ranges remain visible but cannot authorize an installation.
+  return range.split(/\s+/).every(part=>{
+    const match=/^(>=|<=|>|<|=)?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.exec(part);
+    if(!match)return false;
+    const compared=compareProductVersions(version,match[2]);
+    return {'>=':compared>=0,'<=':compared<=0,'>':compared>0,'<':compared<0,'=':compared===0}[match[1]||'='];
+  });
+}
+
 function developerModeFromStore(settingsStore) {
   if (!settingsStore || typeof settingsStore.get !== 'function') return false;
   const snapshot = settingsStore.get();
@@ -92,7 +104,7 @@ function parseArchiveManifest(directory, plugin, currentVersion) {
 
 function pluginState(plugin, installedEntry, runtimeDetail, currentVersion) {
   const blocked = plugin.revoked || plugin.blockedVersions.includes(plugin.version);
-  const appCompatible = compatible(currentVersion, plugin.minCetaMeshVersion, plugin.maxCetaMeshVersion);
+  const appCompatible = compatible(currentVersion, plugin.minCetaMeshVersion, plugin.maxCetaMeshVersion)&&registryCompatible(currentVersion,plugin);
   if (blocked) return { status: 'Revoked', warning: 'This plugin is revoked. Installed files and user data were left in place.' };
   if (!appCompatible) return { status: 'Incompatible', warning: 'This plugin does not support the current CetaMesh version.' };
   if (!installedEntry) return { status: 'Available', warning: null };
@@ -122,6 +134,7 @@ export function createPluginCenterService({
   currentVersion = '1.0.0',
   fetchImpl = null,
   extensionRuntime = null,
+  localEngineService = null,
   settingsStore = null,
   now = () => Date.now(),
   log = () => {}
@@ -176,19 +189,20 @@ export function createPluginCenterService({
     }
   }
 
-  async function requestBytes(url, { maxBytes, accept = '*/*', code = 'CATALOG_TOO_LARGE' } = {}) {
+  async function requestBytes(url, { maxBytes, accept = '*/*', code = 'CATALOG_TOO_LARGE', method='GET', headers={}, body:requestBody, timeoutMs=CATALOG_TIMEOUT_MS } = {}) {
     if (typeof doFetch !== 'function') throw pluginCenterError('PLUGIN_NETWORK_UNAVAILABLE', 'fetch is unavailable');
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), CATALOG_TIMEOUT_MS);
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const response = await doFetch(url, {
-        method: 'GET',
-        headers: { accept },
+        method,
+        headers: { accept,...headers },
+        ...(requestBody===undefined?{}:{body:requestBody}),
         redirect: 'error',
         signal: controller.signal
       });
       if (!response || response.status < 200 || response.status >= 300) {
-        throw pluginCenterError('PLUGIN_HTTP_ERROR', `Plugin Service returned ${response?.status ?? 'no response'}`);
+        throw pluginCenterError(response?.status===403&&code==='PACKAGE_TOO_LARGE'?'PLUGIN_DOWNLOAD_FORBIDDEN':'PLUGIN_HTTP_ERROR',response?.status===403&&code==='PACKAGE_TOO_LARGE'?'官网已签发下载链接，但服务器拒绝返回 ZIP（403）。请联系官网维护者核对签名下载配置，或导入已有 ZIP。':`Plugin Service returned ${response?.status ?? 'no response'}`);
       }
       const body = await readBoundedBody(response, maxBytes, code);
       return { response, body };
@@ -267,9 +281,10 @@ export function createPluginCenterService({
     const installed = new Map((await installedEntries()).map(entry => [entry.id, entry]));
     const rows = [];
     for (const plugin of loaded.catalog.plugins) {
-      const entry = installed.get(plugin.id) || null;
+      const engine=plugin.kind==='external-runtime'?localEngineService?.getConfiguration(plugin.id):null;
+      const entry = engine?{id:plugin.id,version:engine.version,status:engine.enabled?'enabled':'disabled'}:installed.get(plugin.id) || null;
       let detail = null;
-      if (entry && extensionRuntime?.get) {
+      if (entry && !engine && extensionRuntime?.get) {
         try { detail = await extensionRuntime.get({ id: plugin.id }); }
         catch {
           // A stale catalog card must stay visible when an installed entry disappears during refresh.
@@ -349,7 +364,7 @@ export function createPluginCenterService({
     if (plugin.revoked || plugin.blockedVersions.includes(plugin.version)) {
       throw pluginCenterError('PLUGIN_REVOKED', `plugin ${plugin.id}@${plugin.version} is revoked or blocked`);
     }
-    if (!compatible(currentVersion, plugin.minCetaMeshVersion, plugin.maxCetaMeshVersion)) {
+    if (!compatible(currentVersion, plugin.minCetaMeshVersion, plugin.maxCetaMeshVersion)||!registryCompatible(currentVersion,plugin)) {
       throw pluginCenterError('PLUGIN_INCOMPATIBLE', `plugin ${plugin.id} is incompatible with CetaMesh ${currentVersion}`);
     }
     return plugin;
@@ -358,12 +373,35 @@ export function createPluginCenterService({
   async function stageCatalogPackage(params = {}) {
     const loaded = await currentCatalog({ requireOnline: true });
     const plugin = lookupPlugin(loaded.catalog, params.id);
-    const { body } = await requestBytes(plugin.packageUrl, {
-      maxBytes: Math.min(plugin.packageBytes, PLUGIN_CATALOG_LIMITS.maxPackageBytes),
+    let packageUrl=plugin.packageUrl;
+    if(plugin.distribution){
+      const origin=new URL(plugin.distribution.authorizationUrl).origin;
+      const authorization=await requestBytes(plugin.distribution.authorizationUrl,{maxBytes:16384,accept:'application/json',method:'POST',headers:{origin,'content-type':'application/json'},body:'{}'});
+      let grant;try{grant=JSON.parse(authorization.body.toString('utf8'));}catch{throw pluginCenterError('PLUGIN_DOWNLOAD_AUTHORIZATION_INVALID','官网返回的下载授权不是有效 JSON');}
+      let url;try{url=new URL(grant.url,origin);}catch{/* Validate below without echoing short-lived URLs. */}
+      if(grant.ok!==true||grant.plugin!==plugin.id||grant.version!==plugin.version||grant.filename!==plugin.distribution.filename||grant.filesize!==plugin.packageBytes||grant.sha256!==plugin.packageSha256||!Number.isFinite(grant.expiresInSeconds)||grant.expiresInSeconds<=0
+        ||!url||url.origin!==origin||url.username||url.password||url.hash||url.pathname!==`/plugins/packages/${encodeURIComponent(plugin.id)}/${encodeURIComponent(plugin.version)}/${encodeURIComponent(plugin.distribution.filename)}`)
+        throw pluginCenterError('PLUGIN_DOWNLOAD_AUTHORIZATION_INVALID','下载授权与所选插件、版本或校验值不一致；未请求插件文件');
+      packageUrl=url.toString();
+    }
+    const maxPackageBytes=plugin.kind==='external-runtime'?128*1024*1024:PLUGIN_CATALOG_LIMITS.maxPackageBytes;
+    const { body } = await requestBytes(packageUrl, {
+      maxBytes: Math.min(plugin.packageBytes, maxPackageBytes),timeoutMs:60000,
       accept: 'application/zip,application/octet-stream', code: 'PACKAGE_TOO_LARGE'
     });
-    const verified = verifyPluginPackage(body, { sha256: plugin.packageSha256, bytes: plugin.packageBytes });
+    const verified = verifyPluginPackage(body, { sha256: plugin.packageSha256, bytes: plugin.packageBytes,maxBytes:maxPackageBytes });
     if (!verified.ok) throw pluginCenterError(verified.code, `download verification failed (${verified.code})`);
+    if(plugin.kind==='external-runtime'){
+      if(!localEngineService)throw pluginCenterError('EXTENSION_RUNTIME_UNAVAILABLE','外部插件安装服务不可用');
+      const downloadRoot=path.join(stateRoot,'downloads');await fs.promises.mkdir(downloadRoot,{recursive:true});
+      const file=path.join(downloadRoot,crypto.randomUUID()+'.zip');
+      try{
+        await fs.promises.writeFile(file,body,{flag:'wx',mode:0o600});
+        const review=await localEngineService.execute({actor:{kind:'owner',id:'plugin-center'},method:'engines.package.review',params:{file}});
+        if(review.id!==plugin.id||review.version!==plugin.version){await localEngineService.execute({actor:{kind:'owner',id:'plugin-center'},method:'engines.package.cancel',params:{token:review.token}});throw pluginCenterError('PACKAGE_MANIFEST_MISMATCH','官网条目与插件包的真实身份不一致');}
+        return {externalPackageReview:review};
+      }finally{await fs.promises.rm(file,{force:true});}
+    }
     const unpacked = extractPluginPackage(body, { stagingRoot: path.join(stateRoot, 'staging') });
     try {
       const { manifest } = parseArchiveManifest(unpacked.directory, plugin, currentVersion);

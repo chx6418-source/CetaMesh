@@ -20,7 +20,7 @@ try {
   assert.doesNotMatch(html, /role="tab"|role="tablist"/);
   const app = fs.readFileSync(root + 'src/app/HarborApp.tsx', 'utf8');
   assert.doesNotMatch(app, /<footer className="harbor-footer"/);
-  assert.ok(app.includes('sidebarCollapsed || page === \'settings\''));
+  assert.ok(app.includes('collapsed={sidebarCollapsed}'), 'all pages use the navigation-aware hook, without overriding manual state');
   const ast=ts.createSourceFile('HarborApp.tsx',app,ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX),layouts=[];
   function visit(node){if((ts.isJsxOpeningElement(node)||ts.isJsxSelfClosingElement(node))&&node.tagName.getText(ast)==='SettingsLayout')layouts.push(node);ts.forEachChild(node,visit);}visit(ast);
   assert.equal(layouts.length,1);
@@ -33,7 +33,7 @@ try {
   assert.match(app, /<PluginsPage\s*\/>/);
   assert.match(plugins, /setApprovalOperations\(result.operations \?\? \[\]\)/);
   assert.match(plugins, /<ApprovalOperationSummary operations=\{approvalOperations\}/);
-  const { ApprovalOperationSummary, FeedbackLinkRow } = await vite.ssrLoadModule('/src/app/StatusPresentation.tsx');
+  const { ApprovalOperationSummary, FeedbackLinkRow, approvalOperationsNeedingAttention } = await vite.ssrLoadModule('/src/app/StatusPresentation.tsx');
   const operations = [
     ...Array.from({ length: 7 }, (_, index) => ({ operationId: 'done-' + index, status: 'completed' })),
     { operationId: 'active', status: 'running' }, { operationId: 'wait', status: 'waiting' },
@@ -46,6 +46,25 @@ try {
   for (const text of ['执行中', '等待后续审批', '失败', '结果未知', 'TEST_FAILURE']) assert.ok(visible.includes(text));
   assert.equal((summary.match(/请求停止/g) || []).length, 1);
   assert.equal(renderToStaticMarkup(React.createElement(ApprovalOperationSummary, { operations: [], onCancel() {} })), '');
+  assert.equal(typeof approvalOperationsNeedingAttention,'function','Chat needs an attention-only projection without changing stored operation history');
+  const attention=approvalOperationsNeedingAttention([...operations,{operationId:'cancelled',status:'cancelled'},{operationId:'rejected',status:'rejected'}]);
+  const chatSummary=renderToStaticMarkup(React.createElement(ApprovalOperationSummary,{operations:attention,onCancel(){}}));
+  assert.doesNotMatch(chatSummary,/历史操作|approval-operation-history/,'Chat has no history bar');
+  for(const text of ['执行中','等待后续审批','失败','结果未知','TEST_FAILURE'])assert.ok(chatSummary.includes(text),'Chat keeps attention state '+text);
+  assert.equal(renderToStaticMarkup(React.createElement(ApprovalOperationSummary,{operations:approvalOperationsNeedingAttention(operations.filter(row=>row.status==='completed')),onCancel(){}})),'','settled-only Chat has no empty operation wrapper');
+  assert.match(app,/if \(attentionOperations\.length\) rows\.push/,'settled operations never allocate a blank virtual Chat row');
+  assert.doesNotMatch(app,/className="diagnostics-settings-entry"/,'Settings uses the shared navigation and About feedback entries');
+  const appearance=await vite.ssrLoadModule('/src/theme/appearance.ts');
+  assert.deepEqual(appearance.APPEARANCE_SCHEMES.slice(0,3).map(row=>row.id),['original','white','black'],'keep original and add explicit white and black schemes');
+  assert.ok(appearance.APPEARANCE_SCHEMES.length>=6);
+  const values=new Map(),storage={getItem:key=>values.get(key)??null,setItem:(key,value)=>values.set(key,value)};
+  const preference={...appearance.DEFAULT_APPEARANCE,scheme:'blue',strength:25,blur:3};
+  appearance.writeAppearance(preference,storage);assert.deepEqual(appearance.readAppearance(storage),preference);
+  assert.equal(appearance.normalizeAppearance({scheme:'bad',image:'https://untrusted.invalid/image.png',strength:Infinity}).image,null,'custom background never accepts a remote URL');
+  assert.equal(appearance.normalizeAppearance({scheme:'bad'}).scheme,'original');
+  assert.throws(()=>appearance.writeAppearance(preference,{setItem(){throw Error('quota');}}),/quota/,'failed local preference persistence is reported');
+  assert.equal(appearance.appearanceColors({...preference,scheme:'white'},false)['--background'],'#ffffff');
+  assert.equal(appearance.appearanceColors({...preference,scheme:'black'},true)['--background'],'#000000');
   const url = 'https://cetamesh.com/feedback?version=1.0.0&build=long-value';
   const link = renderToStaticMarkup(React.createElement(FeedbackLinkRow, { entry: { id: 'bug', label: 'Bug 反馈', description: '功能异常、崩溃。', kind: 'feedback', url }, onVisit() {} }));
   assert.match(link, /class="about-link-copy"/);

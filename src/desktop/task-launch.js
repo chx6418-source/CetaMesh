@@ -20,9 +20,9 @@ export function normalizeTaskCollaboration(value) {
  }
  return result;
 }
-export function taskLaunchFingerprint(collaboration,{modelProvider,model}={}) {
- if(collaboration==null&&!modelProvider&&!model)return null;
- return crypto.createHash('sha256').update(JSON.stringify({collaboration,modelProvider:modelProvider||null,model:model||null})).digest('hex');
+export function taskLaunchFingerprint(collaboration,{modelProvider,model,deferStart=false}={}) {
+ if(collaboration==null&&!modelProvider&&!model&&!deferStart)return null;
+ return crypto.createHash('sha256').update(JSON.stringify({collaboration,modelProvider:modelProvider||null,model:model||null,...(deferStart?{deferStart:true}:{})})).digest('hex');
 }
 export async function snapshotTaskVerification(services,workspaceId,collaboration) {
  if(!collaboration?.verification)return null;

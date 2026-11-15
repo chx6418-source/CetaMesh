@@ -399,6 +399,7 @@ export function TaskCreateForm({ workspaces, activeWorkspaceId, providers, onCre
   const [agentProvider, setAgentProvider] = useState('');
   const [defaultProvider,setDefaultProvider]=useState(''),[defaultsReady,setDefaultsReady]=useState(false);
   const [cooperate, setCooperate] = useState(true), [allowUnknownCost, setAllowUnknownCost] = useState(false);
+  const [deferStart,setDeferStart]=useState(false);
   const [machineCheck, setMachineCheck] = useState(false), [editablePaths, setEditablePaths] = useState(''), [testFiles, setTestFiles] = useState('');
   const createRequest = useRef<{ fingerprint: string; id: string } | null>(null);
   const [error, setError] = useState('');
@@ -411,15 +412,15 @@ export function TaskCreateForm({ workspaces, activeWorkspaceId, providers, onCre
     if (!workspaceAvailable) { setError('请选择当前可用的工作区'); return; }
     setBusy(true); setError('');
     try {
-      await confirmAgentExecution(effectiveProvider, workspaceId);
-      const enabled=cooperate && managedChoice;
+      if(!deferStart)await confirmAgentExecution(effectiveProvider, workspaceId);
+      const enabled=!deferStart && cooperate && managedChoice;
       const lines=(value:string)=>value.split(/\r?\n/).map(row=>row.trim()).filter(Boolean);
       const collaboration={enabled,allowUnknownCost:enabled && allowUnknownCost,prepareNative:enabled,
         ...(enabled && machineCheck?{verification:{editablePaths:lines(editablePaths),testFiles:lines(testFiles)}}:{})};
-      const fingerprint = JSON.stringify([goal.trim(), workspaceId, agentProvider,collaboration]);
+      const fingerprint = JSON.stringify([goal.trim(), workspaceId, agentProvider,collaboration,deferStart]);
       if (createRequest.current?.fingerprint !== fingerprint) createRequest.current = { fingerprint, id: crypto.randomUUID() };
       const result=await taskClient.create({ goal: goal.trim(), workspaceId: workspaceId || null, agentProvider,collaboration,
-        requestId: createRequest.current.id });
+        requestId: createRequest.current.id,...(deferStart?{deferStart:true}:{}) });
       createRequest.current = null;
       await onCreated(result.task);
     }
@@ -431,6 +432,8 @@ export function TaskCreateForm({ workspaces, activeWorkspaceId, providers, onCre
     <Select label="工作区" value={workspaceId} onChange={event => { workspaceChosen.current = true; setWorkspaceId(event.target.value); }}><option value="">选择工作区</option>{workspaces.map(workspace => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</Select>
     {workspaceId && !workspaceAvailable && <p role="status" className="muted">所选工作区已不可用，请重新选择。</p>}
     <p className="muted">使用已配置的默认执行者。系统按任务需要选择工具和协作方式，进展与待确认操作会显示在任务详情。</p>
+    <label><input type="checkbox" checked={deferStart} onChange={event=>setDeferStart(event.target.checked)} />先创建，暂不启动（用于配置插件）</label>
+    {deferStart&&<p role="status" className="muted">创建后到插件中心「管理插件」授权此任务，再从任务详情启动。此时不会启动 Agent、占用工作区或发起模型请求；自动协作暂不授权。</p>}
     <details><summary>协作与验收设置</summary>
       <Select label="执行者" value={agentProvider} onChange={event => setAgentProvider(event.target.value)}><option value="">自动（使用已配置的默认执行者）</option>{providers.map(item => <option key={item.id} value={item.id} disabled={!item.eligible}>{item.name}{item.eligible ? '' : ' · 不可用'}</option>)}</Select>
       {providers.some(item => !item.eligible) && <details><summary>不可用执行者与恢复方法</summary><ul>{providers.filter(item => !item.eligible).map(item => <li key={item.id}><strong>{item.name}</strong> · {item.id === 'dsh' ? dshSetupReasonLabel(item.reason) : availabilityReasonLabel(item.reason)}</li>)}</ul><p className="muted">请在执行者设置中核对安装、登录、连接与权限，重新检查后重新打开此窗口。执行条件未满足时仍不能派发任务。</p></details>}
@@ -440,7 +443,7 @@ export function TaskCreateForm({ workspaces, activeWorkspaceId, providers, onCre
       <label><input type="checkbox" checked={machineCheck} disabled={!managedChoice || !cooperate} onChange={event=>setMachineCheck(event.target.checked)} />以现有项目测试作为自动验收标准</label>
       {machineCheck && <><label>允许修改的文件（每行一个精确相对路径）<textarea className="cm-textarea" aria-label="允许修改的文件" value={editablePaths} onChange={event=>setEditablePaths(event.target.value)} required /></label><label>已有验收文件（每行一个，内容保持不变）<textarea className="cm-textarea" aria-label="已有验收文件" value={testFiles} onChange={event=>setTestFiles(event.target.value)} required /></label><p className="muted">Core 将固定这些文件和 package.json 的内容，独立运行 npm test。自动验收仅覆盖此测试和修改范围，需要干净的 Git 基线。</p></>}
     </details>
-    {error && <ErrorNotice error={error} />}<Button variant="primary" type="submit" disabled={busy || !defaultsReady || !goal.trim() || !workspaceAvailable}>{busy ? '启动中…' : '开始任务'}</Button></form>;
+    {error && <ErrorNotice error={error} />}<Button variant="primary" type="submit" disabled={busy || !defaultsReady || !goal.trim() || !workspaceAvailable}>{busy ? deferStart?'创建中…':'启动中…' : deferStart?'创建待启动任务':'开始任务'}</Button></form>;
 }
 
 export function TaskApprovals({taskId}:{taskId:string}) {

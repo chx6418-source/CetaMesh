@@ -40,6 +40,7 @@ export function createSettingsStore({ stateDir, now = () => Date.now() } = {}) {
     if (result.models.connections === null) delete result.models.connections;
     if (result.models.modelPreferences.length === 0) delete result.models.modelPreferences;
     if (result.extensions.skillSources.length === 0) delete result.extensions.skillSources;
+    if (result.agents.codexTransport === 'exec') delete result.agents.codexTransport;
     return result;
   }
 
@@ -48,6 +49,7 @@ export function createSettingsStore({ stateDir, now = () => Date.now() } = {}) {
     if (settings?.models?.connections != null) kinds.push('model-connections');
     if (settings?.models?.modelPreferences?.length) kinds.push('model-preferences');
     if (settings?.extensions?.skillSources?.length) kinds.push('skill-sources');
+    if (settings?.agents?.codexTransport && settings.agents.codexTransport !== 'exec') kinds.push('codex-app-server');
     return kinds;
   }
 

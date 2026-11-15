@@ -10,6 +10,7 @@ import { spawn } from 'node:child_process';
 import { once } from 'node:events';
 import { zipSync } from 'fflate';
 import { writeJsonAtomic } from '../src/storage/json-file.js';
+import { createCodexSessionLifecycle } from '../src/agent/codex-session-lifecycle.js';
 
 const exe = path.resolve(process.env.WHALEBRIDGE_DIST_DIR ?? 'dist/core', 'WhaleBridgeCore.exe');
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cetamesh-m6c-business-'));
@@ -151,13 +152,31 @@ try {
   await rpc('ui.plugins.uninstall', { id: pluginId });
   await assert.rejects(rpc('ext.get', { id: pluginId }));
   assert.ok(requests.some(row => row.resultCount > 0), 'structured tool results really return across HTTP');
-  // Production Owner IPC recovery for a post-exit stale Codex Task. Synthetic
-  // historical metadata only: no native CLI or user project is started here.
-  let stale = await rpc('task.create', { goal: 'post-exit stale Codex Task', workspaceId: ws.id });
+  // Production Owner IPC recovery requires a bound lifecycle receipt, not Task
+  // prose. Synthetic never-started metadata only; no Codex CLI is run here.
+  let stale = await rpc('task.create', { goal: 'never-dispatched Codex Task with retained receipt', workspaceId: ws.id });
   stale = (await rpc('task.start', { id: stale.id, expectedRev: stale.rev,
     provider: 'codex', sessionId: 'prior-core-' + stale.id })).task;
   stale = (await rpc('task.block', { id: stale.id, expectedRev: stale.rev, reason: 'STAGING_READ_FAILED' })).task;
   await stop(); await start();
+  await assert.rejects(rpc('ui.task.cancel', { id: stale.id, expectedRev: stale.rev }), error => error.code === 'SESSION_TRANSPORT_UNKNOWN',
+    'A historical failure note alone must not release execution ownership');
+  const unproven = (await rpc('task.get', { id: stale.id })).task;
+  assert.equal(unproven.id, stale.id);
+  assert.equal(unproven.workspaceId, ws.id);
+  assert.equal(unproven.status, 'blocked');
+  assert.deepEqual(unproven.currentAgent, stale.currentAgent);
+  await stop();
+  // Only the owned test StateDir is seeded, while its Core is stopped. This is
+  // a fixture receipt, not evidence that a real native process has exited.
+  const neverStarted = createCodexSessionLifecycle({ stateDir: path.join(data, 'state') }).create({
+    sessionId: stale.currentAgent.sessionId, taskId: stale.id, workspaceId: ws.id,
+    transport: 'exec', snapshotId: 'synthetic-never-started', attemptId: null
+  });
+  assert.equal(neverStarted.receipt.evidence, 'never-started');
+  assert.equal(neverStarted.generation, 0);
+  assert.equal(neverStarted.runId, null);
+  await start();
   const removedOwner = await rpc('ui.task.cancel', { id: stale.id, expectedRev: stale.rev });
   assert.equal(removedOwner.task.status, 'cancelled');
   await stop(); await start();
@@ -176,7 +195,7 @@ try {
   const stillOwned = (await rpc('task.get', { id: unknown.id })).task;
   assert.equal(stillOwned.status, 'blocked');
   assert.equal(stillOwned.currentAgent.sessionId, unknown.currentAgent.sessionId);
-  console.log('VERIFIED_RELEASE_INTEGRATION SEA post-exit missing Codex Session cancellation survives restart; unknown native execution retains its Task owner');
+  console.log('VERIFIED_RELEASE_INTEGRATION SEA cancellation with a synthetic never-started lifecycle receipt survives restart; missing receipts and unknown execution retain Task ownership; no real Codex process exit tested');
 
   console.log('VERIFIED_RELEASE_INTEGRATION production SEA + synthetic Model HTTP → real Broker filesystem/approval/deny/error → final Chat; Owner-linked Artifact; Plugin install/review/Worker/disable/restart/uninstall; no system Node');
 } finally {

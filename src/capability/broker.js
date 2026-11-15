@@ -135,9 +135,9 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    const failure=capabilityError(identity?'OPERATION_RESULT_PERSIST_FAILED':'DISPATCH_RESULT_PERSIST_FAILED','Capability result was not durably recorded');
    failure.effectStatus='unknown';throw failure;}
  }
- function verifiedGitDispatch(binding){
+ function verifiedGitDispatch(binding,capability='git.branch.switch'){
   const row=binding&&dispatches[binding.key];
-  if(!row||row.capability!=='git.branch.switch'||row.fingerprint!==binding.fingerprint
+  if(!row||row.capability!==capability||binding.capability!==capability||row.fingerprint!==binding.fingerprint
    ||row.requestId!==binding.requestId||row.workspaceId!==binding.workspaceId||(row.taskId??null)!==binding.taskId
    ||(row.operationId??null)!==binding.operationId||row.executionAttempt!==binding.attemptId
    ||row.authorization?.kind!=='approval'||row.authorization.id!==binding.approvalId)
@@ -302,7 +302,7 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   if(await descriptor.validateChildRequest(parent,request)!==true)throw capabilityError('APPROVAL_MISMATCH','Concrete request differs from the reviewed data endpoint');
   return {descriptor,parent};
  }
- async function execute(raw,{signal,consumeReadBytes,acquireReadSlot}={}){
+ async function execute(raw,{signal,consumeReadBytes,acquireReadSlot,beforeAgentSend}={}){
   const request=normalizeRequest(raw);
   let releaseRead=null;
   if(request.approvalId){
@@ -363,6 +363,8 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
    };
    let providerRequest=cooperativeRead?{...request,...(signal?{signal}:{}),assertAuthorized,
     consumeReadBytes:typeof consumeReadBytes==='function'?consumeReadBytes:undefined}:signal?{...request,signal}:request;
+   // Core-only closure, never part of normalized/durable/model-supplied input.
+   if(entry.id==='agent.run'&&typeof beforeAgentSend==='function')providerRequest={...providerRequest,beforeAgentSend};
    if(entry.gitBranchApplication===true)providerRequest={...providerRequest,gitDispatchBinding:{key:claim.key,
     requestId:request.requestId,capability:entry.id,fingerprint:claim.row.fingerprint,taskId:request.taskId??null,
     operationId:request.operationId??null,workspaceId:request.workspaceId,approvalId:request.approvalId,attemptId:claim.row.executionAttempt}};
@@ -540,7 +542,14 @@ export function createCapabilityBroker({registry=createCapabilityRegistry(),poli
   },
   workspaceRecoveryBlocker({workspaceId,reviewedTaskId,closedGitBindings=[],currentGitBinding,overlaps=(left,right)=>left===right}) {
    for(const binding of closedGitBindings)verifiedGitDispatch(binding);
-   if(currentGitBinding)verifiedGitDispatch(currentGitBinding);
+   if(currentGitBinding){
+    if(currentGitBinding.capability==='git.checkpoint.restore'){
+     // Only the live checkpoint invocation can exempt itself. Historical
+     // checkpoint rows are never accepted as branch recovery bindings.
+     if(!activeDispatches.has(currentGitBinding.key))throw capabilityError('WORKSPACE_RECOVERY_REQUIRED','Checkpoint invocation is not active');
+     verifiedGitDispatch(currentGitBinding,'git.checkpoint.restore');
+    }else verifiedGitDispatch(currentGitBinding);
+   }
    for(const [key,row] of Object.entries(dispatches)) {
     if(!row?.workspaceId)continue;
     const active=activeDispatches.has(key);

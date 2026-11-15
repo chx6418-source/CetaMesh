@@ -384,7 +384,7 @@ function readByteBatch(root, journalDir, name) {
   }
   if (manifest.gitCompletion !== undefined) {
     const completion = manifest.gitCompletion, value = completion?.result;
-    if (manifest.owner?.kind !== 'git-branch-switch' || !manifest.owner.dispatchBinding || completion?.schema !== 1
+    if (!['git-branch-switch','git-checkpoint-restore'].includes(manifest.owner?.kind) || !manifest.owner.dispatchBinding || completion?.schema !== 1
       || completion.requestSha256 !== manifest.requestSha256 || JSON.stringify(completion.dispatchBinding) !== JSON.stringify(manifest.owner.dispatchBinding)
       || value?.phase !== 'completed' || value.targetHead !== manifest.owner.targetHead || value.targetBranch !== manifest.owner.targetBranch
       || !byteHash(value.indexIdentity) || Buffer.byteLength(JSON.stringify(completion)) > 32768)
@@ -392,11 +392,11 @@ function readByteBatch(root, journalDir, name) {
   }
   if (manifest.gitInvocations !== undefined) {
     const attempts = manifest.gitInvocations, seen = new Set();
-    if (!manifest.owner?.dispatchBinding || !Array.isArray(attempts) || !attempts.length || attempts.length > 16)
+    if (!['git-branch-switch','git-checkpoint-restore'].includes(manifest.owner?.kind) || !manifest.owner?.dispatchBinding || !Array.isArray(attempts) || !attempts.length || attempts.length > 16)
       throw byteFailure('IMPORT_JOURNAL_INVALID', 'Invalid bounded Git invocation chain');
     for (const attempt of attempts) {
       const binding = attempt?.binding;
-      if (!['started','closed'].includes(attempt?.state) || !binding || binding.capability !== 'git.branch.switch'
+      if (!['started','closed'].includes(attempt?.state) || !binding || binding.capability !== ({'git-branch-switch':'git.branch.switch','git-checkpoint-restore':'git.checkpoint.restore'})[manifest.owner.kind]
         || binding.workspaceId !== manifest.owner.workspaceId || binding.taskId !== manifest.owner.dispatchBinding.taskId
         || !['key','requestId','approvalId','attemptId'].every(key=>typeof binding[key]==='string'&&binding[key].length>0&&binding[key].length<=240)
         || !byteHash(binding.fingerprint) || seen.has(binding.attemptId)) throw byteFailure('IMPORT_JOURNAL_INVALID', 'Unbound Git invocation chain entry');
@@ -454,7 +454,7 @@ function byteSettlement(root, batch, result) {
     },
     recordGitCompletion(completion) {
       assertApplied();
-      if (manifest.owner?.kind !== 'git-branch-switch' || !manifest.owner.dispatchBinding
+      if (!['git-branch-switch','git-checkpoint-restore'].includes(manifest.owner?.kind) || !manifest.owner.dispatchBinding
         || completion?.schema !== 1 || completion.requestSha256 !== manifest.requestSha256
         || completion.result?.phase !== 'completed' || Buffer.byteLength(JSON.stringify(completion)) > 32768)
         throw byteFailure('WORKSPACE_RECOVERY_REQUIRED', 'Invalid Git completion receipt');
@@ -554,7 +554,8 @@ export async function applyWorkspaceByteTransaction(rootReal, changes, {journalD
     if (manifest) {
       manifest.status = none ? 'completed-no-effect' : 'unknown';
       if (error.receiptSha256) manifest.receiptSha256 = error.receiptSha256;
-      try { persistByteManifest(dir, manifest); } catch {}
+      try { persistByteManifest(dir, manifest); }
+      catch { /* The last durable journal and the original failure remain authoritative; a failed save cannot prove rollback. */ }
     }
     if (none && dir && journalNode) try { removeByteBatch(dir, parent, manifest); } catch { error.cleanupPending = true; }
     throw byteFailure(none ? error.code ?? 'WORKSPACE_BYTE_FAILED' : 'WORKSPACE_RECOVERY_REQUIRED',

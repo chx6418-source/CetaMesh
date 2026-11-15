@@ -21,7 +21,8 @@ try {
   const markup = render();
   assert.match(markup, /class="composer-context-trigger"/);
   assert.match(markup, /NexBox-main/);
-  assert.match(markup, /aria-label="添加附件"/);
+  assert.match(markup, /aria-label="添加附件或技能"/);
+  assert.doesNotMatch(markup, /aria-label="添加附件"|aria-label="添加技能"|>附件<|>\+ 技能</, 'the composer exposes one icon trigger for attachment and skill actions');
   assert.match(markup, /class="composer-submit"[^>]*aria-label="发送消息"[^>]*disabled/);
   assert.match(markup, /Codex · 待确认/, 'a selected provider without a runtime acknowledgement must not claim an effective model');
   assert.doesNotMatch(markup, /Codex 本机配置/);

@@ -55,7 +55,13 @@ try{
   try{const content='approved bytes';const changes=[{action:'write',path:'result.txt',content,expectedHash:null,hash:hash(content)}];const pending=await cap.applyAgentWorkspaceChanges({taskId:t.id,workspaceId:workspace.id,...t.currentAgent,runId:'run',phase:'user',requestId:'import-1',changes});
    assert.equal(pending.status,'pending');assert.equal(rt.get({id:t.id}).task.executionEvidence.length,0);assert.equal(fs.existsSync(path.join(source,'result.txt')),false);
    const result=await cap.execute({method:'capability.approval.decide',params:{id:pending.approvalId,approve:true}});assert.equal(result.status,'completed');assert.equal(fs.readFileSync(path.join(source,'result.txt'),'utf8'),content);
-   const evidence=rt.get({id:t.id}).task.executionEvidence;assert.equal(evidence.length,1);assert.equal(evidence[0].source,'core-import');assert.equal(evidence[0].runId,'run');assert.equal(evidence[0].changes[0].sha256,hash(content));assert.equal(evidence[0].changes[0].path,'result.txt');
+   const evidence=rt.get({id:t.id}).task.executionEvidence;
+   const imports=evidence.filter(row=>row.source==='core-import');assert.equal(imports.length,1);
+   assert.equal(imports[0].runId,'run');assert.equal(imports[0].changes[0].sha256,hash(content));assert.equal(imports[0].changes[0].path,'result.txt');
+   const verification=evidence.filter(row=>row.capability==='test.run');assert.equal(verification.length,1);
+   assert.equal(verification[0].runId,'run');assert.equal(verification[0].status,'not-run');
+   assert.equal(verification[0].verificationStatus.code,'POST_WRITE_NOT_CONFIGURED','an imported file does not invent a passing test');
+   assert.equal(evidence.length,imports.length+verification.length,'no duplicate import receipts are added');
    await assert.rejects(cap.applyAgentWorkspaceChanges({taskId:t.id,workspaceId:workspace.id,...t.currentAgent,runId:'old',phase:'user',requestId:'stale',changes:[{action:'write',path:'stale.txt',content:'stale',expectedHash:null,hash:hash('stale')}]}),{code:'AGENT_ASSIGNMENT_EXPIRED'});
    t=rt.observeExecution({id:t.id,...t.currentAgent,runId:'run',phase:'user',state:'awaiting-review'});
    const ui=createDesktopUiService({services:{taskService:ts,capabilityService:cap,agentBroker:{status:async()=>({running:false,lastRunStatus:'completed'})}}});

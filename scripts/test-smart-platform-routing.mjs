@@ -60,8 +60,9 @@ try {
     isRegistered: id => id === 'fixture-model',
     resolveProvider: () => ({ id: 'fixture-model' }),
     async *stream(request) {
-      const { onContext, signal, ...payload } = request;
+      const { onContext, onConfiguration, signal, ...payload } = request;
       assert.equal(typeof onContext, 'function', 'production passes an ephemeral context observer, not model payload');
+      assert.equal(typeof onConfiguration, 'function', 'configuration observation remains an ephemeral callback');
       modelRequests.push(structuredClone(payload));
       yield { type: 'assistant/chunk', data: { chunk: { type: 'text-delta', text: 'Model reply' } } };
       yield { type: 'turn/end', data: { reason: { kind: 'completed' } } };
@@ -88,6 +89,7 @@ try {
   await waitFor(() => chat.execute({ method: 'chat.status', params: { id: session.id } }), status => status.turn === null, 'capability-backed Chat turn');
   let history = await chat.execute({ method: 'chat.history', params: { id: session.id } });
   assert.equal(history.messages.at(-1).routing.resolvedRoute, 'capability');
+  assert.ok(modelRequests.length > 0, 'the completed capability result reaches the selected model stream');
   assert.ok(modelRequests.at(-1).messages.at(-1).content.includes('Capability reference data'));
   assert.equal(audit.filter(event => event.capability === 'clock.now' && event.status === 'completed').length, 1,
     JSON.stringify({ audit, routing: history.messages.at(-1).routing }));

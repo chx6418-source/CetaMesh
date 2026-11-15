@@ -61,6 +61,7 @@ export const FIELDS = Object.freeze({
     defaultAgentPreset: text('whale-chat-v2', { description: '默认 Agent Preset' }),
     defaultAgentProvider: text('auto', { choices: ['auto', 'dsh', 'codex', 'claude', 'gemini', 'opencode', 'qwen', 'zcode'], description: '新建会话默认 Agent Provider' }),
     allowBackgroundTurns: bool(true, { description: '允许后台回合' }),
+    codexTransport: text('exec', { choices: ['exec', 'app-server'], description: 'Codex transport for new Sessions; App Server requires a verified native account boundary' }),
     codexOpenAiEnvironmentAuthorized: bool(false, { description: '明确授权 Codex CLI 使用本机 OPENAI_API_KEY 与 OPENAI_BASE_URL；只传递这两个变量，不导入其它凭据' })
   }),
   memory: Object.freeze({

@@ -32,9 +32,9 @@ try{
   const bundle=await build({stdin:{resolveDir:uiRoot,loader:'tsx',contents:`
     import React from 'react';import {createRoot} from 'react-dom/client';import {MemoryRouter} from 'react-router';import {ForgeTools} from './src/app/ForgeTools';import {PluginsPage} from './src/app/HarborApp';
     const parentIntegrations=${JSON.stringify(parentIntegrations)},parentOverview=${JSON.stringify(parentOverview)};
-    const reads=['repository.get','branches.list','issues.list','pulls.list','builds.list','builds.jobs','releases.list'];
-    const writes=['branch.create','issue.create','pull.create','workflow.dispatch','release.draft'];
-    const repositories=[{owner:'fixture',repo:'project',credentialRef:'plugin-forge-github',actions:[...reads,...writes],branchPrefixes:['codex/'],workflows:[{id:'ci.yml',refs:['codex/probe'],inputs:{candidate:['false']}}]}];
+    const reads=['repository.get','branches.list','issues.list','pulls.list','builds.list','builds.jobs','releases.list','content.get'];
+    const writes=['branch.create','issue.create','pull.create','workflow.dispatch','release.draft','content.create','content.update'];
+    const repositories=[{owner:'fixture',repo:'project',credentialRef:'plugin-forge-github',actions:[...reads,...writes],branchPrefixes:['codex/'],contentPaths:['src/sample.txt'],workflows:[{id:'ci.yml',refs:['codex/probe'],inputs:{candidate:['false']}}]}];
     const doc={revision:1,providers:[{provider:'github',endpoint:'https://api.github.com',repositories,actions:[...reads,...writes],unsupported:[],credentialConfigured:true,credentialSavingAvailable:true,credentialUpdatedAt:null},{provider:'gitcode',endpoint:'https://api.gitcode.com',repositories:[],actions:[...reads,...writes],unsupported:['workflow.dispatch','release.draft'],credentialConfigured:false,credentialSavingAvailable:true,credentialUpdatedAt:null}]};
     window.fixture={calls:[],fault:'',describeFault:'',saveFault:false,parentTaskFault:false,doc};
     const failure=(code,message)=>Object.assign(new Error(message),{code});
@@ -43,6 +43,8 @@ try{
       if(method==='ui.developer.forge.describe'){if(window.fixture.describeFault)throw failure(window.fixture.describeFault,'Forge request failed');return structuredClone(doc);}
       if(method==='ui.developer.forge.credentials.save'){if(window.fixture.saveFault)throw failure('FORGE_CREDENTIAL_SAVE_FAILED','Dedicated credential could not be saved');doc.revision++;doc.providers.find(row=>row.provider===params.provider).credentialConfigured=true;return {configured:true};}
       if(method==='ui.developer.forge.save'){if(window.fixture.saveFault)throw failure('FORGE_CONFIG_CONFLICT','Forge configuration changed; reload before saving');doc.revision++;doc.providers.find(row=>row.provider===params.provider).repositories=params.repositories;return structuredClone(doc);}
+      if(method==='ui.developer.forge.invoke'&&params.action==='content.get')return {status:'completed',result:{path:params.input.path,ref:params.input.ref,blobSha:'a'.repeat(40),text:'fixture file content',contentRedacted:false}};
+      if(method==='ui.developer.forge.invoke'&&params.action==='content.update')return {status:'pending',approvalId:'fixture-content-approval'};
       if(method==='ui.developer.forge.invoke'){if(window.fixture.fault)throw failure(window.fixture.fault,window.fixture.fault==='FORGE_HTTP_ERROR'?'Forge returned HTTP 403':'Forge request failed');return params.action.endsWith('.create')||params.action==='workflow.dispatch'||params.action==='release.draft'?{status:'pending',approvalId:'fixture-approval'}:{status:'completed',result:{items:[{name:'fixture-reply',sha:'a'.repeat(40)}]}};}
       if(method==='ui.plugins.catalog')return {available:true,configured:true,offline:false,reason:null,plugins:[]};
       if(method==='ui.plugins.status')return {catalogAvailable:true,configured:true,offline:false,developerMode:false,plugins:[],installed:[],integrations:parentIntegrations,mcp:[]};
@@ -116,7 +118,12 @@ try{
     assert.equal(await evaluate('document.querySelector("input[aria-label=\\"Issue 标题\\"]").value'),'preserved issue');
     await evaluate('window.fixture.fault=""');await click('提交审批');await until('document.body.innerText.includes("fixture-approval")','pending approval shown');
     const writes=await evaluate('window.fixture.calls.filter(row=>row.params?.action==="issue.create")');assert.equal(writes.length,2);assert.equal(writes[0].params.operationId,writes[1].params.operationId,'retry retains logical operation identity');assert.equal(writes[0].params.taskId,'task-fixture');assert.equal(writes[0].params.workspaceId,'workspace-fixture');assert.equal(Object.hasOwn(writes[0].params,'approved'),false);
-    await click('关闭');await input('input[aria-label="搜索已配置仓库"]','no-match');assert.ok(await evaluate('document.body.innerText.includes("没有匹配的仓库")'));await input('input[aria-label="搜索已配置仓库"]','');
+    await click('关闭');await click('文件');await input('input[aria-label="文件路径"]','src/sample.txt');await input('input[aria-label="读取分支或提交"]','codex/probe');await click('读取文件');
+    await until('document.body.innerText.includes("fixture file content")','bounded file content is visible');
+    await click('更新文件提交');await input('dialog[open] input[aria-label="目标审查分支"]','codex/probe');await input('dialog[open] input[aria-label="提交说明"]','Update sample');await input('dialog[open] input[aria-label="原文件 Blob SHA"]','a'.repeat(40));await input('dialog[open] textarea[aria-label="完整 UTF-8 文件内容"]','reviewed UI draft');await click('提交审批');
+    await until('document.querySelector("dialog[open]")?.textContent.includes("fixture-content-approval")','file update remains pending approval');
+    const contentWrite=await evaluate('window.fixture.calls.findLast(row=>row.params?.action==="content.update")');assert.equal(contentWrite.params.input.path,'src/sample.txt');assert.equal(contentWrite.params.input.text,'reviewed UI draft');assert.equal(contentWrite.params.input.sha,'a'.repeat(40));assert.equal(contentWrite.params.taskId,'task-fixture');assert.equal(Object.hasOwn(contentWrite.params,'approved'),false);await click('关闭');
+    await input('input[aria-label="搜索已配置仓库"]','no-match');assert.ok(await evaluate('document.body.innerText.includes("没有匹配的仓库")'));await input('input[aria-label="搜索已配置仓库"]','');
     await click('查看 GitCode 仓库');await click('添加仓库');await input('input[aria-label="Owner / 组织"]','fixture');await input('input[aria-label="仓库名称"]','gitcode-public');await evaluate('document.querySelector("dialog[open] input[type=checkbox]").click()');await click('下一步：权限范围');
     assert.equal(await evaluate('Array.from(document.querySelectorAll("dialog[open] fieldset:last-of-type input")).every(row=>row.disabled)'),true,'public read does not offer enabled write grants');
     await evaluate('window.fixture.saveFault=false');await click('保存仓库权限');await until('document.querySelector("dialog[open]")?.textContent.includes("仓库权限范围已保存")','public scope save');await click('关闭');await click('Releases');

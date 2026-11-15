@@ -197,7 +197,7 @@ try {
   assert.equal(await evaluate('window.bitmapCalls'), bitmapBefore); assert.ok(!calls.slice(callsBeforeHeader).some(row => row.name === 'oversized-dimensions.png'));
   console.log('PASS oversized image dimensions are rejected before browser decoding or Core upload');
   await evaluate('window.fixture.showComposer()'); await until('!!document.querySelector(".composer-dock textarea")', 'production Composer mount');
-  assert.equal(await evaluate('document.querySelectorAll(".composer-dock button[aria-label=添加附件]").length'), 1, 'production Composer exposes its one attachment entry');
+  assert.equal(await evaluate('document.querySelectorAll(".composer-dock button[aria-label=添加附件或技能]").length'), 1, 'production Composer exposes one icon for attachments and skills');
   assert.equal(await evaluate('document.querySelectorAll(".composer-dock button[aria-label=\\"添加文本或源码附件\\"]").length'), 0, 'production Composer has no second legacy picker entry');
   assert.equal(await evaluate('document.querySelector(".composer-dock").innerText.includes("MiB")'), false, 'production Composer keeps limit explanations out of its empty draft');
   await evaluate('window.pasteImage()'); await until('document.querySelector(".composer-dock")?.innerText.includes("pasted.png")', 'production Composer receives paste');

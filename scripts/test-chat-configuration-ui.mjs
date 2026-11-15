@@ -88,8 +88,10 @@ fixtureRoot.render(<main className='harbor-main fixture'><ChatPage session={sess
     await until('window.fixture.calls.filter(r=>r.method==="ui.chat.history").length>'+historyReads,'normal history refresh');
     await delay(120);
     assert.equal(await evaluate('document.querySelector(".message-skill-references pre")?.textContent'),'LOW_TRUST_REFERENCE_BODY','equal persisted references keep the expanded preview across history refresh');
-    await until('!!document.querySelector("button[aria-label=添加技能]")','shared Skill add entry');
-    await evaluate('document.querySelector("button[aria-label=添加技能]").click()');
+    await until('!!document.querySelector("button[aria-label=添加附件或技能]")','shared add entry');
+    await evaluate('document.querySelector("button[aria-label=添加附件或技能]").click()');
+    await until('!!document.querySelector("[role=menu][aria-label=添加附件或技能]")','shared attachment and skill menu');
+    await evaluate('Array.from(document.querySelectorAll("[role=menuitem]")).find(item=>item.textContent.trim()==="添加技能").click()');
     await until('!!document.querySelector("input[aria-label=\\"选择 Skill fixture-reference\\"]")','actual shared Skill selector');
     await evaluate('document.querySelector("input[aria-label=\\"选择 Skill fixture-reference\\"]").click()');
     await click('关闭 Skill');

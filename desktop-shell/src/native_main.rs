@@ -36,6 +36,9 @@ mod reference_browser;
 mod webview_ui;
 #[cfg(windows)]
 mod main_webview;
+#[cfg(windows)]
+mod chat_caption;
+mod caption_backdrop;
 
 use std::env;
 use std::path::{Path, PathBuf};
@@ -512,8 +515,18 @@ fn main() {
         }
     }
     #[cfg(all(windows, debug_assertions))]
+    if let Some(report) = std::env::args().find_map(|arg| arg.strip_prefix("--chat-caption-smoke=").map(PathBuf::from)) {
+        if let Err(error) = main_webview::smoke(&report, true) { let _ = std::fs::write(&report, format!("FAIL {error}")); }
+        return;
+    }
+    #[cfg(all(windows, debug_assertions))]
+    if let Some(report) = std::env::args().find_map(|arg| arg.strip_prefix("--caption-wallpaper-smoke=").map(PathBuf::from)) {
+        if let Err(error)=main_webview::wallpaper_smoke(&report) { let _=std::fs::write(&report,format!("FAIL {error}")); std::process::exit(1); }
+        return;
+    }
+    #[cfg(all(windows, debug_assertions))]
     if let Some(report) = std::env::args().find_map(|arg| arg.strip_prefix("--main-webview-smoke=").map(PathBuf::from)) {
-        if let Err(error) = main_webview::smoke(&report) { let _ = std::fs::write(&report, format!("FAIL {error}")); }
+        if let Err(error) = main_webview::smoke(&report, false) { let _ = std::fs::write(&report, format!("FAIL {error}")); }
         return;
     }
     #[cfg(all(windows, debug_assertions))]

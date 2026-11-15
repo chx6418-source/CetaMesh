@@ -111,8 +111,32 @@ async function bundle(directory) {
         if(method==='ui.agent.auth.describe')return{provider:params.provider,attemptId:null,state:'no-session',reason:'not-configured',revision:1,epoch:1};
         if(method==='ui.devices.overview')return{available:true,enabled:false,local:{id:'synthetic-local-node',name:'Synthetic Desktop',role:'desktop',transportRunning:false},peers:[{id:'synthetic-mobile-node',name:'Synthetic offline device',role:'mobile',trust:'unknown',presence:'offline',grants:[],lastSeenAt:null,lastError:'连接尚未验证'}],audit:[{at:timestamp,code:'SYNTHETIC_OFFLINE_OBSERVATION',direction:'inbound'}],truncated:false};
         if(method==='ui.workspace.list')return{workspaces:[workspace],activeId:workspace.id};if(method==='ui.workspace.open')return{workspace,activeId:workspace.id};
-        if(method==='ui.workspace.git.overview')return gitOverview;if(method==='ui.workspace.version')return{isRepo:true,branch:gitOverview.git.branch,headSha:gitOverview.git.headSha,dirty:true,changes:gitEntries.slice(0,50).map(row=>({path:row.path,status:row.x+row.y,conflict:false}))};
+        if(method==='ui.workspace.git.overview')return gitOverview;
+        if(method==='ui.workspace.git.context')return{...gitOverview,git:{...gitOverview.git,entries:[]},branches:[],history:[],conflicts:[]};
+        if(['ui.workspace.git.status.page','ui.workspace.git.branches','ui.workspace.git.history.page'].includes(method)){
+          const entries=method.endsWith('status.page')?gitEntries:method.endsWith('branches')?gitOverview.branches:gitOverview.history;
+          const offset=Number(params.cursor??0),limit=params.limit??100;
+          return{workspaceId:workspace.id,entries:entries.slice(offset,offset+limit),nextCursor:offset+limit<entries.length?String(offset+limit):null,totalKnown:entries.length,branch:gitOverview.git.branch,headSha:gitOverview.git.headSha,conflictCount:0};
+        }
+        if(method==='ui.workspace.git.checkpoint.list')return{workspaceId:workspace.id,entries:[]};
+        if(method==='ui.workspace.version')return{isRepo:true,branch:gitOverview.git.branch,headSha:gitOverview.git.headSha,dirty:true,changes:gitEntries.slice(0,50).map(row=>({path:row.path,status:row.x+row.y,conflict:false}))};
         if(method==='ui.workspace.git.diff')return{output:'diff --git a/'+(params.path||'src/file.ts')+' b/'+(params.path||'src/file.ts')+'\\n--- a/'+(params.path||'src/file.ts')+'\\n+++ b/'+(params.path||'src/file.ts')+'\\n@@ -1,2 +1,2 @@\\n unchanged\\n-old value\\n+new value',cached:false,hasChanges:true,truncated:false};
+        if(method==='ui.plugins.engines.list')return{engines:window.fixtureExternalPlugins??[]};
+        if(method==='app.pickExtensionPackage')return{path:window.fixtureOrdinaryPackage?'C:/fixture/ordinary.zip':'C:/fixture/AgentOS.zip'};
+        if(method==='ui.plugins.engines.package.review'){
+          if(window.fixtureOrdinaryPackage)throw Object.assign(new Error('Ordinary extension fallback'),{code:'ENGINE_PACKAGE_NOT_SUPPORTED'});
+          if(window.fixtureHoldEngineReview)await new Promise(resolve=>(window.fixtureEngineReleases??=[]).push(resolve));
+          return{id:'agentos',name:'AgentOS',token:'fixture-package-'+window.fixtureCalls.length,version:'2.0.0',digest:'a'.repeat(64),sourceSha256:'b'.repeat(64),files:42,bytes:120000000,installed:!!window.fixtureExternalPlugins?.length,installable:true,summary:['逐次批准实际工具请求']};
+        }
+        if(method==='ui.plugins.engines.package.cancel')return{cancelled:true};
+        if(method==='ui.plugins.engines.package.install'){
+          if(window.fixtureFailEngineInstall){window.fixtureFailEngineInstall=false;throw Object.assign(new Error('Controlled package install failure'),{code:'ENGINE_IDENTITY_CHANGED'});}
+          window.fixtureExternalPlugins=[{id:'agentos',name:'AgentOS',version:'2.0.0',enabled:true,summary:['逐次批准实际工具请求'],active:0,root:'C:/fixture/managed/AgentOS',nodePath:'C:/fixture/managed/node.exe',package:{managed:true}}];return{installed:true,id:'agentos',enabled:true};
+        }
+        if(method==='ui.plugins.engines.review')return{token:'fixture-reenable'};
+        if(method==='ui.plugins.engines.disable'||method==='ui.plugins.engines.enable'){window.fixtureExternalPlugins[0].enabled=method.endsWith('.enable');return{id:'agentos'};}
+        if(method==='ui.plugins.engines.uninstall'){window.fixtureExternalPlugins=[];return{id:'agentos',uninstalled:true,historyRetained:true};}
+        if(method==='ui.plugins.stage-local')return{plugin:plugins[0],stageId:'ordinary-extension',installable:true,requiresReview:true,permissions:[],summary:['Ordinary extension ZIP'],trust:'local-unverified'};
         if(method==='ui.plugins.catalog'){if(window.fixtureState.failNextPluginList){window.fixtureState.failNextPluginList=false;throw new Error('Synthetic plugin catalog failed');}const rows=plugins.map(row=>({...row,...window.fixturePluginOverrides[row.id]})).filter(row=>!params.query||(row.name+' '+row.summary).toLowerCase().includes(params.query.toLowerCase()));const result=structuredClone({available:true,configured:true,offline:false,reason:null,plugins:rows});if(window.fixtureState.holdNextPluginList){window.fixtureState.holdNextPluginList=false;await new Promise(resolve=>window.fixturePluginListReleases.push(resolve));}return result;}if(method==='ui.plugins.status')return{catalogAvailable:true,configured:true,offline:false,developerMode:true,plugins,installed:plugins.filter(row=>row.installed),integrations,mcp:[server]};
         if(method==='ui.plugins.detail')return{available:true,offline:false,plugin:plugins.find(row=>row.id===params.id)};
         if(method==='ui.plugins.integration.list'){if(window.fixtureState.failNextConnections){window.fixtureState.failNextConnections=false;throw new Error('Synthetic connection refresh failed');}const result=structuredClone({integrations:integrations.map(row=>({...row,...window.fixtureIntegrationOverrides[row.id]}))});if(window.fixtureState.holdNextConnections){window.fixtureState.holdNextConnections=false;await new Promise(resolve=>window.fixtureConnectionReleases.push(resolve));}return result;}if(method==='ui.mcp.list')return{servers:[{...server,...window.fixtureMcpOverride}]};
@@ -193,7 +217,11 @@ try {
       const geometry=await evaluate('(()=>{const main=document.querySelector(".harbor-main"),frame=document.querySelector(".page-frame"),sheet=[...document.querySelectorAll(".cm-sheet")].find(n=>n.checkVisibility()),fields=[...document.querySelectorAll("input:not([type=hidden]),textarea,select")].filter(n=>n.checkVisibility());return{actualTheme:document.documentElement.dataset.theme,documentOverflow:document.documentElement.scrollWidth-document.documentElement.clientWidth,mainOverflow:main?main.scrollWidth-main.clientWidth:0,frameOverflow:frame?frame.scrollWidth-frame.clientWidth:0,visible:!!frame&&frame.getBoundingClientRect().width>200,unstyledFields:fields.filter(n=>![...n.classList].some(c=>c.startsWith("cm-")||c.startsWith("composer-")||c.includes("search")||c.includes("setting"))).map(n=>({tag:n.tagName,label:n.getAttribute("aria-label"),className:n.className})),sheet:sheet?{left:sheet.getBoundingClientRect().left,right:sheet.getBoundingClientRect().right,width:sheet.getBoundingClientRect().width}:null,errors:window.fixtureErrors};})()');
       measurements.push({version,...scenario,page,...geometry});await capture(version,scenario,page);
       const issues=[];if(!geometry.visible)issues.push('invisible frame');if(geometry.documentOverflow>1||geometry.mainOverflow>1||geometry.frameOverflow>1)issues.push('root overflow');if(geometry.errors.length)issues.push('render error');
-      if(version==='after'){assert.equal(geometry.actualTheme,scenario.theme,page+' theme is actually applied');assert.deepEqual(issues,[],page+' geometry '+JSON.stringify(geometry));}else if(issues.length)baselineIssues.push({page,...scenario,issues});
+      if(version==='after'){
+        assert.equal(geometry.actualTheme,scenario.theme,page+' theme is actually applied');
+        if(issues.length)geometry.overflowingElements=await evaluate('(()=>{const frame=document.querySelector(".page-frame"),bounds=frame.getBoundingClientRect();return [...frame.querySelectorAll("*")].filter(node=>node.checkVisibility()&&node.getBoundingClientRect().right>bounds.right+1).slice(0,12).map(node=>({tag:node.tagName,className:node.className,label:node.getAttribute("aria-label"),width:node.getBoundingClientRect().width,right:node.getBoundingClientRect().right,frameRight:bounds.right}));})()');
+        assert.deepEqual(issues,[],page+' geometry '+JSON.stringify({...scenario,...geometry}));
+      }else if(issues.length)baselineIssues.push({page,...scenario,issues});
     }
     async function show(page){await evaluate('window.fixture.show('+JSON.stringify(page)+')');await until('!!document.querySelector(".page-'+page+'")',page+' route');await delay(210);}
     async function closeSheet(){if(await evaluate('!!document.querySelector(".cm-sheet")')){await key('Escape');const closing=await evaluate('!!document.querySelector(".cm-sheet")?.closest(".cm-sheet-layer[inert]")');if(!closing&&await evaluate('!!document.querySelector(".cm-sheet")'))await click('.cm-sheet button[aria-label="关闭"]');await until('!document.querySelector(".cm-sheet")','Drawer exit completes');}}
@@ -396,8 +424,37 @@ try {
       }
       if(pluginRaceOnly){
         assert.equal(version,'after');
+        const priorViewport=await evaluate('({width:innerWidth,height:innerHeight})');
+        await rpc('Emulation.setDeviceMetricsOverride',{width:1280,height:900,deviceScaleFactor:1,mobile:false},sessionId);
+        const managerAction=text=>pointerClick('[...document.querySelector(".cm-sheet").querySelectorAll("button")].find(n=>n.textContent.trim()==='+JSON.stringify(text)+')','plugin manager '+text);
         await evaluate('window.fixtureState.approvalOperations=[{operationId:"synthetic-running",status:"running"},{operationId:"synthetic-waiting",status:"waiting"},{operationId:"synthetic-failed",status:"failed",code:"SYNTHETIC_FAILURE"},{operationId:"synthetic-unknown",status:"unknown"},{operationId:"synthetic-completed",status:"completed"}]');
         await show('plugins');await until('document.querySelectorAll(".plugin-card").length===8','plugin catalog');
+        assert.equal(await evaluate('document.querySelector(".plugin-grid").innerText.includes("AgentOS")'),false,'unconnected prototypes have no plugin card');
+        await textClick('导入插件包');
+        await until('!!document.querySelector("[aria-label=插件安装审查]")','ZIP import opens install review');
+        await capture(version,{width:1280,height:900,zoom:1,theme:'light'},'plugin-zip-review');
+        assert.equal(await evaluate('document.querySelectorAll(".cm-sheet input").length'),0,'installation asks for no directory or Node path');
+        await evaluate('window.fixtureFailEngineInstall=true');await textClick('确认安装并启用');
+        await until('document.querySelector(".cm-sheet")?.innerText.includes("Controlled package install failure")','installation failure remains visible');
+        assert.equal(await evaluate('window.fixtureExternalPlugins?.length??0'),0,'failed installation creates no usable plugin card');
+        await textClick('重新选择安装包');await textClick('确认安装并启用');
+        await until('document.querySelector(".cm-sheet")?.innerText.includes("插件已安装并启用")','ZIP installation completes');
+        await capture(version,{width:1280,height:900,zoom:1,theme:'light'},'plugin-zip-manager');
+        await managerAction('停用');await until('document.querySelector(".cm-sheet")?.innerText.includes("已停用")','plugin disabled');
+        await managerAction('启用');await until('document.querySelector(".cm-sheet")?.innerText.includes("已启用")','plugin re-enabled');
+        await managerAction('导入更新包');await until('!!document.querySelector("[aria-label=插件安装审查]")','ZIP update review');await managerAction('确认更新并启用');
+        await until('!![...document.querySelectorAll(".cm-sheet button")].find(b=>b.textContent==="卸载")','updated plugin manageable');
+        await managerAction('卸载');await managerAction('确认卸载');await until('!document.querySelector(".cm-sheet")','uninstall closes the manager');
+        await evaluate('window.fixtureOrdinaryPackage=true');await textClick('导入插件包');
+        await until('document.body.innerText.includes("Ordinary extension ZIP")','ordinary extension keeps its existing installer');await closeSheet();
+        await evaluate('window.fixtureOrdinaryPackage=false;window.fixtureHoldEngineReview=true');await textClick('导入插件包');
+        await until('window.fixtureEngineReleases?.length===1','hold imported package review');
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(2)');await evaluate('window.fixtureHoldEngineReview=false;window.fixtureEngineReleases.shift()()');
+        await until('window.fixtureCalls.some(c=>c.method==="ui.plugins.engines.package.cancel")','late import stage is cancelled');
+        assert.equal(await evaluate('!!document.querySelector("[aria-label=插件安装审查]")'),false,'late import never hijacks another tab');
+        await click('[role=tablist][aria-label="插件视图"] [role=tab]:nth-child(1)');await textClick('刷新目录');
+        await rpc('Emulation.setDeviceMetricsOverride',{...priorViewport,deviceScaleFactor:1,mobile:false},sessionId);
+        await until('document.querySelectorAll(".plugin-card").length===8','fixture external plugin projection cleared');
         await until('document.querySelector(".operation-summary")?.innerText.includes("结果未知")','Core approval operations visible');
         const operationText=await evaluate('document.querySelector(".operation-summary").innerText');
         for(const text of ['执行中','等待后续审批','失败','结果未知','SYNTHETIC_FAILURE','历史操作 · 1'])assert.ok(operationText.includes(text),'approval operation state remains visible: '+text);

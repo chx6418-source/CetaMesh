@@ -38,7 +38,9 @@ try {
     oneBotActionCalled = true;
     return { status: 'stopped', installed: true, running: false, ready: false, configured: true };
   } } };
-  services = createCetaMeshServices({ config, localServices: desktopLocalServices });
+  // Exercise an explicitly unconfigured catalog independently of the shipped
+  // official registry URL. Construction must remain network-free in both cases.
+  services = createCetaMeshServices({ config, localServices: desktopLocalServices, pluginCatalogUrl: '' });
   assert.equal(services.settingsService.store.file.startsWith(root), true,
     'Desktop DTO imports must not capture runtime paths before isolated environment is set');
 
@@ -114,6 +116,7 @@ try {
   fallbackServices = createCetaMeshServices({ config, api: fallbackApi,
     stateDir: path.join(root, 'fallback-state'), dataRoot: path.join(root, 'fallback-data'),
     localServices: desktopLocalServices });
+  assert.equal(networkAttempts, 0, 'constructing services with the shipped catalog default must not fetch');
   assert.equal(fallbackServices.modelRuntime.defaultProviderId(), null, 'no configured Model key is represented as unavailable');
   const fallbackSession = await fallbackServices.chatService.execute({ method: 'chat.sessions.create', params: {} });
   await fallbackServices.chatService.execute({ method: 'chat.config.set', params: { id: fallbackSession.id, config: { modelProvider: null } } });
@@ -358,6 +361,7 @@ try {
   const pluginCatalog = await services.pluginCenterService.execute({ method: 'plugin-center.catalog.list', params: {} });
   assert.equal(pluginCatalog.available, false);
   assert.equal(pluginCatalog.reason, 'service_not_configured', 'missing Plugin Service configuration is graceful');
+  assert.equal(networkAttempts, 0, 'an explicitly unconfigured catalog must not attempt a network request');
 
   const ui = (method, params = {}) => services.desktopUiService.execute({ method, params });
   const uiIntegrations = await ui('ui.plugins.integration.list');

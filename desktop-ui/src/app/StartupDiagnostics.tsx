@@ -51,7 +51,7 @@ export async function boundedDiagnosticsRead(read:()=>Promise<DiagnosticsState>,
   }finally{if(timer)clearTimeout(timer);}
 }
 
-type DiagnosticContextValue = {state:DiagnosticsState|null; busy:boolean; panelOpen:boolean; check(full?:boolean):Promise<void>; open():void};
+type DiagnosticContextValue = {state:DiagnosticsState|null; busy:boolean; check(full?:boolean):Promise<void>; open():void};
 const DiagnosticContext = createContext<DiagnosticContextValue|null>(null);
 
 /** Contains the existing app; never initializes Core pages before a verified gate. */
@@ -99,7 +99,7 @@ export function StartupDiagnosticsBoundary({children}:{children:ReactNode}) {
   },[check]);
   const report=state?.report;
   const blocked=report?.status==='BLOCKED'||state?.coreAvailable===false;
-  const context={state,busy,panelOpen:open,check,open:()=>setOpen(true)};
+  const context={state,busy,check,open:()=>setOpen(true)};
   return <DiagnosticContext.Provider value={context}>
     {admitted&&<div className={`startup-normal ${blocked?'diagnostics-frozen':''}`} inert={blocked} aria-hidden={blocked||undefined}><InteractionSuspensionContext.Provider value={blocked}>{children}</InteractionSuspensionContext.Provider></div>}
     {!admitted&&!report&&<div className="diagnostics-startup"><WindowChrome/><main><LoadingState label="正在核对本机核心服务…"/><p>仅执行只读检查，不调用模型、不发送消息。</p></main></div>}
@@ -108,11 +108,15 @@ export function StartupDiagnosticsBoundary({children}:{children:ReactNode}) {
   </DiagnosticContext.Provider>;
 }
 
-/** Optional faults occupy a normal layout row; they never float over product controls. */
+/** Nonblocking issues share the navigation rail and open the same diagnostic panel. */
 export function DiagnosticsStatusEntry() {
   const context=useContext(DiagnosticContext),report=context?.state?.report;
-  if(!context||context.state?.coreAvailable!==true||report?.status!=='DEGRADED'||context.panelOpen)return null;
-  return <aside className="diagnostics-status-bar" role="status" aria-label="可选功能诊断"><Icon name="help" size={17}/><span>{report.checks.filter(row=>row.status==='DEGRADED').length} 项检查需要处理</span><Button compact variant="ghost" onClick={context.open}>查看原因</Button></aside>;
+  if(!context||context.state?.coreAvailable!==true||report?.status!=='DEGRADED')return null;
+  const count=report.checks.filter(row=>row.status==='DEGRADED').length;
+  const label=`系统诊断 · ${count} 项检查需要处理`;
+  return <button type="button" className="nav-item rail-button diagnostics-rail-entry" aria-label={label} title={label} aria-haspopup="dialog" onClick={context.open}>
+    <Icon name="shield" size={20}/><small className="nav-count" aria-hidden="true">{count}</small>
+  </button>;
 }
 
 export function DiagnosticsEntry({label='系统诊断',compact=true}:{label?:string;compact?:boolean}) {

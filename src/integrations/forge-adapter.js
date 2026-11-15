@@ -12,6 +12,9 @@ const sha={type:'string',pattern:'^[a-f0-9]{40,64}$',maxLength:64};
 const text=(maxLength,minLength=0)=>({type:'string',minLength,maxLength});
 const paged={page:{type:'integer',minimum:1,maximum:1000},perPage:{type:'integer',minimum:1,maximum:100}};
 const definitions={
+  'content.get':{path:text(512,1),ref:branch},
+  'content.create':{path:text(512,1),branch,text:text(65536),message:text(240,1)},
+  'content.update':{path:text(512,1),branch,text:text(65536),message:text(240,1),sha},
   'repository.get':{},'branches.list':{...paged},'issues.list':{...paged},'pulls.list':{...paged},'releases.list':{...paged},
   'builds.list':{...paged},'builds.jobs':{runId:{type:'string',pattern:'^[A-Za-z0-9_-]{1,80}$',maxLength:80},...paged},
   'branch.create':{branch,sha},'issue.create':{title:text(240,1),body:text(16000)},
@@ -20,8 +23,8 @@ const definitions={
   'release.draft':{tag:branch,sha,name:text(240,1),body:text(16000)}
 };
 export const FORGE_ACTIONS=Object.freeze(Object.keys(definitions));
-export const FORGE_WRITE_ACTIONS=Object.freeze(FORGE_ACTIONS.filter(action=>/\.(create|dispatch|draft)$/.test(action)));
-const required={ 'builds.jobs':['runId'],'branch.create':['branch','sha'],'issue.create':['title','body'],'pull.create':['title','head','base','body'],'workflow.dispatch':['workflow','ref','inputs'],'release.draft':['tag','sha','name','body']};
+export const FORGE_WRITE_ACTIONS=Object.freeze(FORGE_ACTIONS.filter(action=>/\.(create|update|dispatch|draft)$/.test(action)));
+const required={ 'content.get':['path','ref'],'content.create':['path','branch','text','message'],'content.update':['path','branch','text','message','sha'],'builds.jobs':['runId'],'branch.create':['branch','sha'],'issue.create':['title','body'],'pull.create':['title','head','base','body'],'workflow.dispatch':['workflow','ref','inputs'],'release.draft':['tag','sha','name','body']};
 export function forgeInputSchema(action){
   if(!Object.hasOwn(definitions,action))throw capabilityError('FORGE_UNSUPPORTED','Unsupported Forge action');
   return {type:'object',additionalProperties:false,properties:{owner:segment,repo:segment,...definitions[action]},required:['owner','repo',...(required[action]??[])]};
@@ -42,6 +45,10 @@ function validateSchema(value,schema){
   }else if(schema.type==='integer'&&(!Number.isSafeInteger(value)||value<schema.minimum||value>schema.maximum))invalid();
 }
 function validRef(value){return typeof value==='string'&&value.length>0&&value.length<=200&&!/[\s~^:?*\[\\\u0000-\u001f\u007f]/.test(value)&&!value.includes('..')&&!value.includes('@{')&&!value.startsWith('/')&&!value.endsWith('/')&&!value.endsWith('.')&&value.split('/').every(part=>part&&!part.startsWith('.')&&!part.endsWith('.lock'));}
+function validContentPath(value){return typeof value==='string'&&value.length>0&&value.length<=512
+  &&!/[\\:%?#\u0000-\u001f\u007f]/.test(value)&&value.split('/').every(part=>part&&part.trim()===part&&!part.startsWith('.')&&!part.endsWith('.')&&!/^(?:credentials?|id_rsa|id_ed25519)(?:\.|$)/i.test(part));}
+function contentText(value,secret){let result=redactText(value);if(secret)result=result.split(secret).join('[REDACTED]');return result.replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})\b/g,'[REDACTED]');}
+function blobHash(bytes,algorithm='sha1'){return crypto.createHash(algorithm).update(Buffer.from(`blob ${bytes.length}\0`)).update(bytes).digest('hex');}
 function scrub(value,secret){let result=redactText(String(value??''));if(secret)result=result.split(secret).join('[REDACTED]');return result.replace(/\b(?:gh[pousr]_[A-Za-z0-9_]{12,}|github_pat_[A-Za-z0-9_]{12,})\b/g,'[REDACTED]').slice(0,240);}
 function id(value){return (Number.isSafeInteger(value)&&value>=0)||typeof value==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(value)?String(value):null;}
 function resolveSecret(resolveCredential,reference,target,{signal,deadline}){
@@ -59,12 +66,13 @@ export function createForgeAdapter({provider,repositories=[],resolveCredential,.
   if(!['github','gitcode'].includes(provider)||!Array.isArray(repositories)||repositories.length>100)throw capabilityError('FORGE_INVALID_CONFIG','Invalid Forge provider or repository configuration');
   const origin=provider==='github'?'https://api.github.com':'https://api.gitcode.com';
   const configs=repositories.map(row=>{
-    if(!object(row)||Object.keys(row).some(key=>!['owner','repo','credentialRef','publicRead','actions','branchPrefixes','workflows'].includes(key)))throw capabilityError('FORGE_INVALID_CONFIG','Unknown repository configuration field');
+    if(!object(row)||Object.keys(row).some(key=>!['owner','repo','credentialRef','publicRead','actions','branchPrefixes','contentPaths','workflows'].includes(key)))throw capabilityError('FORGE_INVALID_CONFIG','Unknown repository configuration field');
     validateSchema({owner:row.owner,repo:row.repo},{type:'object',properties:{owner:segment,repo:segment},required:['owner','repo']});
     const publicRead=row.publicRead===true;
     if(row.publicRead!==undefined&&typeof row.publicRead!=='boolean')throw capabilityError('FORGE_INVALID_CONFIG','Public read mode must be explicit');
     if((publicRead?!!row.credentialRef:!/^plugin-[a-z0-9][a-z0-9._-]{0,55}$/.test(row.credentialRef??''))||!Array.isArray(row.actions)||row.actions.length>FORGE_ACTIONS.length||row.actions.some(a=>!FORGE_ACTIONS.includes(a)||(publicRead&&FORGE_WRITE_ACTIONS.includes(a))))throw capabilityError('FORGE_INVALID_CONFIG','Public reads cannot write; authenticated actions require a dedicated credential reference');
     if(row.branchPrefixes!==undefined&&(!Array.isArray(row.branchPrefixes)||row.branchPrefixes.length>20||row.branchPrefixes.some(p=>typeof p!=='string'||!p.endsWith('/')||!validRef(p.slice(0,-1)))))throw capabilityError('FORGE_INVALID_CONFIG','Explicit valid branch prefixes required');
+    if(row.contentPaths!==undefined&&(!Array.isArray(row.contentPaths)||row.contentPaths.length>100||row.contentPaths.some(p=>!validContentPath(p))||new Set(row.contentPaths).size!==row.contentPaths.length))throw capabilityError('FORGE_INVALID_CONFIG','Explicit bounded file paths required');
     if(row.workflows!==undefined&&(!Array.isArray(row.workflows)||row.workflows.length>20))throw capabilityError('FORGE_INVALID_CONFIG','Bounded workflow allowlist required');
     for(const workflow of row.workflows??[]){
       if(!object(workflow)||Object.keys(workflow).some(key=>!['id','refs','inputs'].includes(key)))throw capabilityError('FORGE_INVALID_CONFIG','Unknown workflow configuration field');
@@ -83,6 +91,13 @@ export function createForgeAdapter({provider,repositories=[],resolveCredential,.
     if(provider==='gitcode'&&['workflow.dispatch','release.draft'].includes(action))throw capabilityError('FORGE_UNSUPPORTED','This action has no supported safe GitCode equivalent');
     for(const key of ['branch','head','base','ref','tag'])if(input[key]!==undefined&&!validRef(input[key]))invalid();
     if(action==='branch.create'&&(!config.branchPrefixes?.some(p=>input.branch.startsWith(p))||['main','master'].includes(input.branch)))throw capabilityError('FORGE_SCOPE_DENIED','New branch must belong to an approved review namespace');
+    if(action.startsWith('content.')){
+      if(!validContentPath(input.path)||!config.contentPaths?.includes(input.path))throw capabilityError('FORGE_SCOPE_DENIED','File path is not explicitly authorized');
+      if(action!=='content.get'){
+        if(!config.branchPrefixes?.some(p=>input.branch.startsWith(p))||['main','master'].includes(input.branch))throw capabilityError('FORGE_SCOPE_DENIED','File changes require an approved review branch');
+        if(Buffer.byteLength(input.text)>65536||contentText(input.text)!==input.text||contentText(input.message)!==input.message)throw capabilityError('FORGE_INVALID_INPUT','File changes require bounded text without credential-shaped content');
+      }
+    }
     if(action==='pull.create'&&input.head===input.base)invalid();
     if(action==='workflow.dispatch'){
       const workflow=config.workflows?.find(w=>w.id===input.workflow);
@@ -93,6 +108,8 @@ export function createForgeAdapter({provider,repositories=[],resolveCredential,.
   function route(action,input){
     const repo=`/repos/${encodeURIComponent(input.owner)}/${encodeURIComponent(input.repo)}`;
     const prefix=provider==='github'?'':'/api/v5';
+    if(action.startsWith('content.'))return {path:prefix+repo+'/contents/'+input.path.split('/').map(encodeURIComponent).join('/'),
+      ...(action==='content.get'?{ref:input.ref}:{method:provider==='github'||action==='content.update'?'PUT':'POST',body:{branch:input.branch,message:input.message,content:Buffer.from(input.text).toString('base64'),...(action==='content.update'?{sha:input.sha}:{})}})};
     const read={'repository.get':'','branches.list':'/branches','issues.list':'/issues','pulls.list':'/pulls','releases.list':'/releases'};
     if(Object.hasOwn(read,action))return {path:prefix+repo+read[action],paged:action!=='repository.get'};
     if(action==='builds.list'||action==='builds.jobs')return {path:(provider==='github'?'':'/api/v8')+repo+'/actions/runs'+(action==='builds.jobs'?'/'+encodeURIComponent(input.runId)+'/jobs':''),paged:provider==='github'||action==='builds.list'};
@@ -107,11 +124,29 @@ export function createForgeAdapter({provider,repositories=[],resolveCredential,.
     const deadline=Date.now()+(transportOptions.timeoutMs??10000);
     const request=route(action,input),url=new URL(request.path,origin);
     if(request.paged){url.searchParams.set('per_page',String(input.perPage??20));url.searchParams.set('page',String(input.page??1));}
+    if(request.ref)url.searchParams.set('ref',request.ref);
     if(config.publicRead!==true&&typeof resolveCredential!=='function')throw capabilityError('FORGE_CREDENTIAL_UNAVAILABLE','Dedicated Forge credential resolver unavailable');
     const secret=config.publicRead===true?undefined:await resolveSecret(resolveCredential,config.credentialRef,url.href,{signal,deadline});
     if(config.publicRead!==true&&(typeof secret!=='string'||secret.length<8||secret.length>512||/[\s\u0000-\u001f]/.test(secret)))throw capabilityError('FORGE_CREDENTIAL_DENIED','Invalid dedicated Forge credential');
-    const raw=await transport(url,{method:request.body?'POST':'GET',body:request.body,secret,signal,deadline});
+    if(action.startsWith('content.')&&action!=='content.get'&&secret&&(input.text.includes(secret)||input.message.includes(secret)))throw capabilityError('FORGE_INVALID_INPUT','File changes cannot include the dedicated credential');
+    const raw=await transport(url,{method:request.method??(request.body?'POST':'GET'),body:request.body,secret,signal,deadline});
     const result={provider,repository:input.owner+'/'+input.repo,action};
+    if(action.startsWith('content.')){
+      const read=action==='content.get',file=read?raw:raw?.content;
+      if(!object(file)||file.type!=='file'||file.path!==input.path||!new RegExp(sha.pattern).test(file.sha??'')||file.submodule_git_url||file.target)throw capabilityError('FORGE_RESPONSE_INVALID','File receipt scope or identity mismatch');
+      let bytes;
+      if(read){
+        const encoded=typeof file.content==='string'?file.content.replace(/[\r\n]/g,''):'';
+        if(file.encoding!=='base64'||encoded.length>87384||!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded))throw capabilityError('FORGE_RESPONSE_INVALID','Bounded base64 file required');
+        bytes=Buffer.from(encoded,'base64');
+        if(bytes.toString('base64')!==encoded||bytes.length>65536||file.size!==bytes.length)throw capabilityError('FORGE_RESPONSE_INVALID','File size or encoding mismatch');
+      }else bytes=Buffer.from(input.text);
+      if(blobHash(bytes,file.sha.length===64?'sha256':'sha1')!==file.sha)throw capabilityError('FORGE_RESPONSE_INVALID','File blob does not match its content');
+      if(!read){if(!new RegExp(sha.pattern).test(raw.commit?.sha??''))throw capabilityError('FORGE_RESPONSE_INVALID','File commit identity missing');
+        return {...result,path:input.path,branch:input.branch,blobSha:file.sha,commitSha:raw.commit.sha,bytes:bytes.length};}
+      let text;try{text=new TextDecoder('utf-8',{fatal:true}).decode(bytes);}catch{throw capabilityError('FORGE_RESPONSE_INVALID','This file viewer supports UTF-8 text only');}
+      const safe=contentText(text,secret);return {...result,path:input.path,ref:input.ref,blobSha:file.sha,bytes:bytes.length,text:safe,contentRedacted:safe!==text};
+    }
     if(action==='workflow.dispatch')return {...result,accepted:true,runVerified:false};
     if(action==='repository.get'){
       if(!object(raw)||typeof raw.full_name!=='string'||raw.full_name.toLowerCase()!==result.repository.toLowerCase())throw capabilityError('FORGE_RESPONSE_INVALID','Forge repository response scope mismatch');

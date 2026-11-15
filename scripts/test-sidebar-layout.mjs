@@ -7,6 +7,7 @@ const React = require('react');
 const { renderToStaticMarkup } = require('react-dom/server');
 const { createServer } = await import(pathToFileURL(require.resolve('vite')).href);
 const vite = await createServer({ configFile: false, root, optimizeDeps: { noDiscovery: true, include: [] }, server: { middlewareMode: true }, appType: 'custom', logLevel: 'error' });
+globalThis.window = { setTimeout, clearTimeout, matchMedia: () => ({ matches: false }) };
 try {
   const { WorkspaceSidebar, groupWorkspaceSessions } = await vite.ssrLoadModule('/src/app/WorkspaceSidebar.tsx');
   const workspaces = [{ id: 'w1', name: 'NexBox-main', status: 'ready' }, { id: 'w2', name: 'CetaMesh', status: 'ready' }];
@@ -42,6 +43,10 @@ try {
   assert.doesNotMatch(closed, /class="rail-connection"/);
   assert.ok(!closed.includes('class="workspace-panel"'), 'collapsed panel is unmounted and has no hidden focus targets');
   const settings = renderToStaticMarkup(React.createElement(WorkspaceSidebar, { ...props, page: 'settings', collapsed: true }));
-  assert.ok(!settings.includes('rail-panel-toggle'), 'settings page has no ineffective workspace expansion control');
+  assert.ok(settings.includes('rail-panel-toggle'), 'settings retains the same effective manual expansion control');
+  const {useResponsiveSidebar}=await vite.ssrLoadModule('/src/app/useResponsiveSidebar.ts');
+  function Initial({page,mode='chat'}){return React.createElement('span',{'data-collapsed':useResponsiveSidebar(page,mode).collapsed});}
+  for(const page of ['work','memory','agents','devices','plugins','settings','about','onboarding'])
+    assert.match(renderToStaticMarkup(React.createElement(Initial,{page})),/data-collapsed="true"/,'non-Chat is collapsed on the very first render: '+page);
   console.log('PASS workspace grouping, orphan session reachability, icon accessible names, compact list and collapsed focus boundary');
-} finally { await vite.close(); }
+} finally { await vite.close(); delete globalThis.window; }

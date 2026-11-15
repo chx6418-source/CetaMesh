@@ -19,6 +19,10 @@ const MAX_FRAME_BYTES: usize = 1024 * 1024;
 // mode a message pipe cannot accept a write larger than its available buffer.
 const WRITE_CHUNK_BYTES: usize = 16 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+fn request_budget(method: &str) -> Duration {
+    if matches!(method, "ui.plugins.stage" | "ui.plugins.engines.package.review" | "ui.plugins.engines.package.install") { Duration::from_secs(120) }
+    else { REQUEST_TIMEOUT }
+}
 const CONNECT_RETRY_DELAY: Duration = Duration::from_millis(40);
 const IO_RETRY_DELAY: Duration = Duration::from_millis(4);
 const ERROR_NO_DATA: i32 = 232;
@@ -56,7 +60,7 @@ impl IpcClient {
 
         #[cfg(windows)]
         {
-            request_pipe(&self.pipe_name, method, params, REQUEST_TIMEOUT)
+            request_pipe(&self.pipe_name, method, params, request_budget(method))
         }
         #[cfg(not(windows))]
         {
@@ -332,6 +336,15 @@ fn validate_response(value: &Value, expected_id: &str) -> Result<Value, String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn plugin_package_budgets_do_not_extend_ordinary_requests() {
+        for method in ["ui.plugins.stage", "ui.plugins.engines.package.review", "ui.plugins.engines.package.install"] {
+            assert_eq!(request_budget(method), Duration::from_secs(120));
+        }
+        for method in ["ui.chat.send", "core.ping", "ui.plugins.engines.enable", "app.diagnostics.run"] {
+            assert_eq!(request_budget(method), Duration::from_secs(30));
+        }
+    }
 
     #[cfg(windows)]
     struct PipePeer(std::process::Child);

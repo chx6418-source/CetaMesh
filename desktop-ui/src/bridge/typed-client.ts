@@ -24,6 +24,7 @@ export interface ChatSession {
   configuration?: ChatConfigurationState | null;
 }
 export interface ChatConfigurationState {
+  desired?: {provider:string;connectionIdentity:string;source:string;runtimeVersion:string;selection:{model:string;reasoningEffort:string|null;modelProvider:string|null}};
   revision: number; changeId: string | null; state: 'saved' | 'prepared' | 'runtime-confirmed' | 'needs-reconciliation';
   application: 'next-turn' | 'runtime-confirmed' | 'requires-new-session' | null; durable: boolean;
   runtime: 'not-required' | 'not-applied' | 'confirmed' | 'unknown'; at: number | null; errorCode: string | null;
@@ -53,6 +54,7 @@ export interface ChatModelCapabilities {
 export interface ChatCatalogModel { id?: string; name?: string; label?: string; displayName?: string; modelName?: string; toolCalling?: string; streaming?: string; reasoning?: string; capabilities?: ChatModelCapabilities }
 export interface ChatModelProvider { id: string; label: string; configured: boolean; enabled?: boolean; catalogState?: string; reachable?: boolean | null; authenticated?: boolean | null; inferencing?: boolean | null; toolCalling?: boolean; error?: string | null; settingsFields?: ProviderSettingField[]; models: ChatCatalogModel[] }
 export interface AgentModelControl {
+  catalog?: {connectionIdentity:string;source:string|null;runtimeVersion:string|null};
   status: 'available' | 'unsupported' | 'unknown'; source: string | null; runtimeVersion?: string | null;
   application: 'runtime-confirmed' | 'next-turn' | 'requires-new-session' | null;
   changeApplication?: 'runtime-confirmed' | 'next-turn' | 'requires-new-session';
@@ -382,7 +384,7 @@ type UiMethod =
   | `ui.models.configuration.${'get' | 'update' | 'edit' | 'discover' | 'commit'}`
   | `ui.simulation.${'overview' | 'role.list' | 'role.get' | 'role.save' | 'role.export' | 'role.import' | 'role.restore' | 'role.searchExamples' | 'role.examples.search' | 'role.context' | 'role.preview' | 'legacy.inventory' | 'legacy.import' | 'room.list' | 'room.create' | 'room.get' | 'room.update' | 'room.search' | 'message.send' | 'discussion.start' | 'discussion.pause' | 'discussion.cancel' | 'discussion.resume' | 'discussion.end' | 'project.create' | 'project.start' | 'project.refresh' | 'memory.list' | 'memory.propose' | 'memory.confirm'}`
   | 'ui.devices.overview' |
-  `ui.workspace.git.${'context' | 'branch.review' | 'branch.switch' | 'index.review' | 'stage' | 'unstage' | 'commit.staged' | 'status.page' | 'history' | 'branches' | 'commit.detail' | 'preview' | 'review'}` |
+  `ui.workspace.git.${'checkpoint.capture' | 'checkpoint.list' | 'checkpoint.preview' | 'checkpoint.review' | 'checkpoint.restore' | 'context' | 'branch.review' | 'branch.switch' | 'index.review' | 'stage' | 'unstage' | 'commit.staged' | 'status.page' | 'history' | 'branches' | 'commit.detail' | 'preview' | 'review'}` |
   'ui.chat.attachment.list' | 'ui.chat.attachment.begin' | 'ui.chat.attachment.chunk' | 'ui.chat.attachment.finish' | 'ui.chat.attachment.read' | 'ui.chat.attachment.derive' | 'ui.chat.attachment.describe' | 'ui.chat.attachment.remove' | 'ui.chat.attachment.cleanup' | 'ui.chat.attachment.limits' | 'ui.chat.attachment.limits.set' | 'ui.chat.attachment.capabilities' | 'ui.chat.attachment.import' | 'ui.workspace.git.overview' | 'ui.workspace.git.diff' | 'ui.workspace.git.commit' | 'ui.workspace.git.branch.create' | 'ui.workspace.git.worktree.create' | 'ui.developer.forge.describe' | 'ui.developer.forge.save' | 'ui.developer.forge.invoke' | 'ui.developer.forge.credentials.save'
   | 'ui.preview.open' | 'ui.preview.read' | 'ui.preview.close'
   | 'ui.events.next'
@@ -402,6 +404,10 @@ type UiMethod =
   | 'ui.plugins.catalog' | 'ui.plugins.status' | 'ui.plugins.detail' | 'ui.plugins.refresh' | 'ui.plugins.stage' | 'ui.plugins.stage-local' | 'ui.plugins.install'
   | 'ui.plugins.enable.review' | 'ui.plugins.enable' | 'ui.plugins.disable' | 'ui.plugins.uninstall' | 'ui.plugins.integration.list' | 'ui.plugins.integration.settings'
   | 'ui.plugins.integration.manage' | 'ui.plugins.integration.tool.toggle' | 'ui.plugins.integration.action'
+  | 'ui.plugins.engines.list' | 'ui.plugins.engines.review' | 'ui.plugins.engines.enable' | 'ui.plugins.engines.disable'
+  | 'ui.plugins.engines.authorize-task'
+  | 'ui.plugins.engines.workbench.open'
+  | 'ui.plugins.engines.package.review' | 'ui.plugins.engines.package.cancel' | 'ui.plugins.engines.package.install' | 'ui.plugins.engines.uninstall'
   | 'ui.channel.onebot.get' | 'ui.channel.onebot.configure' | 'ui.channel.onebot.migration.preview' | 'ui.channel.onebot.migration.apply'
   | 'ui.mcp.list' | 'ui.mcp.tools' | 'ui.mcp.manage' | 'ui.mcp.config.get' | 'ui.mcp.config.update'
   | 'ui.settings.describe' | 'ui.settings.get' | 'ui.settings.update' | 'ui.about.info' | 'ui.about.update'
@@ -410,8 +416,12 @@ type UiMethod =
   | 'ui.onboarding.status' | 'ui.onboarding.start' | 'ui.onboarding.completeStep' | 'ui.onboarding.skipStep' | 'ui.onboarding.finish' | 'ui.onboarding.testProvider' | 'ui.onboarding.setModel'
   | 'ui.approvals.grant.revoke' | 'ui.approvals.list' | 'ui.approvals.decide' | 'ui.approvals.operation' | 'ui.approvals.cancel' | 'ui.search';
 type Empty = Record<string, never>;
-export type WindowAction = 'state' | 'drag' | 'minimize' | 'maximize' | 'close' | 'appearanceLight' | 'appearanceDark' | 'resizeNorth' | 'resizeNorthEast' | 'resizeEast' | 'resizeSouthEast' | 'resizeSouth' | 'resizeSouthWest' | 'resizeWest' | 'resizeNorthWest';
-type HostMethod = 'app.previewBrowser.open' | 'app.previewBrowser.layout' | 'app.previewBrowser.command' | 'app.windowAction' | 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior'
+export type WindowAction = 'chatModeChat' | 'chatModeSimulation' | 'chatModeProject' | 'chatModeHidden' | 'state' | 'drag' | 'minimize' | 'maximize' | 'close' | 'appearanceLight' | 'appearanceDark' | 'resizeNorth' | 'resizeNorthEast' | 'resizeEast' | 'resizeSouthEast' | 'resizeSouth' | 'resizeSouthWest' | 'resizeWest' | 'resizeNorthWest';
+export type NativeCaptionAppearance = { palette: [string, string, string, string, string, string, string]; modal: boolean };
+export type CaptionFrame = { id: string; width: number; height: number; captionHeight: number };
+export type CaptionSurface = { frame: string; width: number; height: number; pixels: string; edges?: string };
+export type NativeCaptionBackdrop = { enabled: boolean; active: boolean; frame: CaptionFrame };
+type HostMethod = 'app.previewBrowser.open' | 'app.previewBrowser.layout' | 'app.previewBrowser.command' | 'app.windowAction' | 'app.captionBackdrop' | 'app.ping' | 'app.status' | 'app.about' | 'app.openExternal' | 'app.openArtifact' | 'app.pickFolder' | 'app.pickFiles' | 'app.pickExtensionPackage' | 'app.setWindowBehavior'
   | 'app.diagnostics.status' | 'app.diagnostics.run' | 'app.diagnostics.history' | 'app.diagnostics.read' | 'app.diagnostics.export' | 'app.diagnostics.feedback';
 type HostMap = {
   'app.diagnostics.status': { params: Empty; result: DiagnosticsState };
@@ -423,7 +433,8 @@ type HostMap = {
   'app.previewBrowser.open': { params: { targetId: string; url: string; bounds: PreviewBounds }; result: { opened: boolean } };
   'app.previewBrowser.layout': { params: { targetId: string; bounds: PreviewBounds; visible: boolean }; result: { updated: boolean } };
   'app.previewBrowser.command': { params: { targetId: string; action: 'back' | 'forward' | 'reload' | 'close' }; result: { updated: boolean } };
-  'app.windowAction': { params: { action: WindowAction }; result: { maximized: boolean; nativeChrome?: boolean } };
+  'app.windowAction': { params: { action: WindowAction } & Partial<NativeCaptionAppearance>; result: { maximized: boolean; nativeChrome?: boolean; captionBackdrop?: NativeCaptionBackdrop } };
+  'app.captionBackdrop': { params: { surface: CaptionSurface | null }; result: { applied: boolean } };
   'app.ping': { params: Empty; result: { host: 'webview2'; ready: boolean } };
   'app.status': { params: Empty; result: { ready: boolean; needsAttention: boolean } };
   'app.about': { params: Empty; result: AboutView };
@@ -447,6 +458,7 @@ declare global {
     cetamesh: HostBridge;
     __cetameshReceive?: (reply: Reply) => void;
     __CETAMESH_NATIVE_CHROME__?: boolean;
+    __CETAMESH_NATIVE_CHAT_MODES__?: boolean;
     __cetameshEvent?: (event: EventEnvelope) => void;
     // Optional in-memory acceptance observer. No request bodies or persistence.
     __cetameshObserveRpc?: (fact: RpcObservation) => void;
@@ -463,6 +475,10 @@ const MAX_BRIDGE_REQUEST_BYTES = 900 * 1024;
 // Native selectors wait for human input. Keep their wait bounded without
 // expiring them at the ordinary RPC deadline while the dialog is still open.
 const NATIVE_SELECTOR_METHODS = new Set(['app.pickFolder', 'app.pickFiles', 'app.pickExtensionPackage', 'app.diagnostics.export']);
+export function bridgeRequestBudget(method:string):number {
+  if(NATIVE_SELECTOR_METHODS.has(method))return 300_000;
+  return method==='ui.plugins.stage'||method==='ui.plugins.engines.package.review'||method==='ui.plugins.engines.package.install'?130_000:32_000;
+}
 function observeRpc(fact:RpcObservation){
   if(!/^ui\.(?:task\.(?:create|get|start|pause|resume|cancel|complete|handoff|reconcile)|approvals\.decide)$/.test(fact.method))return;
   try{window.__cetameshObserveRpc?.(fact);}catch{/* Diagnostics cannot change transport or authority. */}
@@ -482,7 +498,7 @@ function send<T>(method: HostMethod | UiMethod, params: object): Promise<T> {
     const timer = window.setTimeout(() => {
       pending.delete(id);
       reject(new Error('桌面主机响应超时。'));
-    }, NATIVE_SELECTOR_METHODS.has(method) ? 300_000 : 32_000);
+    }, bridgeRequestBudget(method));
     pending.set(id, { resolve: value => resolve(value as T), reject, timer,observation });
     observeRpc(observation);
     window.ipc!.postMessage(JSON.stringify({ id, method, params }));
@@ -643,7 +659,7 @@ export const chatClient = {
   retry: (id: string) => uiCall<{ userMessageId?: string }>('ui.chat.retry', { id }),
   continue: (id: string) => uiCall<{ continued?: boolean }>('ui.chat.continue', { id }),
   catalog: (refresh = false, id?:string) => uiCall<{ models: unknown[]; modelProviders: ChatModelProvider[]; agentProviders: Agent[]; sessionId?:string|null;agentProvider?:string|null;modelControl?:AgentModelControl|null;modes: string[]; defaultModelProvider: string | null; available: boolean; reason: string | null }>('ui.chat.catalog', { refresh, ...(id?{id}:{}) }),
-  setConfig: (id: string, config: Record<string, unknown>) => uiCall<ChatSession>('ui.chat.config.set', { id, config }),
+  setConfig: (id: string, config: Record<string, unknown>, observation?:{expectedRevision:number;catalogIdentity:string}) => uiCall<ChatSession>('ui.chat.config.set', { id, config,...observation }),
   reconcileConfig: (id: string) => uiCall<ChatSession>('ui.chat.config.reconcile', { id })
 };
 export const skillsClient = {
@@ -680,7 +696,7 @@ export const taskClient = {
       uiCall<{ task: Task }>('ui.task.complete', { id, expectedRev, summary, reviewed: true, ...review }),
   verifyOutcome: (id: string, input: { kind: 'code' | 'file' | 'tool' | 'analysis'; expectedFile?: string; expectedSha256?: string; expectedCapability?: string }) =>
     uiCall<{ status: 'VERIFIED' | 'NEEDS_REVIEW'; kind: string; evidenceEventIds: string[]; reasons: string[] }>('ui.task.outcome.verify', { id, ...input }),
-  create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; reasoningEffort?: string; requestId?: string; note?: string; collaboration?: TaskCollaboration }) => uiCall<{ task: Task }>('ui.task.create', input),
+  create: (input: { goal: string; requirements?: string[]; workspaceId?: string | null; agentProvider?: string; reasoningEffort?: string; requestId?: string; note?: string; collaboration?: TaskCollaboration; deferStart?: boolean }) => uiCall<{ task: Task }>('ui.task.create', input),
   start: (id: string, expectedRev?: number, agentProvider?: string, reasoningEffort?:string) => uiCall<{ task: Task }>('ui.task.start', { id, expectedRev, agentProvider, reasoningEffort }),
   pause: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.pause', { id, expectedRev }),
   resume: (id: string, expectedRev?: number) => uiCall<{ task: Task }>('ui.task.resume', { id, expectedRev }),
@@ -742,7 +758,7 @@ export const extensionSettingsClient = {
   status: () => uiCall<{ catalogAvailable: boolean; configured: boolean; offline: boolean; developerMode: boolean; plugins: Plugin[]; installed: Plugin[]; integrations: { id: string; name: string; status: string; enabled: boolean; available: boolean; eligible: boolean; configured: boolean; reason: string | null; lastError: string | null }[]; mcp: McpServer[] }>('ui.plugins.status', {}),
   detail: (id: string) => uiCall<{ available: boolean; offline: boolean; plugin: Plugin | null }>('ui.plugins.detail', { id }),
   refresh: () => uiCall<Record<string, unknown>>('ui.plugins.refresh', {}),
-  stage: (id: string) => uiCall<{ stageId: string; plugin: Plugin; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string; contentReview?: import('../app/SkillPicker').SkillContentReview | null }>('ui.plugins.stage', { id }),
+  stage: (id: string) => uiCall<{ stageId: string; plugin: Plugin; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string; contentReview?: import('../app/SkillPicker').SkillContentReview | null; externalPackageReview?: import('../app/LocalPluginEngines').ExternalPackageReview }>('ui.plugins.stage', { id }),
   stageLocal: (file: string) => uiCall<{ stageId: string; plugin: Plugin; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string }>('ui.plugins.stage-local', { file }),
   install: (stageId: string) => uiCall<{ installed: boolean; plugin: Plugin }>('ui.plugins.install', { stageId, reviewed: true }),
   reviewEnable: (id: string) => uiCall<{ id: string; stageId: string; requiresReview: boolean; installable: boolean; permissions: string[]; summary: string[]; trust: string }>('ui.plugins.enable.review', { id }),
@@ -834,7 +850,8 @@ export const hostClient = {
   pickFolder: () => bridge.invoke('app.pickFolder', {}),
   pickFiles: () => bridge.invoke('app.pickFiles', {}),
   pickExtensionPackage: () => bridge.invoke('app.pickExtensionPackage', {}),
-  windowAction: (action: WindowAction) => bridge.invoke('app.windowAction', { action }),
+  windowAction: (action: WindowAction, appearance?: NativeCaptionAppearance) => bridge.invoke('app.windowAction', { action, ...appearance }),
+  captionBackdrop: (surface: CaptionSurface | null) => bridge.invoke('app.captionBackdrop', { surface }),
   setWindowBehavior: (confirmOnExit: boolean) => bridge.invoke('app.setWindowBehavior', { confirmOnExit })
 };
 export async function openExternal(url: string): Promise<void> {
@@ -856,4 +873,5 @@ export const previewClient = {
 
 const PRODUCT_TOOL_METHODS=new Set(["ui.chat.attachment.list","ui.developer.forge.credentials.save","ui.chat.attachment.begin","ui.chat.attachment.chunk","ui.chat.attachment.finish","ui.chat.attachment.read","ui.chat.attachment.derive","ui.chat.attachment.describe","ui.chat.attachment.remove","ui.chat.attachment.cleanup","ui.chat.attachment.limits","ui.chat.attachment.limits.set","ui.chat.attachment.capabilities","ui.chat.attachment.import","ui.workspace.git.overview","ui.workspace.git.diff","ui.workspace.git.commit","ui.workspace.git.branch.create","ui.workspace.git.worktree.create","ui.developer.forge.describe","ui.developer.forge.save","ui.developer.forge.invoke"]);
 for (const action of ['context', 'branch.review', 'branch.switch', 'index.review', 'stage', 'unstage', 'commit.staged', 'status.page', 'history', 'branches', 'commit.detail', 'preview', 'review']) PRODUCT_TOOL_METHODS.add('ui.workspace.git.' + action);
+for (const action of ['capture','list','preview','review','restore']) PRODUCT_TOOL_METHODS.add('ui.workspace.git.checkpoint.' + action);
 export const productToolsClient={call:(method:string,params:Record<string,unknown>={})=>{if(!PRODUCT_TOOL_METHODS.has(method))return Promise.reject(new Error("不支持的开发工具操作"));return uiCall<unknown>(method as UiMethod,params);}};

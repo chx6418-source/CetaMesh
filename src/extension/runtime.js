@@ -21,10 +21,11 @@ import { fingerprintExtensionPackage } from './package-fingerprint.js';
 import {isHttpDataManifest,createHttpExtensionHost,httpRequestFor,projectHttpResult} from './http-host.js';
 import {validateSchema} from '../model/input-schema.js';
 import {isEventDataManifest,createEventExtensionHost,eventRequestFor,projectEventResult} from './event-host.js';
+import {isReverseLabManifest,createReverseLabExtensionHost,reverseLabRequestFor,projectReverseLabResult} from '../reverselab/extension-host.js';
 import { isSkillDataManifest, createSkillDataHost, skillHash } from './skill-data.js';
 import { createExtensionSettingsService } from './settings.js';
 import { settingsReceiptMatches } from './settings-protocol.js';
-const isDataManifest=manifest=>isHttpDataManifest(manifest)||isEventDataManifest(manifest);
+const isDataManifest=manifest=>isHttpDataManifest(manifest)||isEventDataManifest(manifest)||isReverseLabManifest(manifest);
 
 export function createExtensionRuntime({
   store,
@@ -37,6 +38,8 @@ export function createExtensionRuntime({
   memoryPackHostFactory = createMemoryPackHost,
   supportedSkillContent = true,
   isTrustedVmExtension = () => false,
+  staticAnalysisHealth = () => ({available:false,code:'REVERSELAB_ENGINE_MISSING'}),
+  stopCapabilities = null,
   now = () => Date.now(),
   monitorIntervalMs = 15_000,
   heartbeatTimeoutMs = 3_000,
@@ -177,15 +180,17 @@ export function createExtensionRuntime({
     const catalogOwner = 'extension:' + entry.id;
     const definitions = (entry.manifest.capabilities || []).map(cap => {
       const id = 'extension.' + entry.id + '.' + cap.id;
-      return { id, catalogOwner, descriptorVersion, permission: 'extension.invoke', provider: 'extension', risk: isDataManifest(entry.manifest)?'high':'low', effect: 'unknown',delegatesOperation:isDataManifest(entry.manifest),lifecycleSignal:()=>runtimeRecord(entry.id).lifecycle.signal,
+      return { id, catalogOwner, descriptorVersion, permission: 'extension.invoke', provider: 'extension', risk: isDataManifest(entry.manifest)&&!(isReverseLabManifest(entry.manifest)&&cap.id==='health')?'high':'low', effect: isReverseLabManifest(entry.manifest)&&cap.id==='health'?'read-only':'unknown',delegatesOperation:isDataManifest(entry.manifest),lifecycleSignal:()=>runtimeRecord(entry.id).lifecycle.signal,
         description: typeof cap.description === 'string' && cap.description.trim() ? cap.description : 'Invoke the declared Extension capability ' + cap.id + '.',
         inputSchema: cap.inputSchema && typeof cap.inputSchema === 'object' ? cap.inputSchema : null,
         modelCallable: Boolean(cap.inputSchema && typeof cap.inputSchema === 'object'),
         ...(isDataManifest(entry.manifest)?{
           validateChildRequest(parent,child){const current=entryOrThrow(entry.id);if(current.status!=='enabled'||validateInstalledEntry(current)!==descriptorVersion)throw extensionError('STALE_EXTENSION_HOST','HTTP package identity changed');
+            if(isReverseLabManifest(current.manifest))return child.capability==='analysis.static'&&child.constrainedActor?.id===entry.id
+              &&child.scope?.descriptorVersion===descriptorVersion&&requestFingerprint({input:child.input})===requestFingerprint({input:reverseLabRequestFor(current.manifest,fs.readFileSync(path.join(current.sourceRoot,current.manifest.entry),'utf8'),cap.id,parent.input)});
             return child.capability==='network'&&child.constrainedActor?.id===entry.id&&child.scope?.descriptorVersion===descriptorVersion
               &&requestFingerprint({input:child.input})===requestFingerprint({input:(isEventDataManifest(current.manifest)?eventRequestFor:httpRequestFor)(current.manifest,fs.readFileSync(path.join(current.sourceRoot,current.manifest.entry),'utf8'),cap.id,parent.input)});},
-          projectChildResult(parent,result){const current=entryOrThrow(entry.id);return (isEventDataManifest(current.manifest)?projectEventResult:projectHttpResult)(current.manifest,fs.readFileSync(path.join(current.sourceRoot,current.manifest.entry),'utf8'),cap.id,result,store.storage(current.id));}
+          projectChildResult(parent,result){const current=entryOrThrow(entry.id);if(isReverseLabManifest(current.manifest))return projectReverseLabResult(parent,result);return (isEventDataManifest(current.manifest)?projectEventResult:projectHttpResult)(current.manifest,fs.readFileSync(path.join(current.sourceRoot,current.manifest.entry),'utf8'),cap.id,result,store.storage(current.id));}
         }:{}),
         validate: r=>{if(cap.inputSchema)validateSchema(cap.inputSchema,r.input);},
         execute: async r => {
@@ -300,6 +305,7 @@ export function createExtensionRuntime({
         if (skillRevision(current) !== skillRevision(entry) || validateInstalledEntry(current) !== entry.reviewToken)
           throw extensionError('SKILL_SOURCE_STALE', 'Reviewed Skill package or its enabled generation changed');
       } });
+    if(isReverseLabManifest(entry.manifest))return createReverseLabExtensionHost({manifest:entry.manifest,source,capabilityExecutor:capabilityExecutorFor(bound),health:staticAnalysisHealth});
     if(isEventDataManifest(entry.manifest))return createEventExtensionHost({manifest:entry.manifest,source,storage:store.storage(entry.id),capabilityExecutor:capabilityExecutorFor(bound)});
     if(isHttpDataManifest(entry.manifest))return createHttpExtensionHost({manifest:entry.manifest,source,capabilityExecutor:capabilityExecutorFor(bound)});
     const trustedVm = entry.type !== 'memory-pack' && isTrustedVmExtension(entry) === true;
@@ -344,6 +350,7 @@ export function createExtensionRuntime({
     if (!record.stopPromise) {
       const host = hosts.get(key);
       const stopping = Promise.resolve().then(async () => {
+        if(typeof stopCapabilities==='function')await stopCapabilities(key);
         if (typeof host?.shutdown === 'function') await host.shutdown();
         if (hosts.get(key) === host) hosts.delete(key);
         record.state = 'stopped'; record.stopping = false;
@@ -573,10 +580,17 @@ export function createExtensionRuntime({
     if (!supportsSettings(entry) || entry.status !== 'enabled') return settingsState({ id });
     // Desired saves are synchronous. Joining the previous application cannot
     // overwrite a newer save; every new host reads the current Settings owner.
-    if (record.settingsOperation) { try { await record.settingsOperation; } catch {} return reconcileSettings({ id }); }
+    if (record.settingsOperation) {
+      try { await record.settingsOperation; }
+      catch { /* The previous operation retains its failure; reconciliation rereads the current desired settings. */ }
+      return reconcileSettings({ id });
+    }
     let ownedGeneration = null;
     const operation = (async () => {
-      if (record.settingsPromise && record.settingsStatus === 'applying') { try { await record.settingsPromise; } catch {} }
+      if (record.settingsPromise && record.settingsStatus === 'applying') {
+        try { await record.settingsPromise; }
+        catch { /* The host application records its own error; the current generation is checked again below. */ }
+      }
       const current = entryOrThrow(id);
       if (current.status !== 'enabled' || settingsApplied(current)) return;
       const stopping = stopHost(id), generation = record.generation;
@@ -745,6 +759,12 @@ export function createExtensionRuntime({
 
   return {
     installer,
+    assertInvocation({id,descriptorVersion}){
+      const entry=entryOrThrow(id),record=runtimeRecord(id);
+      if(closed||entry.status!=='enabled'||record.stopping||record.switching||validateInstalledEntry(entry)!==descriptorVersion)
+        throw extensionError('STALE_EXTENSION_HOST','Installed plugin authority changed.');
+      return entry;
+    },
     settingsState,
     reconcileSettings,
     async awaitSettings({ id } = {}) { await runtimeRecord(id).settingsPromise; return settingsState({ id }); },

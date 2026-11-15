@@ -11,9 +11,15 @@ import { createAgentBroker } from '../src/agent/broker.js';
 import { createCetaMeshServices } from '../src/app/service-container.js';
 import { createCodexSessionLifecycle } from '../src/agent/codex-session-lifecycle.js';
 import { createCodexAgentProvider } from '../src/agent/codex-agent-provider.js';
+import { CliAgentProcess } from '../src/agent/cli-agent-process.js';
 import './helpers/codex-model-control-fixtures.mjs';
 const tick=()=>new Promise(r=>setTimeout(r,15));
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'codex-app-fixture-'));
+// This suite owns synthetic App Server streams. Even a routing regression must
+// never discover/launch the installed exec CLI or load its native account home.
+const priorCodexHome=process.env.CODEX_HOME,priorExecutable=CliAgentProcess.prototype.executable;
+process.env.CODEX_HOME=path.join(root,'no-account');fs.mkdirSync(process.env.CODEX_HOME);
+CliAgentProcess.prototype.executable=function(){return this.name==='codex'?null:priorExecutable.call(this);};
 const peers=[];
 const security={verified:true,mode:'native',nativeSandboxSupported:true,nativeApprovalSupported:true,
  inheritedExtensionsDisabled:true,sandbox:'read-only',approvalPolicy:'on-request'};
@@ -274,6 +280,7 @@ try {
   const {workspace}=await nativeCore.workspaceService.execute({method:'workspace.create',params:{root:source,name:'native snapshot fixture'}});
   let task=nativeCore.taskService.runtime.create({goal:'native snapshot failure must remain blocked',workspaceId:workspace.id});
   const router=nativeCore.agentService.getProvider('codex');
+  assert.equal(router.capabilities().appServerRolloutEnabled,true,'the explicit synthetic App Server fixture must be selected before any session creation');
   nativeSession=await router.createSession({taskId:task.id,workspaceId:workspace.id});
   task=nativeCore.taskService.runtime.start({id:task.id,expectedRev:task.rev,provider:'codex',sessionId:nativeSession.sessionId}).task;
   nativeCore.capabilityService.trackTaskAgent({taskId:task.id,provider:'codex',sessionId:nativeSession.sessionId});
@@ -361,6 +368,8 @@ try {
  await enabled.createSession({});await enabled.send({sessionId:'new'});assert.deepEqual(calls,['exec','exec','app']);
  console.log('Codex pinned schema lifecycle, cancellation approval race, resume binding, legacy router PASS');
  } finally {
+ CliAgentProcess.prototype.executable=priorExecutable;
+ if(priorCodexHome===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=priorCodexHome;
  // All synthetic handles belong to this fixture. Await them before deleting
  // their workspace; Windows may release the final file handle asynchronously.
  await Promise.all(peers.map(peer=>peer.handle.close()));

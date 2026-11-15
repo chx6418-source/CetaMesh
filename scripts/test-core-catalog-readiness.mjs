@@ -26,16 +26,28 @@ try {
   const healthy = await services.desktopUiService.execute({ method: 'ui.chat.catalog', params: { refresh: true } });
   const entry = healthy.modelProviders.find(row => row.id === provider);
   assert.equal(entry.catalogState, 'loaded');
-  assert.equal(healthy.available, false, 'existing available contract continues to describe the legacy DSH catalog');
-  assert.ok(healthy.reason, 'DSH failure remains observable in its existing contract');
+  assert.equal(healthy.available, true, 'the selected Model Runtime catalog is available independently of optional DSH');
+  assert.equal(healthy.reason, null, 'an unrelated DSH catalog cannot supply the selected model catalog error');
   assert.equal(renderToStaticMarkup(React.createElement(ChatCatalogStatus, { catalog: healthy })), '<span>CetaMesh Desktop</span>', 'actual Harbor toolbar must not show optional DSH failure for a loaded direct model catalog');
   assert.equal(entry.inferencing, null, 'catalog discovery never proves model inference');
+  const alternate = 'm6c-alternate-model';
+  services.modelRegistry.register({ id: alternate, label: 'Alternate catalog', defaultModel: 'alternate', supportsTools: true,
+    listModels: async () => [{ id: 'alternate' }], health: async () => ({}), chat: async () => ({ text: 'alternate' }), stream: async function* () {} });
+  services.providerSecrets.set({ provider: alternate, apiKey: 'synthetic-not-a-real-key' });
   broken = true;
   const failed = await services.desktopUiService.execute({ method: 'ui.chat.catalog', params: { refresh: true } });
   assert.equal(failed.modelProviders.find(row => row.id === provider).catalogState, 'error');
   assert.equal(failed.available, false, 'configured credentials without a usable catalog must not fabricate availability');
   assert.ok(failed.reason);
+  assert.equal(failed.defaultModelProvider, provider);
+  assert.equal(failed.modelProviders.find(row => row.id === alternate).catalogState, 'loaded');
   assert.notEqual(renderToStaticMarkup(React.createElement(ChatCatalogStatus, { catalog: failed })), '<span>CetaMesh Desktop</span>');
+  assert.equal(failed.modelProviders.find(row => row.id === provider).inferencing, null, 'catalog failure does not invent an inference result');
+  broken = false;
+  const recovered = await services.desktopUiService.execute({ method: 'ui.chat.catalog', params: { refresh: true } });
+  assert.equal(recovered.available, true, 'refresh recovers the selected catalog after the connection recovers');
+  assert.equal(recovered.reason, null, 'the prior failure cannot remain after a successful catalog refresh');
+  assert.equal(recovered.modelProviders.find(row => row.id === provider).inferencing, null);
   console.log('PASS actual Core catalog assembly: optional DSH failure cannot poison healthy models; failed catalogs and inference remain truthful');
 } finally {
   await vite.close(); delete globalThis.window;

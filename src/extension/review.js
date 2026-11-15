@@ -8,6 +8,7 @@ import crypto from 'node:crypto';
 import { manifestFingerprint } from './manifest.js';
 import {isHttpDataManifest} from './http-host.js';
 import {isEventDataManifest} from './event-host.js';
+import {isReverseLabManifest} from '../reverselab/extension-host.js';
 import { isSkillDataManifest } from './skill-data.js';
 import { PERMISSIONS, maxRisk, permissionRisk, requiresExplicitApproval, riskRank } from './types.js';
 
@@ -28,7 +29,7 @@ export function reviewToken(fingerprint, permissionNames, riskLevel, packageFing
  * 其余权限目前只是「声明 + 审查」面：用户可以批准，但宿主还不会给出对应能力 —— 
  * review 里如实标 enforced=false，避免让用户以为批准了就真的放开了磁盘或记忆。
  */
-export const ENFORCED_PERMISSIONS = Object.freeze(['skill.read', 'log', 'storage', 'extension.invoke', 'network', 'memory.read', 'memory.write', 'filesystem.read', 'filesystem.write']);
+export const ENFORCED_PERMISSIONS = Object.freeze(['analysis.static', 'skill.read', 'log', 'storage', 'extension.invoke', 'network', 'memory.read', 'memory.write', 'filesystem.read', 'filesystem.write']);
 
 export function isEnforced(name) {
   return ENFORCED_PERMISSIONS.includes(name);
@@ -98,7 +99,7 @@ export function buildReview(manifest, { packageFingerprint = '' } = {}) {
     scope: { workspace: manifest.scope?.workspace ?? null, paths },
     source: manifest.source,
     ...(isSkillDataManifest(manifest) ? { contentProfile: manifest.contentProfile } : {}),
-    executionBoundary: { osSandbox: false, codeExecution: manifest.type !== 'memory-pack'&&!isHttpDataManifest(manifest)&&!isEventDataManifest(manifest)&&!isSkillDataManifest(manifest), permissionEnforcement: 'capability-broker' },
+    executionBoundary: { osSandbox: false, codeExecution: manifest.type !== 'memory-pack'&&!isHttpDataManifest(manifest)&&!isEventDataManifest(manifest)&&!isSkillDataManifest(manifest)&&!isReverseLabManifest(manifest), permissionEnforcement: 'capability-broker' },
     fingerprint,
     packageFingerprint,
     token: reviewToken(fingerprint, declared, riskLevel, packageFingerprint),

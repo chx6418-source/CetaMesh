@@ -19,6 +19,7 @@ import { validateMemoryPack, validateMemoryPackManifest } from './memory-pack.js
 import { fingerprintExtensionPackage } from './package-fingerprint.js';
 import {isHttpDataManifest,validateHttpDefinition} from './http-host.js';
 import {isEventDataManifest,validateEventDefinition} from './event-host.js';
+import {isReverseLabManifest,validateReverseLabDefinition} from '../reverselab/extension-host.js';
 import { isSkillDataManifest, validateSkillDataManifest, validateSkillPackageFiles, parseSkillDocument } from './skill-data.js';
 
 function collectFiles(rootDir, relative = '', acc = { files: [], bytes: 0 }) {
@@ -114,7 +115,8 @@ export function createExtensionInstaller({ store, now = () => Date.now(), suppor
         throw extensionError('MEMORY_PACK_INVALID', 'Memory Pack contains executable or undeclared content');
       }
       scan = { ok: true, findings: [] };
-    } else if(isEventDataManifest(manifest)){validateEventDefinition(manifest,source);scan={ok:true,findings:[]};}
+    } else if(isReverseLabManifest(manifest)){validateReverseLabDefinition(manifest,source);scan={ok:true,findings:[]};}
+    else if(isEventDataManifest(manifest)){validateEventDefinition(manifest,source);scan={ok:true,findings:[]};}
     else if(isHttpDataManifest(manifest)){validateHttpDefinition(manifest,source);scan={ok:true,findings:[]};}
     else scan = scanEntrySource(source);
     const packageFingerprint = fingerprintExtensionPackage(dir);

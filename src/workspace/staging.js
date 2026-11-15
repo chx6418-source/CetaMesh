@@ -124,7 +124,7 @@ function sourceSnapshotScope({ sourceRoot, additionalWorkspaceRoots = [], exclud
   return { source, excluded, excludedPaths };
 }
 
-function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES, excludedRoots = [],
+function* walkFileSteps(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_BYTES, excludedRoots = [],
   excludedPaths = [], selection = null, gitPolicy = null, paths = null, discoverBrowserProfiles = false,
   strictObservation = false, observeNestedRepository = null, signal, area = 'unknown' } = {}) {
   function readFailure(message, cause) {
@@ -192,7 +192,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
     const parts = rel.split('/');
     for (let index = 1; index < parts.length; index++) selectedDirectories.add(parts.slice(0, index).join('/'));
   }
-  const visit = (dir, relative, depth) => {
+  const visit = function* (dir, relative, depth) {
     assertObservationActive(signal);
     if (relative && omitted.has(relative)) return;
     // Discover private browser profiles only when selecting the initial input.
@@ -229,6 +229,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
     }
     entries.sort((a, b) => a.name.localeCompare(b.name));
     for (const entry of entries) {
+      yield; // Async staging lets diagnostics progress between entries.
       assertObservationActive(signal);
       if (sensitiveName(entry.name)) continue;
       const source = path.join(dir, entry.name);
@@ -265,7 +266,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
           if (selection.ignored(rel, true) || selection.files.has(gitPathKey(rel)) || fs.existsSync(path.join(source, '.git'))) omitted.add(rel);
           continue;
         }
-        visit(source, rel, depth + 1);
+        yield* visit(source, rel, depth + 1);
         continue;
       }
       if (!stat.isFile()) {
@@ -283,7 +284,7 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
       if (strictObservation) observations.push([source, stat]);
     }
   };
-  visit(root, '', 0);
+  yield* visit(root, '', 0);
   const assertUnchanged = () => {
     for (const [file, stat] of observations) assertCanonicalIdentity(file, stat);
     for (const [dir, names] of directoryEntries) {
@@ -294,6 +295,21 @@ function walkFiles(root, { maxFiles = DEFAULT_MAX_FILES, maxBytes = DEFAULT_MAX_
   };
   if (strictObservation) assertUnchanged();
   return { files, totalBytes, excludedPaths: [...omitted], ...(strictObservation ? { assertUnchanged } : {}) };
+}
+
+// Recovery/commit callers retain their synchronous observation contract.
+function walkFiles(root, options) {
+  const steps = walkFileSteps(root, options);
+  let step;
+  do { step = steps.next(); } while (!step.done);
+  return step.value;
+}
+const yieldToCore = () => new Promise(resolve => setImmediate(resolve));
+async function walkFilesAsync(root, options) {
+  const steps = walkFileSteps(root, options);
+  let step, count = 0;
+  while (!(step = steps.next()).done) if (++count % 16 === 0) await yieldToCore();
+  return step.value;
 }
 
 /** Core-only, read-only non-Git snapshot; uses the exact execution-input scope and filters. */
@@ -349,8 +365,9 @@ export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, 
   fs.mkdirSync(stage, { recursive: false, mode: 0o700 });
   try {
     const version=await gitStatus(source).catch(error=>{if(error.code==='GIT_UNAVAILABLE')return {headSha:null,branch:null};throw error;});
-    const gitPolicy = selectGitSnapshot(source, fail);
-    const snapshot = walkFiles(source, { maxFiles, maxBytes, excludedRoots: excluded, excludedPaths, selection: gitPolicy, discoverBrowserProfiles: true });
+    const gitPolicy = await selectGitSnapshot(source, fail);
+    const snapshot = await walkFilesAsync(source, { maxFiles, maxBytes, excludedRoots: excluded, excludedPaths, selection: gitPolicy, discoverBrowserProfiles: true });
+    let copied = 0;
     for (const rel of snapshot.files.keys()) {
       const sourcePath = path.join(source, ...rel.split('/'));
       const targetPath = path.join(stage, ...rel.split('/'));
@@ -363,6 +380,7 @@ export async function createStagingWorkspace({ taskId, workspaceId, sourceRoot, 
         fail('STAGING_PATH_ESCAPE', 'Task Workspace file changed to an excluded or external location');
       }
       fs.copyFileSync(sourcePath, targetPath, fs.constants.COPYFILE_EXCL);
+      if (++copied % 16 === 0) await yieldToCore();
     }
     return {
       taskId: String(taskId),

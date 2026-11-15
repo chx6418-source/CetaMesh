@@ -41,8 +41,10 @@ export function createCapabilityRegistry() {
       }
       if (entries.has(id)) throw capabilityError('CAPABILITY_EXISTS', id);
       if (definition.gitBranchApplication !== undefined && (definition.gitBranchApplication !== true
-        || id !== 'git.branch.switch' || definition.provider !== 'workspace' || definition.catalogOwner
-        || typeof definition.gitOriginalBinding !== 'function' || typeof definition.gitClosedBindings !== 'function' || typeof definition.gitMetadataOriginal !== 'function' || typeof definition.afterDurableGitResult !== 'function'))
+        || !['git.branch.switch','git.checkpoint.restore'].includes(id) || definition.provider !== 'workspace' || definition.catalogOwner
+        || typeof definition.afterDurableGitResult !== 'function'
+        || (id==='git.branch.switch' ? typeof definition.gitOriginalBinding !== 'function' || typeof definition.gitClosedBindings !== 'function' || typeof definition.gitMetadataOriginal !== 'function'
+          : definition.gitOriginalBinding!==undefined || definition.gitClosedBindings!==undefined || definition.gitMetadataOriginal!==undefined)))
         throw capabilityError('INVALID_CAPABILITY', 'Git completion belongs to the exact Core Workspace descriptor');
       const risk = definition.risk ?? 'low';
       const entry = Object.freeze({

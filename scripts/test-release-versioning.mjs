@@ -29,7 +29,7 @@ function check(name, callback) {
 
 check('canonical release source is valid and agrees with package and Cargo mirrors', () => {
   const release = loadReleaseVersion({ rootDir: ROOT });
-  assert.equal(release.productVersion, '1.0.0-rc.2');
+  assert.equal(release.productVersion, '1.1.0-rc.2');
   assert.equal(release.channel, 'rc');
   assert.ok(Number.isSafeInteger(release.buildNumber));
   const validation = validateVersionMirrors({ rootDir: ROOT });

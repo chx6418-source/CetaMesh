@@ -58,9 +58,17 @@ async function bundle(root) {
       async function call(method,params={}){window.fixtureCalls.push({method,params});
         if(method==='app.windowAction')return {maximized:false};
         if(method==='ui.workspace.git.overview')return overview;
+        if(method==='ui.workspace.git.context')return{...overview,git:{...overview.git,entries:[]},branches:[],history:[],conflicts:[]};
+        if(['ui.workspace.git.status.page','ui.workspace.git.branches','ui.workspace.git.history.page'].includes(method)){
+          const entries=method.endsWith('status.page')?overview.git.entries:method.endsWith('branches')?overview.branches:overview.history;
+          const offset=Number(params.cursor??0),limit=params.limit??100;
+          return{workspaceId:workspace.id,entries:entries.slice(offset,offset+limit),nextCursor:offset+limit<entries.length?String(offset+limit):null,totalKnown:entries.length,branch:overview.git.branch,headSha:overview.git.headSha,conflictCount:0};
+        }
+        if(method==='ui.workspace.git.checkpoint.list')return{workspaceId:workspace.id,entries:[]};
         if(method==='ui.workspace.git.diff')return {output:'diff --git a/'+params.path+' b/'+params.path+'\\n--- a/'+params.path+'\\n+++ b/'+params.path+'\\n@@ -1 +1 @@\\n-old value\\n+new value',cached:false,truncated:false,hasChanges:true};
         if(method==='ui.developer.forge.describe')return description;
         if(method==='ui.developer.forge.invoke')throw Object.assign(new Error('Synthetic network unavailable; connection was not verified.'),{code:'FORGE_NETWORK_ERROR'});
+        if(method==='ui.plugins.engines.list')return {engines:[]};
         if(method==='ui.plugins.catalog')return {available:true,configured:true,offline:false,reason:null,plugins};
         if(method==='ui.plugins.status')return {catalogAvailable:true,configured:true,offline:false,developerMode:true,plugins,installed:plugins.filter(row=>row.installed),integrations,mcp:servers};
         if(method==='ui.plugins.integration.list')return {integrations};
@@ -172,7 +180,7 @@ try {
             assert.ok(reachable, 'commit action can be scrolled into view and hit tested');
             await evaluate('document.querySelector(".page-frame").scrollTop=0');
           }
-          if (version === 'after' && page === 'chat') { assert.equal(await evaluate('document.querySelectorAll("button[aria-label=添加附件]").length'), 1, 'empty production Composer has one attachment entry'); assert.equal(await evaluate('document.querySelector(".composer-dock").innerText.includes("MiB")'), false, 'empty Composer keeps limits behind help'); assert.equal(await evaluate('Array.from(document.querySelectorAll("input[type=file]")).some(node=>node.checkVisibility())'), false, 'native file controls are hidden'); }
+          if (version === 'after' && page === 'chat') { assert.equal(await evaluate('document.querySelectorAll("button[aria-label=添加附件或技能]").length'), 1, 'empty production Composer has one add entry'); assert.equal(await evaluate('document.querySelector(".composer-dock").innerText.includes("MiB")'), false, 'empty Composer keeps limits behind help'); assert.equal(await evaluate('Array.from(document.querySelectorAll("input[type=file]")).some(node=>node.checkVisibility())'), false, 'native file controls are hidden'); }
           await capture(version, scenario, page);
           if(version==='after'&&page==='work'){
             assert.equal(await evaluate('document.querySelectorAll(".git-workspace").length'),0,'default task view contains no inline Git form');
@@ -211,8 +219,8 @@ try {
             await evaluate('Array.from(document.querySelectorAll(".forge-tools button")).find(node=>node.textContent.trim()==="读取仓库信息")?.click()'); await until('document.querySelector(".forge-feedback.error")?.innerText.includes("Synthetic network unavailable")', 'synthetic connection error rendered'); await capture(version, scenario, 'forge-offline');
           }
           if(version==='after'&&page==='chat'){
-            await click('button[aria-label=添加附件]');await until('!!document.querySelector("[role=menu][aria-label=添加附件]")','single attachment menu opens');
-            const menuInside=await evaluate('(()=>{const node=document.querySelector("[role=menu][aria-label=添加附件]"),rect=node.getBoundingClientRect();return rect.left>=0&&rect.right<=innerWidth+1&&rect.top>=0&&rect.bottom<=innerHeight+1;})()');assert.ok(menuInside,'attachment menu stays within the available viewport');await capture(version,scenario,'chat-attachment-menu');await evaluate('document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
+            await click('button[aria-label=添加附件或技能]');await until('!!document.querySelector("[role=menu][aria-label=添加附件或技能]")','combined add menu opens');
+            const menuInside=await evaluate('(()=>{const node=document.querySelector("[role=menu][aria-label=添加附件或技能]"),rect=node.getBoundingClientRect();return rect.left>=0&&rect.right<=innerWidth+1&&rect.top>=0&&rect.bottom<=innerHeight+1;})()');assert.ok(menuInside,'add menu stays within the available viewport');await capture(version,scenario,'chat-attachment-menu');await evaluate('document.dispatchEvent(new KeyboardEvent("keydown",{key:"Escape",bubbles:true}))');
           }
         }
       }

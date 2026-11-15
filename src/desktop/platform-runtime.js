@@ -278,7 +278,7 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
     return structuredClone(result);
   }
 
-  async function routeOnce({ decision, record, text, sourceText, requestId, signal,attachmentManifest=[] }, onTaskLinked = () => {}) {
+  async function routeOnce({ decision, record, text, sourceText, requestId, signal,attachmentManifest=[],beforeAgentSend }, onTaskLinked = () => {}) {
     // This observation describes this request only. It never grants retry or
     // releases an earlier Task's execution/unknown-effect fence.
     let executionEntered = false;
@@ -305,6 +305,11 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
       // A repeated goal is not a Chat identity. Only this Chat's explicit Task
       // binding or the exact persisted creation request can continue a Task.
       if (!task) task = taskRuntime.findByCreateRequestId(creation);
+      // Observe the existing transaction before entering this request's execution
+      // boundary. Its work belongs to the prior turn, not an unknown new dispatch.
+      if (task && continuityRuntime?.isInFlight?.(task.id)) {
+        throw capabilityError('TASK_HANDOFF_IN_FLIGHT', '执行者正在交接，本条消息尚未派发；交接完成后可继续发送');
+      }
       if (task?.status === 'queued' && !task.currentAgent) {
         throw capabilityError('TASK_DISPATCH_INCOMPLETE',
           'An existing queued Task has no confirmed Agent; review its original Owner selection before dispatch');
@@ -434,11 +439,11 @@ export function createDesktopPlatformRuntime({ capabilityService, workspaceServi
                 // Managed Chat settings are not native Agent model authorization.
                 ...(choice.provider === 'cetamesh' || record.config.agentProvider === choice.provider ? { modelProvider: record.config.modelProvider,
                   model: record.config.model !== legacyModel ? record.config.model : undefined,
-                  reasoningEffort: record.config.reasoning } : {}),
+                  reasoningEffort: record.nativeDesiredConfiguration?.provider===choice.provider?record.nativeDesiredConfiguration.selection.reasoningEffort:record.config.reasoning } : {}),
                 grants: collaborationGrants ?? { capabilities: ['filesystem.read', 'filesystem.write', 'filesystem.search',
                   'git.status', 'git.diff', 'memory.read', 'test.run', 'operation.read', 'operation.continue',...(attachedText?['attachment.read']:[])] } },
               reason: index ? 'Smart project task safe reassignment after verified preflight failure' : 'Smart project task'
-            }, { signal });
+            }, { signal,beforeAgentSend });
             if (result.status !== 'completed' || result.result?.accepted !== true) {
               throw capabilityError('AGENT_SEND_REJECTED', 'Agent dispatch did not confirm acceptance');
             }

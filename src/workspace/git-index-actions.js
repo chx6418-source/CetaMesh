@@ -399,7 +399,8 @@ export function createGitIndexActions({ record = () => {} } = {}) {
         try { await run(before, ['update-ref', '-m', 'CetaMesh approved staged commit', '--stdin'], { input: transaction, referenceBackend: { format: before.refFormat, root: before.commonDir } }); }
         catch (error) {
           if (!Number.isInteger(error.exitCode) || error.killed) {
-            try { record(entry, actor ?? 'capability-broker', 'git.commit.staged.unknown', `sha=${sha};ref=${before.headRef}`); } catch {}
+            try { record(entry, actor ?? 'capability-broker', 'git.commit.staged.unknown', `sha=${sha};ref=${before.headRef}`); }
+            catch { /* The following unknown-effect refusal retains the exact commit identity without trusting the audit write. */ }
             fail('GIT_COMMIT_REVIEW_REQUIRED', 'Commit reference outcome is unconfirmed; retain this operation and inspect Git history before another action', { effectStatus: 'unknown', sha, ref: before.headRef });
           }
           fail('GIT_REF_CHANGED', 'The native reference attempt failed; retain the operation and inspect its actual outcome before retrying', { effectStatus: 'unknown', sha, ref: before.headRef });
@@ -449,7 +450,8 @@ export function createGitIndexActions({ record = () => {} } = {}) {
         // unknown outcome and its actual sha/ref. Future cleanup must verify
         // the retained resource identity, never remove another writer's lock.
         Object.assign(outcomeError ?? result ?? {}, { cleanupPending: true, cleanupResources: pending });
-        try { record(entry, actor ?? 'capability-broker', 'git.cleanup.pending', JSON.stringify({ resources: pending, ...(sha ? { sha, ref: before.headRef } : {}) })); } catch {}
+        try { record(entry, actor ?? 'capability-broker', 'git.cleanup.pending', JSON.stringify({ resources: pending, ...(sha ? { sha, ref: before.headRef } : {}) })); }
+        catch { /* The result or error already carries the pending resources and their ownership identities. */ }
       }
     }
   }

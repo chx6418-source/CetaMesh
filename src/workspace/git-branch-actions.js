@@ -165,7 +165,7 @@ function temporaryIndex() {
     release() { try { fs.lstatSync(directory); } catch (error) { if (error.code === 'ENOENT') return; throw error; } assertOwned(); fs.rmSync(directory, { recursive: true, force: true }); } };
 }
 
-async function prepareTargetBytes(meta, target, paths, context, signal) {
+export async function prepareTargetBytes(meta, target, paths, context, signal) {
   context.assertOwned();
   const output = path.join(context.directory, 'output'); fs.mkdirSync(output, {mode: 0o700});
   const repository = {...meta.repository, workTree: output};
@@ -209,6 +209,10 @@ async function prepareTargetBytes(meta, target, paths, context, signal) {
   }
   context.assertOwned(); meta.assertRepositoryUnchanged(); return changes;
 }
+
+// Shared internal computation artifact for checkpoint head preparation. No tool
+// parameter can select its location or bypass its directory ownership checks.
+export {temporaryIndex as temporaryGitIndex};
 
 // This temporary directory holds only immutable call-layout facts. Git's
 // payload backend still writes the sole approved source ref store. Qualified
@@ -370,7 +374,8 @@ export function createGitBranchActions({ record = () => {}, nativeExecutable } =
       if ((attempted || byteTransaction) && !(phase === 'tree-pending' && !byteTransaction && error.effectStatus === 'none')) {
         let observed; try { const meta = await observeGitMutation(entry, request.paths); observed = { head: meta.headSha, headRef: meta.headRef, indexIdentity: meta.index.identity, repositoryIdentity: meta.repositoryIdentity, hashes: hashes(meta) }; } catch (failure) { observed = { errorCode: typeof failure.code === 'string' ? failure.code : 'GIT_OBSERVATION_FAILED' }; }
         outcomeError = Object.assign(new Error('Branch switching started but completion is unconfirmed; retain the operation and inspect the actual tree and HEAD before a fresh review'), { code: 'GIT_BRANCH_SWITCH_REVIEW_REQUIRED', effectStatus: 'unknown', ...evidence, phase, observed, causeCode: typeof error.code === 'string' ? error.code : 'GIT_FAILED' });
-        try { record(entry, actor ?? 'capability-broker', 'git.branch.switch.unknown', JSON.stringify({ ...evidence, phase, observed })); } catch {}
+        try { record(entry, actor ?? 'capability-broker', 'git.branch.switch.unknown', JSON.stringify({ ...evidence, phase, observed })); }
+        catch { /* The returned unknown-effect error and retained transaction still block replay if the audit write fails. */ }
       } else outcomeError = noEffect(error);
       if (byteTransaction) outcomeError.byteTransaction = byteTransaction.evidence;
       if (error.cleanupResource) Object.assign(outcomeError, { cleanupPending: true, cleanupResources: [error.cleanupResource] });
@@ -382,7 +387,8 @@ export function createGitBranchActions({ record = () => {}, nativeExecutable } =
       if (pending.length) {
         const current = outcomeError ?? result ?? {}, cleanupResources = [...(current.cleanupResources ?? []), ...pending];
         Object.assign(current, { cleanupPending: true, cleanupResources });
-        try { record(entry, actor ?? 'capability-broker', 'git.cleanup.pending', JSON.stringify({ ...evidence, phase, resources: cleanupResources })); } catch {}
+        try { record(entry, actor ?? 'capability-broker', 'git.cleanup.pending', JSON.stringify({ ...evidence, phase, resources: cleanupResources })); }
+        catch { /* Cleanup ownership is already retained on the result or error; audit failure cannot clear it. */ }
       }
     }
   }

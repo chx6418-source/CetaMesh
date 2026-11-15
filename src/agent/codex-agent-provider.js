@@ -1229,6 +1229,19 @@ export function createCodexAgentProvider({ executable, cliProcess = null, resolv
       log('Codex Agent Provider 已关闭');
     },
     _inspection: { ...inspection, authenticated },
+    // Trusted composition only. Metadata discovery reuses the selected binary,
+    // never this provider's login files, environment credentials or Task consent.
+    _catalogExecutable() {
+      if(closing || !inspection.available || !inspection.version)return null;
+      const executable=cli.executable();
+      if(JSON.stringify([executable,inspection.version])!==inspectedIdentity)return null;
+      try {
+        const stat=fs.lstatSync(executable),canonical=fs.realpathSync.native(executable);
+        if(!stat.isFile() || stat.isSymbolicLink())return null;
+        return {executable:canonical,version:inspection.version.replace(/^codex-cli /,''),identity:crypto.createHash('sha256')
+          .update(JSON.stringify(['codex-no-account-catalog-v1',canonical,inspection.version,stat.dev,stat.ino,stat.size,stat.mtimeMs,stat.ctimeMs])).digest('hex')};
+      }catch{return null;}
+    },
     _sessionLifecycle:lifecycle,
     _sessions: sessions
   });

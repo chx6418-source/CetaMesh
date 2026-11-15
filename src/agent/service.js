@@ -20,6 +20,8 @@ import { createAcpProviders } from './acp-provider-descriptors.js';
 import { createClaudeAgentProvider, createConfiguredClaudeAgentProvider } from './claude-agent-provider.js';
 import { createWorkBuddyAgentProvider } from './workbuddy-agent-provider.js';
 import { createCodexProviderRouter } from './codex-provider-router.js';
+import { createCodexAppServerProvider } from './codex-app-server-provider.js';
+import { createCodexCatalogLauncher } from './codex-app-server-launcher.js';
 import { createZCodeAgentProvider } from './zcode-agent-provider.js';
 import { createAgentInstallationDetector } from './installation-discovery.js';
 
@@ -112,10 +114,14 @@ export function createDefaultAgentService({ api, defaults, log, dshOptions = {},
     }
   });
   const legacyCodex = createCodexAgentProvider({ ...codexOptions, ...(codexOptions.executable === undefined && codexExecutable !== undefined ? { executable: codexExecutable } : {}), log });
-  codexRouterOptions.appServerProvider?.bindSessionLifecycle?.(legacyCodex._sessionLifecycle);
-  const codex = createCodexProviderRouter({ ...codexRouterOptions, legacyProvider: legacyCodex,
+  const catalogLauncher=createCodexCatalogLauncher({stateDir:codexOptions.stateDir,
+    resolveExecutable:()=>legacyCodex._catalogExecutable(),environment:codexOptions.environment});
+  const appServerProvider=codexRouterOptions.appServerProvider??createCodexAppServerProvider({
+    catalogOptions:{...catalogLauncher,metadataOnly:true},log});
+  appServerProvider.bindSessionLifecycle?.(legacyCodex._sessionLifecycle);
+  const codex = createCodexProviderRouter({ ...codexRouterOptions, appServerProvider,legacyProvider: legacyCodex,
     resolveTransport: codexRouterOptions.resolveTransport ?? (id => legacyCodex._sessions?.has(id) ? 'exec' : null) });
-  const routedCodex = Object.freeze({ ...codex, verifyStoppedTask: (...args) => legacyCodex.verifyStoppedTask(...args),
+  const routedCodex = Object.freeze({ ...codex,get eventProtocol(){return codex.eventProtocol;},verifyStoppedTask: (...args) => legacyCodex.verifyStoppedTask(...args),
     inspectStoppedHandoffSession: (...args) => legacyCodex.inspectStoppedHandoffSession(...args),
     verifyTaskQuiescence: (...args) => legacyCodex.verifyTaskQuiescence(...args) });
   const registry = createAgentProviderRegistry({
@@ -130,7 +136,14 @@ export function createDefaultAgentService({ api, defaults, log, dshOptions = {},
   });
   const broker = createAgentBroker({ registry, log, resolveWorkspaceIdentity, resolveExecutionTask, isTaskHandoffInFlight });
   const service = createAgentService({ broker, log, desktopStatus, installationStatus, dshConfiguration, runtimeAuthService });
-  return Object.assign(service, { broker, registry });
+  return Object.assign(service, { broker, registry,
+    async validateCodexTransport(transport) {
+      if(transport==='exec')return;
+      if(transport!=='app-server')throw agentProviderError('CODEX_TRANSPORT_UNSUPPORTED','Unsupported Codex transport');
+      const health=await appServerProvider.health({refresh:true});
+      if(health?.taskEligible!==true)throw agentProviderError(health?.reason??'CODEX_APP_SERVER_ACCOUNT_ISOLATION_UNVERIFIED','Codex App Server is not eligible for formal Tasks');
+    }
+  });
 }
 
 export function createAgentService({ broker, log = () => {}, desktopStatus = null, installationStatus = createAgentInstallationDetector(), dshConfiguration = null, runtimeAuthService } = {}) {

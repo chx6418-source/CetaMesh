@@ -82,7 +82,8 @@ function projectSchema(schema, depth = 0) {
       ? schema.required.map((value) => safeText(value, 80)).filter((value) => value && Object.hasOwn(properties, value))
       : [];
     if (required.length) output.required = [...new Set(required)].sort();
-    output.additionalProperties = schema.additionalProperties === true;
+    output.additionalProperties = schema.additionalProperties && typeof schema.additionalProperties === 'object'
+      ? projectSchema(schema.additionalProperties, depth + 1) ?? false : schema.additionalProperties === true;
   } else if (type === 'array' && schema.items) {
     const items = projectSchema(schema.items, depth + 1);
     if (items) output.items = items;
@@ -317,6 +318,13 @@ function compactContext(context, maxChars) {
     context.omissions.skills = 1;
   }
   if (fits()) return context;
+  // Non-callable status is optional; trim it before already authorized Memory.
+  // Executable descriptors, grants and approval requirements are unchanged.
+  while (!fits() && context.capabilities.statusSummary.length) {
+    context.capabilities.statusSummary.pop();
+    context.omissions.capabilityStatuses = (context.omissions.capabilityStatuses ?? 0) + 1;
+  }
+  if (fits()) return context;
   for (const key of ['extensions', 'agentProviders', 'memoryReferences']) {
     if (context[key].length) {
       context.omissions[key] = context[key].length;
@@ -331,12 +339,6 @@ function compactContext(context, maxChars) {
   context.capabilities.requestable = controls.map(item => item.id);
   context.capabilities.mcp = [];
   context.omissions.capabilityDescriptors = candidates.length - controls.length;
-  // Preserve deterministic status facts where space permits; omitted descriptors
-  // are not callable. Broker remains the execution authority.
-  while (!fits() && context.capabilities.statusSummary.length) {
-    context.capabilities.statusSummary.pop();
-    context.omissions.capabilityStatuses = (context.omissions.capabilityStatuses ?? 0) + 1;
-  }
   if (!fits() && selectedSkills) {
     const original = context.skills.text;
     context.skills.text = '';
@@ -365,6 +367,12 @@ function compactContext(context, maxChars) {
     context.capabilities.manifest.push(descriptor);
     context.capabilities.requestable.push(descriptor.id);
     context.omissions.capabilityDescriptors--;
+    // Optional non-callable status rows must not crowd out granted tools.
+    // This changes the reference budget only; the Broker still authorizes execution.
+    while (!fits() && context.capabilities.statusSummary.length) {
+      context.capabilities.statusSummary.pop();
+      context.omissions.capabilityStatuses = (context.omissions.capabilityStatuses ?? 0) + 1;
+    }
     if (!fits()) {
       context.capabilities.manifest.pop();
       context.capabilities.requestable.pop();

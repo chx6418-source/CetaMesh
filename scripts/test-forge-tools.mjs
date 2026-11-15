@@ -4,6 +4,7 @@ import http from 'node:http';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import selfsigned from 'selfsigned';
 import {createCapabilityBroker} from '../src/capability/broker.js';
@@ -17,6 +18,7 @@ const {registerDeveloperCapabilities} = await import('../src/integrations/develo
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cm-forge-'));
 const seen = [];
 let mode = 'normal';
+const blobSha=text=>{const bytes=Buffer.from(text);return crypto.createHash('sha1').update(Buffer.from(`blob ${bytes.length}\0`)).update(bytes).digest('hex');};
 const pem = await selfsigned.generate([{name:'commonName', value:'api.github.com'}], {days:1, keySize:2048, extensions:[{name:'subjectAltName',altNames:[{type:2,value:'api.github.com'},{type:2,value:'api.gitcode.com'}]}]});
 const server = https.createServer({key:pem.private,cert:pem.cert}, async (req,res) => {
   const chunks=[]; for await (const chunk of req) chunks.push(chunk);
@@ -28,6 +30,12 @@ const server = https.createServer({key:pem.private,cert:pem.cert}, async (req,re
   if(mode==='oversize'){res.end(JSON.stringify({body:'x'.repeat(50000)}));return;}
   if(mode==='malformed'){res.end('{');return;}
   if(mode==='wrong-effect'){res.end(JSON.stringify({ref:'refs/heads/main',object:{sha:'b'.repeat(40)}}));return;}
+  if(req.url.includes('/contents/')){
+    const filePath=decodeURIComponent(req.url.split('/contents/')[1].split('?')[0]);
+    const content=row.body?Buffer.from(row.body.content,'base64').toString('utf8'):'original content\n';
+    const file={type:'file',path:mode==='wrong-file'?'other.txt':filePath,sha:mode==='wrong-blob'?'b'.repeat(40):blobSha(content),size:Buffer.byteLength(content),encoding:'base64',content:Buffer.from(content).toString('base64')};
+    res.end(JSON.stringify(req.method==='GET'?file:{content:file,commit:{sha:'c'.repeat(40)}}));return;
+  }
   if(req.url.includes('/actions/runs')){res.end(JSON.stringify(req.url.includes('/jobs')?{jobs:[{id:'31',name:'build',status:'COMPLETED',steps:[{env:['SECRET']}]}]}:{workflow_runs:[{workflow_run_id:'77',workflow_name:'checks',status:'FAILED',head_sha:'a'.repeat(40),body:'private'}]}));return;}
   if(req.method==='POST'&&req.url.endsWith('/dispatches')){res.writeHead(204);res.end();return;}
   if(req.method==='POST'){res.writeHead(201);res.end(JSON.stringify({id:12,number:3,name:'codex/probe',ref:'refs/heads/codex/probe',draft:true,body:'private response',html_url:'https://attacker.invalid/steal',object:{sha:'a'.repeat(40)}}));return;}
@@ -38,7 +46,8 @@ const server = https.createServer({key:pem.private,cert:pem.cert}, async (req,re
 await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
 const requestImpl=(url,options,callback)=>{
   assert.ok(['https://api.github.com','https://api.gitcode.com'].includes(url.origin));
-  return https.request(url,{...options,port:server.address().port,lookup:(_host,opts,done)=>opts?.all?done(null,[{address:'127.0.0.1',family:4}]):done(null,'127.0.0.1',4),ca:pem.cert,agent:false},callback);
+  const target=new URL(url);target.hostname='127.0.0.1';target.port=String(server.address().port);
+  return https.request(target,{...options,servername:url.hostname,headers:{...options.headers,host:url.host},ca:pem.cert,agent:false},callback);
 };
 const secrets=createProviderSecrets({root});
 secrets.set({provider:'plugin-forge-github',apiKey:'dedicated-github-secret',baseUrl:'https://api.github.com'});
@@ -49,6 +58,33 @@ const create=(provider,extra={})=>forge.createForgeAdapter({provider,repositorie
 try {
   const github=create('github'),gitcode=create('gitcode');
   const input={owner:'owner',repo:'repo'};
+  // Actual TLS requests and existing Broker approvals, synthetic remote only.
+  // This is protocol/Core evidence, not a real GitHub or GitCode account test.
+  for(const provider of ['github','gitcode']){
+    const contentAdapter=create(provider,{repositories:[{...input,credentialRef:`plugin-forge-${provider}`,
+      actions:['content.get','content.create','content.update'],branchPrefixes:['codex/'],contentPaths:['src/sample.txt']}]});
+    const getInput={...input,path:'src/sample.txt',ref:'codex/probe'};
+    const file=await contentAdapter.execute('content.get',getInput);
+    assert.equal(file.text,'original content\n');assert.equal(file.blobSha,blobSha(file.text));
+    assert.equal(new URL(seen.at(-1).url,'https://example.invalid').searchParams.get('ref'),'codex/probe');
+    const cb=createCapabilityBroker({stateDir:path.join(root,'content-'+provider),policy:createCapabilityPolicy({resolveTask:id=>id==='content-task'?{workspaceId:'content-workspace',status:'running'}:null,resolveWorkspace:id=>id==='content-workspace'?{root}:null})});
+    registerDeveloperCapabilities({broker:cb,forgeAdapters:[contentAdapter]});
+    const contentInput={...input,path:'src/sample.txt',branch:'codex/probe',text:'reviewed change\n',message:'Review sample'};
+    const req={actor:{kind:'owner',id:'owner'},taskId:'content-task',workspaceId:'content-workspace',requestId:'create-request',operationId:'create-file',capability:`forge.${provider}.content.create`,input:contentInput};
+    const beforeContent=seen.length,approval=await cb.execute(req);assert.equal(approval.status,'pending');assert.equal(seen.length,beforeContent);
+    cb.approvals.decide(approval.approvalId,true,{kind:'owner',id:'owner'});
+    const created=await cb.execute({...req,approved:true});assert.equal(created.status,'completed');assert.equal(created.result.blobSha,blobSha(contentInput.text));
+    assert.equal(seen.at(-1).method,provider==='github'?'PUT':'POST');assert.equal(seen.at(-1).body.branch,'codex/probe');
+    assert.equal(Buffer.from(seen.at(-1).body.content,'base64').toString('utf8'),contentInput.text);
+    const sent=seen.length;assert.equal((await cb.execute({...req,approved:true})).replayed,true);assert.equal(seen.length,sent);
+    await contentAdapter.execute('content.update',{...contentInput,sha:file.blobSha});assert.equal(seen.at(-1).method,'PUT');assert.equal(seen.at(-1).body.sha,file.blobSha);
+    const deniedBefore=seen.length;
+    for(const patch of [{path:'src/../private.txt'},{path:'not-scoped.txt'},{branch:'main'},{path:'.github/workflows/ci.yml'},{text:'token=fixture-secret-value'}])await assert.rejects(()=>contentAdapter.execute('content.create',{...contentInput,...patch}));
+    assert.equal(seen.length,deniedBefore,'unscoped paths, protected branches and secret-shaped data never leave Core');
+    for(const mismatch of ['wrong-file','wrong-blob']){mode=mismatch;await assert.rejects(()=>contentAdapter.execute('content.update',{...contentInput,sha:file.blobSha}),{code:'FORGE_RESPONSE_INVALID'});}mode='normal';
+    mode='error';await assert.rejects(()=>cb.execute({...req,requestId:'unknown-request',operationId:'unknown-content',approved:true}));mode='normal';
+    const uncertain=seen.length;await assert.rejects(()=>cb.execute({...req,requestId:'unknown-next',operationId:'unknown-content',approved:true}),{code:'REQUEST_RECOVERY_REQUIRED'});assert.equal(seen.length,uncertain);
+  }
   assert.equal((await github.execute('repository.get',input)).repository,'owner/repo');
   assert.equal(seen.at(-1).headers.authorization,'Bearer dedicated-github-secret');
   const anonymous=create('github',{repositories:[{owner:'owner',repo:'repo',publicRead:true,actions:['repository.get']}]});await anonymous.execute('repository.get',input);assert.equal(seen.at(-1).headers.authorization,undefined);

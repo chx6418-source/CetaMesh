@@ -52,7 +52,9 @@ enum UiEvent {
     ReferenceRequest { id: String, method: String, params: Value },
     ReferenceEvent(Value),
     Wake,
+    ChatModeSelected(usize),
     WindowAction { id: String, action: WindowAction },
+    CaptionBackdrop { id: String, image: Option<crate::caption_backdrop::Bitmap> },
     CoreStatus(Status),
     WindowBehavior { confirm_on_exit: bool },
     StartupSettings(Value),
@@ -288,6 +290,12 @@ fn dispatch_bridge(
                 let _ = proxy.send_event(UiEvent::Reply { id, result: Ok(json!({ "path": path })) });
             });
         }
+        "app.captionBackdrop" => {
+            match crate::caption_backdrop::parse(&request.params) {
+                Ok(image) => { let _ = proxy.send_event(UiEvent::CaptionBackdrop { id, image }); }
+                Err(error) => { let _ = proxy.send_event(UiEvent::Reply { id, result: Err(error) }); }
+            }
+        }
         "app.windowAction" => {
             match webview_policy::window_action(&request.params) {
                 Ok(action) => { let _ = proxy.send_event(UiEvent::WindowAction { id, action }); }
@@ -471,6 +479,15 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
         _ => window.theme() == tao::window::Theme::Dark,
     };
     harmonize_window_frame(&window, dark_frame);
+    let caption_proxy = proxy.clone();
+    // Native controls, Snap and 100/125/150% DPI were accepted on Windows.
+    // Keep an explicit rollback and the decorated-window fallback if DWM setup fails.
+    let caption_enabled = std::env::var("CETAMESH_NATIVE_CHAT_CAPTION").as_deref() != Ok("0");
+    let mut chat_caption = if caption_enabled { crate::chat_caption::ChatCaption::install(window.hwnd() as _, move |mode| {
+        let _ = caption_proxy.send_event(UiEvent::ChatModeSelected(mode));
+    }).map_err(|error| crate::supervisor::write_shell_log(&paths.data_dir, &format!("[caption] {error}"))).ok() } else { None };
+    if let Some(caption) = &mut chat_caption { caption.appearance(dark_frame); }
+    let caption_script = format!("window.__CETAMESH_NATIVE_CHROME__=true;window.__CETAMESH_NATIVE_CHAT_MODES__={};", chat_caption.is_some());
     sync_window_geometry(&window, &mut prefs);
     save_ui_prefs(&paths.data_dir, &prefs);
 
@@ -500,7 +517,7 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
         .map_err(|error| format!("创建 WebView2 用户数据目录失败 {}：{error}", webview_data_dir.display()))?;
     let mut web_context = WebContext::new(Some(webview_data_dir));
     let builder = WebViewBuilder::new_with_web_context(&mut web_context)
-        .with_initialization_script("window.__CETAMESH_NATIVE_CHROME__=true;")
+        .with_initialization_script(&caption_script)
         .with_url(start_url)
         .with_devtools(cfg!(debug_assertions))
         .with_clipboard(true)
@@ -588,15 +605,36 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
                     if let Ok(encoded) = serde_json::to_string(&json!({"event":"preview.browser","data":data})) { let _ = webview.evaluate_script(&format!("window.__cetameshEvent?.({encoded})")); }
                 }
             }
+            Event::UserEvent(UiEvent::ChatModeSelected(index)) => {
+                if let Some(mode) = ["chat", "simulation", "project"].get(index) {
+                    let _ = webview.evaluate_script(&format!("window.dispatchEvent(new CustomEvent('cetamesh-chat-mode',{{detail:{}}}))", json!(mode)));
+                }
+            }
+            Event::UserEvent(UiEvent::CaptionBackdrop { id, image }) => {
+                let result = if let Some(caption) = &mut chat_caption {
+                    caption.backdrop(image).map(|applied|json!({"applied":applied}))
+                } else { Ok(json!({"applied":false})) };
+                send_reply(&webview,id,result);
+            }
             Event::UserEvent(UiEvent::WindowAction { id, action }) => {
                 if matches!(action, WindowAction::Minimize | WindowAction::Close) { if let Some(browser) = &reference_browser { browser.hide(); } }
                 let result = match action {
                     WindowAction::State => Ok(()),
+                    WindowAction::ChatModeChat | WindowAction::ChatModeSimulation | WindowAction::ChatModeProject | WindowAction::ChatModeHidden => {
+                        if let Some(caption) = &mut chat_caption {
+                            caption.show_mode(match action { WindowAction::ChatModeChat => Some(0), WindowAction::ChatModeSimulation => Some(1), WindowAction::ChatModeProject => Some(2), _ => None }); Ok(())
+                        } else { Err("Native chat caption unavailable".into()) }
+                    },
                     WindowAction::Drag => window.drag_window().map_err(|error| error.to_string()),
                     WindowAction::Minimize => { window.set_minimized(true); Ok(()) }
                     WindowAction::Maximize => { window.set_maximized(!window.is_maximized()); Ok(()) }
-                    WindowAction::AppearanceLight => { harmonize_window_frame(&window, false); Ok(()) }
-                    WindowAction::AppearanceDark => { harmonize_window_frame(&window, true); Ok(()) }
+                    WindowAction::AppearanceLight => { harmonize_window_frame(&window, false); if let Some(caption) = &mut chat_caption { caption.appearance(false); } Ok(()) }
+                    WindowAction::AppearanceDark => { harmonize_window_frame(&window, true); if let Some(caption) = &mut chat_caption { caption.appearance(true); } Ok(()) }
+                    WindowAction::AppearancePalette { dark, colors, modal } => {
+                        harmonize_window_frame(&window, dark);
+                        if let Some(caption) = &mut chat_caption { caption.appearance_palette(dark, colors, modal); }
+                        Ok(())
+                    }
                     // WM_CLOSE reuses CloseRequested, including hide-to-tray and Owner exit confirmation.
                     WindowAction::Close => unsafe {
                         use windows_sys::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_CLOSE};
@@ -617,7 +655,11 @@ pub fn run_webview_ui(paths: DesktopPaths, dev_url: Option<String>) -> Result<()
                         };
                         window.drag_resize_window(direction).map_err(|error| error.to_string())
                     }
-                }.map(|()| json!({ "maximized": window.is_maximized(), "nativeChrome": true }));
+                }.map(|()| {
+                    let mut state=json!({ "maximized": window.is_maximized(), "nativeChrome": true });
+                    if let Some(caption)=&chat_caption { state["captionBackdrop"]=caption.backdrop_state(); }
+                    state
+                });
                 send_reply(&webview, id, result);
             }
             Event::UserEvent(UiEvent::Reply { id, result }) => send_reply(&webview, id, result),

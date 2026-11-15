@@ -47,16 +47,22 @@ export function createToolEvidenceStore({ stateDir } = {}) {
       try { record = readJsonFile(path.join(directory, `${id}.json`), { maxBytes: MAX_CONTENT_BYTES * 2 + 65536 }); }
       catch { fail('TOOL_EVIDENCE_CORRUPT'); }
       if (!record || !BINDING_KEYS.every(key => record.binding?.[key] === owner[key])) fail('TOOL_EVIDENCE_DENIED');
-      if (typeof authorizeSource !== 'function' || authorizeSource({ capability: record.sourceCapability, input: structuredClone(record.sourceInput ?? {}) }) !== true) fail('TOOL_EVIDENCE_DENIED');
-      if (record.version !== 1 || record.id !== id || typeof record.content !== 'string'
-        || hash(record.content) !== record.sha256 || Buffer.byteLength(record.content) !== record.bytes) fail('TOOL_EVIDENCE_CORRUPT');
-      if (offset > record.content.length) fail('TOOL_EVIDENCE_PAGE_INVALID');
-      let end = Math.min(offset + limit, record.content.length);
-      if (end < record.content.length && /[\uD800-\uDBFF]/.test(record.content[end - 1])) end = end - offset === 1 ? end + 1 : end - 1;
-      return { id, sha256: record.sha256, bytes: record.bytes, chars: record.content.length,
-        offset, nextOffset: end < record.content.length ? end : null,
-        complete: end === record.content.length, representation: 'sanitized-evidence-page',
-        content: record.content.slice(offset, end) };
+      if (typeof authorizeSource !== 'function') fail('TOOL_EVIDENCE_DENIED');
+      const authorization = authorizeSource({ capability: record.sourceCapability, input: structuredClone(record.sourceInput ?? {}) });
+      function authorizedPage(allowed) {
+        if (allowed !== true) fail('TOOL_EVIDENCE_DENIED');
+        if (record.version !== 1 || record.id !== id || typeof record.content !== 'string'
+          || hash(record.content) !== record.sha256 || Buffer.byteLength(record.content) !== record.bytes) fail('TOOL_EVIDENCE_CORRUPT');
+        if (offset > record.content.length) fail('TOOL_EVIDENCE_PAGE_INVALID');
+        let end = Math.min(offset + limit, record.content.length);
+        if (end < record.content.length && /[\uD800-\uDBFF]/.test(record.content[end - 1])) end = end - offset === 1 ? end + 1 : end - 1;
+        return { id, sha256: record.sha256, bytes: record.bytes, chars: record.content.length,
+          offset, nextOffset: end < record.content.length ? end : null,
+          complete: end === record.content.length, representation: 'sanitized-evidence-page',
+          content: record.content.slice(offset, end) };
+      }
+      return authorization && typeof authorization.then === 'function'
+        ? authorization.then(authorizedPage) : authorizedPage(authorization);
     }
   };
 }

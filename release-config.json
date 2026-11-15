@@ -29,6 +29,10 @@
   "privacy": {
     "doc": "docs/product/PRIVACY.md"
   },
+  "pluginService": {
+    "catalogUrl": "https://cetamesh.com/api/v1/plugins",
+    "allowedHosts": ["cetamesh.com"]
+  },
   "security": {
     "doc": "docs/product/SECURITY.md",
     "contact": ""

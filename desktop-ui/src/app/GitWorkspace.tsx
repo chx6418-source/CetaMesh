@@ -5,6 +5,7 @@ import { Sheet as Drawer } from '../components/primitives/overlays';
 import { DiffViewer, parseUnifiedDiff } from '../components/product/DiffViewer';
 import { approvalClient, bridge } from '../bridge/typed-client';
 import './GitWorkspace.css';
+import {GitCheckpoints} from './GitCheckpoints';
 
 type GitEntry = { x: string; y: string; path: string; origPath?: string | null; conflict: boolean; commitEligible: boolean; sha256?: string | null; blockedReason?: string };
 type GitTask = { id: string; goal: string; status: string; workspaceId: string; readOnly: boolean; executor?: { provider: string | null; sessionId: string | null } | null };
@@ -71,6 +72,7 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
   const [switchMode, setSwitchMode] = useState('clean');
   const [switchReview, setSwitchReview] = useState<SwitchReview | null>(null);
   const [switchApproval, setSwitchApproval] = useState<{id: string; workspaceId: string} | null>(null);
+  const [checkpointPending,setCheckpointPending]=useState(false);
   const [detail, setDetail] = useState<Detail | null>(null);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
@@ -213,7 +215,7 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
   const hiddenSelection = selected.filter(path => !visibleEntries.some(entry => entry.path === path)).length;
   const tasks = overview?.tasks ?? [];
   const currentTask = tasks.find(task => task.id === taskId);
-  const locked = loading || busy || pageBusy;
+  const locked = loading || busy || pageBusy || checkpointPending;
   const canCreate = !!overview?.git.headSha && !!currentTask && !terminal(currentTask) && !currentTask.readOnly && !!branch.trim() && !overview.conflicts.length;
   const branches = overview?.branches.filter(item => matches(branchQuery, [item.name, item.taskId, item.upstream])) ?? [];
   const worktrees = overview?.worktrees.filter(item => matches(worktreeQuery, [item.name, item.branch, item.taskId, item.workspaceId])) ?? [];
@@ -382,6 +384,7 @@ export function GitWorkspace({ call, workspaces, activeWorkspaceId, onWorkspaceC
         {!!tasks.length && <details className="git-related-tasks"><summary>关联任务 · {tasks.length}</summary>{tasks.map(task => <div className="git-task-item" key={task.id}>{onOpenTask ? <Button type="button" compact variant="ghost" onClick={() => onOpenTask(task.id)}>{task.goal}</Button> : <strong>{task.goal}</strong>}<small>{task.status} · {task.id}</small></div>)}</details>}
       </aside></div>
     </>}
+    {!!workspaceId&&<GitCheckpoints workspaceId={workspaceId} call={call} revision={revision} disabled={loading||busy||pageBusy||!!switchApproval||!overview?.git.isRepo} dirtySwitch={switchReview?.blocker?.code==='GIT_WORKTREE_DIRTY'} onPending={setCheckpointPending} onChanged={async()=>{setSwitchReview(null);setRevision(value=>value+1);await onWorkspaceChanged?.();}}/>}
     <Drawer open={!!detail} title={detail?.kind === 'branch' ? '分支详情' : '工作树详情'} onClose={() => setDetail(null)}>{detail && <div className="git-detail"><h3>{detail.item.name}</h3><dl><dt>实际分支</dt><dd>{detail.kind === 'branch' ? detail.item.name : detail.item.branch || 'Detached HEAD'}</dd><dt>HEAD</dt><dd><code>{detail.item.headSha ?? '尚无提交'}</code></dd><dt>关联 Task</dt><dd>{detail.item.taskId ? <>{detailTask?.goal ?? '任务详情不可用'}<small>{detail.item.taskId}</small>{onOpenTask && <Button type="button" compact onClick={() => { onOpenTask(detail.item.taskId!); setDetail(null); }}>查看任务</Button>}</> : '未关联'}</dd><dt>Agent</dt><dd>{detailTask?.executor?.provider || '未知 · 未提供执行者信息'}{detailTask?.executor?.sessionId && <small>Session {detailTask.executor.sessionId}</small>}</dd><dt>基线 HEAD</dt><dd><code>{detail.item.baselineHead ?? '未知'}</code></dd>{detail.kind === 'branch' ? <><dt>上游</dt><dd>{detail.item.upstream ?? '未设置'}</dd></> : <><dt>目录类型</dt><dd>{detail.item.managed ? 'Agent 隔离目录' : detail.item.workspaceId ? '已登记工作区' : '外部工作区'}</dd><dt>父工作区</dt><dd>{detail.item.parentWorkspaceId ?? '未知'}</dd><dt>目录状态</dt><dd>{detail.item.locked ? '已锁定' : '未锁定'}{detail.item.prunable ? ' · 需要检查登记状态' : ''}</dd></>}</dl></div>}</Drawer>
   </div>;
 }

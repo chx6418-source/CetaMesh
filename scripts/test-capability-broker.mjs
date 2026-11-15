@@ -279,8 +279,14 @@ try {
   'PERMISSION_DENIED');
  await deny(logicalRestart.broker.execute({...resumeRequest,requestId:'changed-plan',input:{operationRef:'planned-append',
   input:{path:'planned.txt',content:'changed',append:true}}}),'REQUEST_ID_CONFLICT');
- await deny(logicalRestart.broker.execute({actor:resumePrincipal,taskId:resumeTask.id,workspaceId:ws,capability:'filesystem.write',
-  operationId:'guessed-fresh-id',input:{path:'unlinked.txt',content:'unlinked'}}),'OPERATION_LINK_REQUIRED');
+ await assert.rejects(logicalRestart.broker.execute({actor:resumePrincipal,taskId:resumeTask.id,workspaceId:ws,capability:'filesystem.write',
+  requestId:'unlinked-preflight',operationId:'guessed-fresh-id',input:{path:'unlinked.txt',content:'unlinked'}}), error => {
+   assert.equal(error.code,'OPERATION_LINK_REQUIRED');
+   assert.notEqual(error.effectStatus,'unknown','authorization refusal before dispatch is not an unknown write');
+   return true;
+  });
+ assert.equal(logicalRestart.broker.dispatchStatus('unlinked-preflight'),null);
+ assert.equal(fs.existsSync(path.join(dir,'project','unlinked.txt')),false);
  const independentPlan=await logicalRestart.execute({method:'capability.operation.prepare',params:{taskId:resumeTask.id,workspaceId:ws,
   operationId:'independent-intent',capability:'filesystem.write',input:{path:'planned.txt',content:'one',append:true,
    expectedHash:crypto.createHash('sha256').update('one').digest('hex')}}});

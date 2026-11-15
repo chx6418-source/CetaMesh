@@ -36,6 +36,7 @@ import { isManagedWorktree } from './managed-worktree.js';
 import { workspaceContentProof } from './handoff-facts.js';
 import { assertObservationActive } from './observation-abort.js';
 import { postWriteVerificationSnapshot } from '../model/post-write-verification.js';
+import { inspectIsolatedChildWorkspace as inspectChildWorkspace } from './isolated-child-proof.js';
 
 const GIT_INFO_TTL_MS = 5000;
 
@@ -344,6 +345,11 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     'workspace.git.overview': async p => gitProduct.overview(requireWorkspace(p)),
     'workspace.git.context': (p, context) => gitProduct.context(requireWorkspace(p), {signal: context.signal}),
     'workspace.git.index.review': async p => gitProduct.reviewStaged(requireWorkspace(p), {paths: p.paths}),
+    'workspace.git.checkpoint.capture': (p, context) => gitProduct.captureCheckpoint(assertGitWritable(requireWorkspace(p)), {...p,signal:context.signal}),
+    'workspace.git.checkpoint.list': p => gitProduct.listCheckpoints(requireWorkspace(p)),
+    'workspace.git.checkpoint.preview': p => gitProduct.previewCheckpoint(requireWorkspace(p),p),
+    'workspace.git.checkpoint.review': (p,context) => gitProduct.reviewCheckpoint(assertGitWritable(requireWorkspace(p)),p,context),
+    'workspace.git.checkpoint.restore': async () => fail('GIT_APPROVAL_REQUIRED','Checkpoint restore requires exact once-only approval'),
     'workspace.git.branch.review': async (p, context) => {
       const entry = requireWorkspace(p);
       let original;
@@ -551,6 +557,11 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     return entry;
   }
   async function validateApprovedGit({method, params = {}} = {}, context = {}) {
+    if(method==='workspace.git.checkpoint.restore'){
+      const entry=assertGitWritable(requireWorkspace(params));
+      if(entry.settings?.policies?.gitCommit==='deny')fail('GIT_COMMIT_DENIED','Workspace policy denies Git mutations');
+      return gitProduct.validateCheckpointRestore(entry,params);
+    }
     if (method === 'workspace.git.branch.switch') {
       const entry = admitApprovedBranch(params,context);
       return gitProduct.validateSwitch(entry, params, {metadataRecovery:context.metadataRecovery});
@@ -562,6 +573,16 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     return gitProduct.validateIndexAction(entry, params, action);
   }
   async function executeApprovedGit({ method, params = {} } = {}, context = {}) {
+    if(method==='workspace.git.checkpoint.restore'){
+      let entry,raw,returned;
+      try{entry=assertGitWritable(requireWorkspace(params));if(!context.dispatchBinding||context.dispatchBinding.capability!=='git.checkpoint.restore')fail('GIT_APPROVAL_REQUIRED','Exact checkpoint dispatch binding is required');
+        if(entry.settings?.policies?.gitCommit==='deny')fail('GIT_COMMIT_DENIED','Workspace policy denies Git mutations');
+      }catch(error){knownGitNoEffect.add(error);throw error;}
+      try{return returned=await gitProduct.restoreCheckpoint(entry,params,{signal:context.signal,application:{dispatchBinding:context.dispatchBinding,assertAvailable:context.assertAvailable,
+        retainTransaction(value){raw=value;},deferSettlement(result,value){gitSettlements.set(result,{entry,raw:value});}}});}
+      catch(error){if(gitProduct.isKnownCheckpointNoEffectError(error))knownGitNoEffect.add(error);if(raw||error.byteTransaction)retainRecovery(entry,error);throw error;}
+      finally{try{if(raw){raw.closeGitInvocation(context.dispatchBinding);if(returned)returned.byteTransaction=raw.evidence;retainRecovery(entry,{code:'GIT_CHECKPOINT_REVIEW_REQUIRED'});}}catch{retainRecovery(entry,{code:'EXECUTION_UNCONFIRMED'});}gitInfoCache.delete(entry.id);}
+    }
     if (method === 'workspace.git.branch.switch') {
       // The domain executor owns its exact branded, effect-free preparation.
       // Do not run a second unbranded async preparation after Broker intent.
@@ -623,6 +644,17 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
     }
     if (!['workspace.git.branch.create', 'workspace.git.worktree.create'].includes(method)) fail('METHOD_NOT_FOUND', 'Unknown approved Git effect');
     return gitProduct.create(assertWritable(requireWorkspace(params)), params, { worktree: method === 'workspace.git.worktree.create' });
+  }
+
+  function inspectIsolatedChildWorkspace({workspaceId,sourceWorkspaceId,parentTaskId,baselineHead,branch}) {
+    return inspectChildWorkspace(registry.get(workspaceId),{stateDir,resolveWorkspace:id=>registry.get(id),sourceWorkspaceId,parentTaskId,baselineHead,branch});
+  }
+  async function captureIsolatedChildWorkspace(binding) {
+    const before=inspectIsolatedChildWorkspace(binding);
+    const content=await contentProof(registry.get(binding.workspaceId));
+    const after=inspectIsolatedChildWorkspace(binding);
+    if(JSON.stringify(before)!==JSON.stringify(after))fail('TASK_CHILD_ISOLATION_INVALID','Worktree identity changed during baseline observation');
+    return {...after,baselineSha256:content.sha256};
   }
 
   function workspacesOverlap(leftId, rightId) {
@@ -688,7 +720,8 @@ export function createWorkspaceService({ stateDir, excludedRoots = [], now = () 
   return { execute, executeApprovedGit, validateApprovedGit, isKnownGitNoEffect, describeWorkspace, describeGitRecoveryWorkspace, acknowledgeGitResult,
     gitOriginalBinding: result => gitSettlements.get(result)?.raw.owner.dispatchBinding,
     gitClosedBindings: result => gitSettlements.get(result)?.raw.invocations.filter(row=>row.state==='closed').map(row=>row.binding) ?? [],
-    applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof, readPostWriteVerificationConfig, resolvePostWriteVerification };
+    applyChanges, workspacesOverlap, collectContentProof, collectRecoveryProof, readPostWriteVerificationConfig, resolvePostWriteVerification,
+    inspectIsolatedChildWorkspace, captureIsolatedChildWorkspace };
 }
 
 export { WorkspaceBoundaryError, WorkspaceRegistryError, WorkspaceToolError };

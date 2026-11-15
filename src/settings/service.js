@@ -10,11 +10,18 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { normalizeSkillSources } from '../context/skill-sources.js';
 
-export function createSettingsService({ stateDir, now } = {}) {
+export function createSettingsService({ stateDir, now, validateCodexTransport } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createSettingsService 需要 stateDir');
   const store = createSettingsStore({ stateDir, now });
 
-  function updateSettings(p) {
+  async function updateSettings(p) {
+    if(p.section==='agents' && p.values?.codexTransport==='app-server') {
+      const before=store.get();
+      if(typeof validateCodexTransport!=='function')throw settingsError('CODEX_APP_SERVER_ACCOUNT_ISOLATION_UNVERIFIED','Native-account App Server isolation is not verified');
+      await validateCodexTransport('app-server');
+      if(store.get().revision!==before.revision)throw settingsError('SETTINGS_CONFLICT','Settings changed during Codex transport validation');
+      p={...p,expectedRev:p.expectedRev??before.revision};
+    }
     if (p.section === 'extensions' && Object.hasOwn(p.values ?? {}, 'skillSources')) {
       const current = store.get().settings.extensions.skillSources;
       const supplied = normalizeSkillSources(p.values.skillSources);

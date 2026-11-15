@@ -76,7 +76,8 @@ function normalizePlugin(raw, allowedHosts) {
   const packageSha256 = text(raw.packageSha256, 'packageSha256', 64, { required: true }).toLowerCase();
   if (!/^[a-f0-9]{64}$/.test(packageSha256)) throw pluginCenterError('CATALOG_INVALID', 'packageSha256 must be a SHA-256 digest');
   const packageBytes = Number(raw.packageBytes);
-  if (!Number.isSafeInteger(packageBytes) || packageBytes < 1 || packageBytes > 5 * 1024 * 1024) {
+  const externalRuntime=['agentos','reverselab'].includes(raw.id)&&raw.distribution?.kind==='lighthouse-v1';
+  if (!Number.isSafeInteger(packageBytes) || packageBytes < 1 || packageBytes > (externalRuntime?128:5) * 1024 * 1024) {
     throw pluginCenterError('CATALOG_INVALID', 'packageBytes is outside the download limit');
   }
   const blockedVersions = stringList(raw.blockedVersions ?? (raw.blockedVersion ? [raw.blockedVersion] : []), 'blockedVersions', 100, 40);
@@ -93,8 +94,9 @@ function normalizePlugin(raw, allowedHosts) {
     screenshots: screenshotList(raw.screenshots, allowedHosts),
     homepage: secureUrl(raw.homepage, 'homepage'),
     documentation: secureUrl(raw.documentation, 'documentation'),
-    manifestUrl: secureUrl(raw.manifestUrl, 'manifestUrl', { allowedHosts, required: true }),
-    packageUrl: secureUrl(raw.packageUrl, 'packageUrl', { allowedHosts, required: true }),
+    manifestUrl: secureUrl(raw.manifestUrl, 'manifestUrl', { allowedHosts, required: !raw.distribution }),
+    packageUrl: secureUrl(raw.packageUrl, 'packageUrl', { allowedHosts, required: !raw.distribution }),
+    ...(raw.distribution?{distribution:normalizeDistribution(raw.distribution,raw.id,version,allowedHosts),kind:externalRuntime?'external-runtime':'extension'}:{}),
     packageSha256,
     packageBytes,
     minCetaMeshVersion: text(raw.minCetaMeshVersion, 'minCetaMeshVersion', 40) || null,
@@ -112,7 +114,32 @@ function normalizePlugin(raw, allowedHosts) {
   };
 }
 
+function normalizeDistribution(raw,id,version,allowedHosts){
+  if(raw?.kind!=='lighthouse-v1')throw pluginCenterError('CATALOG_INVALID','unsupported package distribution');
+  const authorizationUrl=secureUrl(raw.authorizationUrl,'downloadAuthorization',{allowedHosts,required:true});
+  const url=new URL(authorizationUrl);
+  if(url.pathname!==`/api/v1/plugins/${encodeURIComponent(id)}/versions/${encodeURIComponent(version)}/download`||url.search)throw pluginCenterError('CATALOG_INVALID','downloadAuthorization must identify this plugin version');
+  const filename=text(raw.filename,'filename',180,{required:true});
+  if(!/^[a-zA-Z0-9][a-zA-Z0-9._-]*\.zip$/.test(filename))throw pluginCenterError('CATALOG_INVALID','unsafe package filename');
+  return {kind:'lighthouse-v1',authorizationUrl,filename,compatibility:text(raw.compatibility,'compatibility',200)};
+}
+
+function registryCatalog(raw,catalogUrl){
+  if(raw.version!=='v1'||!Array.isArray(raw.plugins)||raw.plugins.length>MAX_PLUGINS||!catalogUrl)throw pluginCenterError('CATALOG_INVALID','unsupported Plugin Registry schema');
+  const base=new URL(catalogUrl);
+  return {schemaVersion:1,generatedAt:'',plugins:raw.plugins.filter(row=>row.status==='published'&&row.latest).map(row=>{
+    const latest=row.latest;
+    const authorizationUrl=new URL(text(latest.downloadAuthorization,'downloadAuthorization',1200,{required:true}),base);
+    if(authorizationUrl.origin!==base.origin)throw pluginCenterError('CATALOG_URL_HOST_NOT_ALLOWED','download authorization must remain on the Registry origin');
+    return {id:row.id,name:row.name,summary:text(row.description,'description',4000).slice(0,300)||row.name,description:row.description,publisher:row.author,
+      version:latest.version,category:PLUGIN_CATEGORIES.includes(row.category)?row.category:'Other',homepage:row.homepage,
+      permissions:latest.permissions,capabilities:[],featured:row.featured,packageSha256:latest.sha256,packageBytes:latest.filesize,updatedAt:latest.publishedAt,
+      distribution:{kind:'lighthouse-v1',authorizationUrl:authorizationUrl.toString(),filename:latest.filename,compatibility:latest.compatibility?.cetamesh}};
+  })};
+}
+
 export function normalizeCatalog(raw, { catalogUrl, allowedHosts = [] } = {}) {
+  if(raw?.version==='v1'&&typeof raw.registry==='string')raw=registryCatalog(raw,catalogUrl);
   if (!raw || typeof raw !== 'object' || Array.isArray(raw) || Number(raw.schemaVersion) !== 1) {
     throw pluginCenterError('CATALOG_INVALID', 'unsupported Plugin Catalog schema');
   }
@@ -121,6 +148,7 @@ export function normalizeCatalog(raw, { catalogUrl, allowedHosts = [] } = {}) {
   }
   const trustedHosts = [...new Set([...(allowedHosts || []).map(value => String(value).trim().toLowerCase()), ...(catalogUrl ? [new URL(catalogUrl).hostname.toLowerCase()] : [])])].filter(Boolean);
   const plugins = raw.plugins.map(plugin => normalizePlugin(plugin, trustedHosts));
+  for(const plugin of plugins)if(plugin.distribution&&new URL(plugin.distribution.authorizationUrl).origin!==new URL(catalogUrl).origin)throw pluginCenterError('CATALOG_URL_HOST_NOT_ALLOWED','cached download authorization must remain on the Registry origin');
   const ids = new Set();
   for (const plugin of plugins) {
     if (!/^[a-z0-9][a-z0-9._-]{1,63}$/.test(plugin.id) || ids.has(plugin.id)) {

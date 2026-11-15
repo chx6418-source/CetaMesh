@@ -1,0 +1,42 @@
+.appearance-settings { display: grid; gap: 24px; max-width: 1060px; }
+.appearance-settings section { min-width: 0; }
+.appearance-settings h3 { margin: 0 0 12px; font-size: 15px; }
+.appearance-settings .row h3 { margin-bottom: 6px; }
+.appearance-settings p { margin: 0 0 12px; font-size: 12px; }
+.appearance-schemes { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 10px; }
+.appearance-scheme { display: flex; align-items: center; gap: 10px; min-width: 0; padding: 13px; color: var(--text-primary); background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius-md); }
+.appearance-scheme > span { width: 26px; height: 26px; flex: none; border: 1px solid var(--border-strong); border-radius: 50%; }
+.appearance-scheme strong { font-size: 13px; font-weight: 550; }
+.appearance-scheme svg { margin-left: auto; color: var(--accent-hover); }
+.appearance-scheme.selected { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+.appearance-accent, .appearance-accent label { display: flex; align-items: center; gap: 12px; }
+.appearance-accent { margin-top: 14px; font-size: 13px; }
+.appearance-accent input { width: 36px; height: 28px; padding: 2px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); cursor: pointer; }
+.appearance-background-preview { height: 180px; border: 1px solid var(--border); border-radius: var(--radius-lg); background-size: cover; background-position: center; }
+.appearance-background-empty { display: grid; place-items: center; min-height: 100px; padding: 20px; border: 1px solid var(--border); border-radius: var(--radius-lg); background: var(--surface); color: var(--text-muted); font-size: 13px; }
+.appearance-background-controls { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; margin-top: 14px; }
+.appearance-background-controls label { display: grid; grid-template-columns: 1fr auto; gap: 6px 12px; min-width: 160px; flex: 1; font-size: 12px; }
+.appearance-background-controls input { grid-column: 1/-1; width: 100%; accent-color: var(--accent); }
+.appearance-error { color: var(--danger); }
+.appearance-reset { border-top: 1px solid var(--border); padding-top: 12px; }
+:root[data-custom-background='true'] .harbor-shell { isolation: isolate; background: var(--background-soft); }
+:root[data-custom-background='true'] .harbor-shell::before { content: ''; position: absolute; z-index: -1; inset: -24px; pointer-events: none; background-image: var(--custom-background-image); background-position: center; background-size: cover; filter: blur(var(--custom-background-blur)); opacity: var(--custom-background-strength); }
+/* Keep one wallpaper plane. Structural wrappers stay transparent; readable
+   surfaces tint it once instead of flattening the entire workspace. The solid
+   rail matches the native caption, which intentionally never receives images. */
+:root[data-custom-background='true'] :is(.harbor-sidebar,.conversation-pane,.composer-dock) { background-color: transparent; }
+:root[data-custom-background='true'] :is(.navigation-rail,.window-chrome) { background-color: var(--background-soft); }
+:root[data-custom-background='true'] .workspace-panel { background-color: color-mix(in srgb, var(--background-soft) 88%, transparent); backdrop-filter: blur(16px); }
+:root[data-custom-background='true'] .page-frame { background-color: color-mix(in srgb, var(--background) 48%, transparent); }
+:root[data-custom-background='true'] .composer-field { background-color: color-mix(in srgb, var(--surface-elevated) 88%, transparent); backdrop-filter: blur(16px); }
+/* Activated only after the native host accepts the current wallpaper strip. */
+:root[data-caption-wallpaper='active'] .harbor-shell::before { top: calc(-24px - var(--native-caption-height)); }
+/* DWM clips the outer window. A second rounded WebView shell exposes body white
+   at the caption seam and bottom corners; keep the interior panels rounded. */
+:root[data-caption-wallpaper='active'][data-window-chrome='native'] .harbor-shell { border-radius: 0; }
+:root[data-caption-wallpaper='active'] .navigation-rail { background-color: color-mix(in srgb, var(--background-soft) 68%, transparent); backdrop-filter: blur(16px); }
+:root[data-caption-wallpaper='active'] .workspace-panel { background-color: color-mix(in srgb, var(--background-soft) 70%, transparent); border-color: transparent; }
+:root[data-caption-wallpaper='active'] .page-frame { border-color: transparent; }
+:root[data-caption-wallpaper='active'] .page-frame:has(.chat-welcome) { background-color: transparent; }
+:root[data-caption-wallpaper='active'] .chat-welcome-heading { background: radial-gradient(ellipse at left, color-mix(in srgb, var(--background) 78%, transparent), transparent 78%); }
+@media(max-width:700px) { .appearance-schemes { grid-template-columns: repeat(2,minmax(0,1fr)); } .appearance-settings .theme-options { grid-template-columns: repeat(3,minmax(0,1fr)); } }

@@ -106,10 +106,24 @@ const emptyObjectSchema = {
     {text:'Skipped completed operation.',toolCalls:[]}]);
   const replay=await createToolExecutionCoordinator({modelRuntime:next.runtime,capabilityBroker:capabilities.broker}).run({...options,turnId:'new-turn'});
   assert.equal(replay.status,'completed');assert.equal(dispatchCount,1);assert.equal(fs.readFileSync(marker,'utf8'),'x');
-  const unlinked=modelRuntimeWith([{toolCalls:[{id:'new-id-without-identity',capabilityId:'fixture.resume-write',arguments:{proof:'marker'}}]}]);
-  const review=await createToolExecutionCoordinator({modelRuntime:unlinked.runtime,capabilityBroker:capabilities.broker}).run({...options,
+  const beforeUnlinked=capabilities.broker.operationsForTask({taskId:task.id,workspaceId:workspace});
+  const unlinkedActivities=[];
+  const unlinked=modelRuntimeWith([{toolCalls:[{id:'new-id-without-identity',capabilityId:'fixture.resume-write',arguments:{proof:'marker'}}]},
+    {text:'The unlinked effect was refused before execution.',toolCalls:[]}]);
+  const unlinkedCoordinator=createToolExecutionCoordinator({modelRuntime:unlinked.runtime,capabilityBroker:capabilities.broker});
+  const review=await unlinkedCoordinator.run({...options,onActivity:row=>unlinkedActivities.push(row),
     turnId:'unlinked-turn',manifest:capabilities.broker.list().filter(row=>row.id==='fixture.resume-write')});
-  assert.equal(review.code,'OUTCOME_UNKNOWN',JSON.stringify(review));assert.equal(dispatchCount,1,'unreferenced resumed effects require review before dispatch');
+  // Admission refused before an executor ran. Preserve the refusal without
+  // inventing unknown effects; genuine unknown outcomes are covered below.
+  assert.equal(review.status,'completed',JSON.stringify(review));
+  assert.equal(review.text,'The unlinked effect was refused before execution.');
+  assert.equal(JSON.parse(review.messages.find(row=>row.role==='tool').content).code,'OPERATION_LINK_REQUIRED');
+  assert.equal(unlinkedActivities.at(-1).status,'failed');
+  assert.equal(unlinkedActivities.at(-1).summary,'OPERATION_LINK_REQUIRED');
+  assert.deepEqual(unlinkedCoordinator.taskReviewState(task.id),{executions:[],continuations:[]});
+  assert.deepEqual(capabilities.broker.operationsForTask({taskId:task.id,workspaceId:workspace}),beforeUnlinked);
+  assert.equal(dispatchCount,1,'unreferenced resumed effects require review before dispatch');
+  assert.equal(fs.readFileSync(marker,'utf8'),'x','the refused call cannot duplicate the completed effect');
   pass('replacement model resumes an explicit prepared operation, real approval and old result without duplicate effects');
 }
 

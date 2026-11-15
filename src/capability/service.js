@@ -24,6 +24,8 @@ import { normalizePostWriteVerificationBinding, currentPostWriteVerificationImag
 import { planPostWriteVerification } from '../model/post-write-verification.js';
 import { operationIdentity } from './operation-identity.js';
 import { validateTestInvocation } from '../workspace/isolated-runner.js';
+import { ISOLATED_CHILD_CAPABILITIES } from './isolated-child-policy.js';
+import { verifyIsolatedChildWrites } from '../task/isolated-child-verification.js';
 
 // Only this module can mark a failure as occurring before Agent side effects.
 // Provider supplied error fields must never authorize an automatic replay.
@@ -39,6 +41,8 @@ export const WORKSPACE_CAPABILITIES = Object.freeze({
   'workspace.git.index.review': 'git.index.review', 'workspace.git.stage': 'git.stage',
   'workspace.git.unstage': 'git.unstage', 'workspace.git.commit.staged': 'git.commit.staged',
   'workspace.git.branch.review': 'git.branch.review', 'workspace.git.branch.switch': 'git.branch.switch',
+  'workspace.git.checkpoint.capture':'git.checkpoint.capture','workspace.git.checkpoint.list':'git.checkpoint.list',
+  'workspace.git.checkpoint.preview':'git.checkpoint.preview','workspace.git.checkpoint.review':'git.checkpoint.review','workspace.git.checkpoint.restore':'git.checkpoint.restore',
   'workspace.git.status.page':'git.status.page', 'workspace.git.history':'git.history', 'workspace.git.branches':'git.branches',
   'workspace.git.commit.detail':'git.commit.detail', 'workspace.git.preview':'git.preview', 'workspace.git.review':'git.review',
   'workspace.test.run': 'test.run', 'workspace.create': 'workspace.create',
@@ -60,7 +64,8 @@ const objectInput = (properties = {}, required = []) => ({
 });
 const GIT_INDEX_MUTATIONS = ['git.stage', 'git.unstage', 'git.commit.staged'];
 const GIT_OBSERVATION_PERMISSIONS = {'git.status.page':'git.status','git.history':'git.status','git.branches':'git.status',
-  'git.commit.detail':'git.diff','git.preview':'filesystem.read','git.review':'filesystem.read'};
+  'git.commit.detail':'git.diff','git.preview':'filesystem.read','git.review':'filesystem.read',
+  'git.checkpoint.capture':'filesystem.read','git.checkpoint.list':'git.status','git.checkpoint.preview':'filesystem.read','git.checkpoint.review':'filesystem.read'};
 const gitPageInput = max => objectInput({limit:{type:'integer',minimum:1,maximum:max},cursor:{type:'string',maxLength:2048}});
 const gitIndexInput = (commit = false) => objectInput({
   paths: {type: 'array', items: stringField('Exact Workspace-relative regular file.'), minItems: 1, maxItems: 100},
@@ -71,6 +76,13 @@ const gitIndexInput = (commit = false) => objectInput({
   ...(commit ? {message: stringField('Commit message for the exact reviewed staged objects.')} : {})
 }, ['paths', 'expectedHead', 'expectedHeadRef', 'indexIdentity', 'expectedRepositoryIdentity', 'expectedHashes', ...(commit ? ['expectedIndexEntries', 'message'] : [])]);
 const WORKSPACE_TOOL_DESCRIPTORS = Object.freeze({
+  'git.checkpoint.capture':['Owner explicitly saves the bounded dirty working files and independent staged index; ignored files excluded. No project mutation.',objectInput({label:{type:'string',maxLength:120}})],
+  'git.checkpoint.list':['List retained Workspace Git checkpoints; not whole-project backups.',objectInput()],
+  'git.checkpoint.preview':['Read bounded saved file content from one Workspace checkpoint.',objectInput({checkpointId:{type:'string'},path:{type:'string'}},['checkpointId','path'])],
+  'git.checkpoint.review':['Review saved restore or original HEAD preparation; original branch/HEAD required.',objectInput({checkpointId:{type:'string'},mode:{type:'string',enum:['saved','head']}},['checkpointId','mode'])],
+  'git.checkpoint.restore':['Restore exactly reviewed saved bytes/index or clean a saved dirty scope to original HEAD. Always once-approved; no cross-branch merge.',objectInput({
+    checkpointId:{type:'string'},checkpointSha256:{type:'string'},mode:{type:'string',enum:['saved','head']},paths:{type:'array',minItems:1,maxItems:100,items:{type:'string'}},expectedHead:{type:'string'},expectedHeadRef:{type:['string','null']},indexIdentity:{type:'string'},expectedRepositoryIdentity:{type:'string'},expectedDirtyIdentity:{type:'string'},expectedHashes:{type:'object',additionalProperties:{type:['string','null']}},expectedWorkingModes:{type:'object',additionalProperties:{type:['integer','null']}}
+  },['checkpointId','checkpointSha256','mode','paths','expectedHead','expectedHeadRef','indexIdentity','expectedRepositoryIdentity','expectedDirtyIdentity','expectedHashes','expectedWorkingModes'])],
   'git.status.page':['Read one source-bound status page without content hashes. Cursor is not mutation approval.',gitPageInput(500)],
   'git.history':['Read one anchored commit history page; pass only the returned cursor for subsequent pages.',gitPageInput(200)],
   'git.branches':['Read one source-bound local branch page.',gitPageInput(500)],
@@ -486,12 +498,16 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   const policy = createCapabilityPolicy({ resolveWorkspace, resolveTask: taskFor,
     resolveGrants: taskId => grants[taskId],
     checkOperation: (request, entry, task) => {
+      if(task.childContract?.mode==='isolated-write')taskRuntime.assertChildParentCurrent({id:task.id,workspaceId:request.workspaceId});
       const effect = (entry.effect && entry.effect !== 'read-only')
         || ['message.send','filesystem.write','git.commit','test.run','publish','network'].includes(entry.permission ?? entry.id);
       if (request.actor.kind === 'agent' && task.agentHistory?.length > 1 && effect && !entry.delegatesOperation
         && entry.id !== 'agent.delegate.propose' && !broker.operationRecordForTask({ taskId: task.id, workspaceId: task.workspaceId, operationId: request.operationId })) {
         const error = capabilityError('OPERATION_LINK_REQUIRED', 'Resumed effects require a trusted operation reference or an independent Owner-prepared intent');
-        error.effectStatus = 'unknown'; throw error;
+        // Policy admission has not entered an executor. Keep refusing an
+        // unlinked effect, without inventing a new unknown-effect receipt.
+        // Existing unknown operations remain fenced by their own journals.
+        throw error;
       }
     },
     isTaskHandoff: taskId => taskHandoffGuard(taskId) });
@@ -619,6 +635,11 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
     const task = taskFor(taskId);
     if (!task?.workspaceId) throw capabilityError('WORKSPACE_REQUIRED', 'Task workspace required');
     const readOnlyChild = task.parentTaskId && task.childContract?.mode === 'read-only';
+    const isolatedChild = task.parentTaskId && task.childContract?.mode === 'isolated-write';
+    if(isolatedChild && (!Array.isArray(value?.capabilities)||!value.capabilities.length))
+      throw capabilityError('TASK_CHILD_GRANT_REQUIRED','Owner must explicitly choose this isolated child tool requests');
+    if(isolatedChild && value.capabilities.some(id=>!ISOLATED_CHILD_CAPABILITIES.includes(id)))
+      throw capabilityError('TASK_CHILD_CAPABILITY_DENIED','Isolated child grants cannot include unverified command or shared-resource capabilities');
     // 默认 Agent 能力集（v2 final security）：**不含 test.run**。
     // Agent 可以默认修改 Workspace ≠ Agent 可以默认执行 Workspace 代码——
     // test.run 执行的是 Agent 可经 filesystem.write 修改的项目代码（package.json
@@ -636,8 +657,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       throw capabilityError('WORKSPACE_NOT_AUTHORIZED', 'A Task grant cannot include another workspace');
     }
     grants[taskId] = { capabilities: [...capabilities], workspaceIds: [task.workspaceId], taskIds: [taskId],
-      scopes: readOnlyChild ? [`task:${taskId}`] : [`task:${taskId}`, `workspace:${task.workspaceId}`],
-      types: readOnlyChild ? ['task'] : ['working', 'task', 'workspace', 'knowledge', 'skill'] };
+      scopes: readOnlyChild || isolatedChild ? [`task:${taskId}`] : [`task:${taskId}`, `workspace:${task.workspaceId}`],
+      types: readOnlyChild || isolatedChild ? ['task'] : ['working', 'task', 'workspace', 'knowledge', 'skill'] };
     saveGrants();
     return principalForTask(taskId);
   }
@@ -661,6 +682,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       projected.capabilities = projected.capabilities.filter(id => ['filesystem.read', 'filesystem.search'].includes(id));
       projected.scopes = [`task:${taskId}`];
       projected.types = ['task'];
+    }
+    if(task.parentTaskId && task.childContract?.mode==='isolated-write') {
+      projected.capabilities=projected.capabilities.filter(id=>ISOLATED_CHILD_CAPABILITIES.includes(id));
+      projected.scopes=[`task:${taskId}`];projected.types=['task'];
     }
     return { kind: 'agent', id: `task:${taskId}`, grants: projected,
       assignment: task.currentAgent ? structuredClone(task.currentAgent) : null,
@@ -773,7 +798,9 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         ...(gitObservation?{readOnly:true,effect:'read-only',parallelSafe:false,cancellationMode:'cooperative',timeoutMode:'await-settlement'}:{}),
         ...(concurrentRead ? { readOnly: true, parallelSafe: true, effect: 'read-only',
           cancellationMode: 'cooperative', timeoutMode: 'await-settlement' } : {}),
-        permission: gitObservation?GIT_OBSERVATION_PERMISSIONS[id]:['git.branch.switch','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS].includes(id)?'git.commit':['git.branch.review','git.overview', 'git.index.review'].includes(id)?'git.status':id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
+        permission: gitObservation?GIT_OBSERVATION_PERMISSIONS[id]:['git.checkpoint.restore','git.branch.switch','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS].includes(id)?'git.commit':['git.branch.review','git.overview', 'git.index.review'].includes(id)?'git.status':id === 'workspace.apply' ? 'filesystem.write' : id, provider: 'workspace', workspace: id !== 'workspace.create',
+        ...(id==='git.checkpoint.restore'?{effect:'conditional-write',gitBranchApplication:true,retainOperationResult:result=>result,
+          afterDurableGitResult:result=>workspaceService.acknowledgeGitResult(result),isKnownNoEffectError:error=>gitAdmissionNoEffect.delete(error)||workspaceService.isKnownGitNoEffect(error)}:{}),
         ...(id === 'git.branch.switch' ? {effect:'conditional-write',gitBranchApplication:true,
           retainOperationResult: result=>result, gitOriginalBinding: result=>workspaceService.gitOriginalBinding(result),
           gitClosedBindings: result=>workspaceService.gitClosedBindings(result),
@@ -783,6 +810,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         ...(GIT_INDEX_MUTATIONS.includes(id) ? {effect: 'conditional-write'} : id === 'git.index.review' ? {effect: 'read-only'} : {}),
         ...(GIT_INDEX_MUTATIONS.includes(id) ? {isKnownNoEffectError: error => workspaceService.isKnownGitNoEffect?.(error) === true} : {}),
         ...(['git.branch.create','git.worktree.create'].includes(id)?{effect:'non-idempotent',requiresTask:true}:{}),
+        ...(id==='git.worktree.create'?{retainOperationResult:result=>result}:{}),
         description: WORKSPACE_TOOL_DESCRIPTORS[id][0],
         inputSchema: WORKSPACE_TOOL_DESCRIPTORS[id][1],
         category: id.startsWith('filesystem.') ? 'filesystem' : id.startsWith('git.') ? 'git' : 'workspace',
@@ -800,8 +828,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         // test.run = 执行 Workspace 中可被 Agent 修改的代码：high（审批必经），
         // 不是普通 medium。Owner 直接点击"运行测试"走 executeWorkspace 的
         // approved:true（Owner 的点击本身就是显式决定，语义与既往一致）。
-        risk: ['git.branch.switch','workspace.create', 'git.commit','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS, 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
+        risk: ['git.checkpoint.restore','git.branch.switch','workspace.create', 'git.commit','git.branch.create','git.worktree.create', ...GIT_INDEX_MUTATIONS, 'test.run', 'workspace.apply', 'filesystem.write'].includes(id) ? 'high' : 'low',
         async validate(request, { replay = false } = {}) {
+          if(id.startsWith('git.checkpoint.')){
+            if(!['owner','agent'].includes(request.actor.kind)||request.constrainedActor?.kind==='extension')throw capabilityError('EXTENSION_SCOPE_UNSUPPORTED','Checkpoint access requires Owner or an exact Task grant');
+            if(id==='git.checkpoint.capture'&&request.actor.kind!=='owner')throw capabilityError('OWNER_REQUIRED','Checkpoint capture requires explicit Owner save');
+            if(['git.checkpoint.capture','git.checkpoint.review','git.checkpoint.restore'].includes(id))assertGitApplicationAvailable(request);
+            if(id==='git.checkpoint.restore')await workspaceService.validateApprovedGit({method,params:{...request.input,id:request.workspaceId}});
+          }
           if(gitObservation&&(!['owner','agent'].includes(request.actor.kind)||request.constrainedActor?.kind==='extension'))
             throw capabilityError('EXTENSION_SCOPE_UNSUPPORTED','Paged Git observations require Owner or explicit Task grants; plugin path scopes are not widened');
           if (['git.branch.review','git.branch.switch'].includes(id)) {
@@ -871,6 +905,10 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         },
         execute: request => {
           const run = async () => {
+            if(id==='git.checkpoint.restore'){
+              try{assertGitApplicationAvailable(request,request.gitDispatchBinding);}catch(error){gitAdmissionNoEffect.add(error);throw error;}
+              return workspaceService.executeApprovedGit({method,params:{...request.input,id:request.workspaceId}},{signal:request.signal,dispatchBinding:request.gitDispatchBinding,assertAvailable:()=>assertGitApplicationAvailable(request,request.gitDispatchBinding)});
+            }
             if(id==='git.branch.review'){
               const recovery=assertGitApplicationAvailable(request);
               const result=await workspaceService.execute({method,params:{...request.input,id:request.workspaceId}},{signal:request.signal,metadataRecovery:recovery?.metadataRecovery});
@@ -944,7 +982,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               const overview=await executor({method,params:{...request.input,id:request.workspaceId}});
               const allowed=request.actor.grants?.taskIds??[request.taskId];return {...overview,tasks:overview.tasks.filter(t=>allowed.includes(t.id)),branches:overview.branches.filter(b=>!b.taskId||allowed.includes(b.taskId)),worktrees:overview.worktrees.filter(w=>!w.taskId||allowed.includes(w.taskId)),worktreeRelation:overview.worktreeRelation?.taskId&&!allowed.includes(overview.worktreeRelation.taskId)?null:overview.worktreeRelation};
             }
-            return executor({ method, params: { ...request.input,
+            const executed = await executor({ method, params: { ...request.input,
               ...(['git.branch.create','git.worktree.create'].includes(id)?{taskId:request.taskId}:{}),
               ...(id === 'filesystem.read' ? { maxBytes: request.input.maxBytes ?? request.input.maxChars ?? 8192 } : {}),
               ...(id === 'filesystem.search' ? { searchRestricted: request.actor.kind !== 'owner' } : {}),
@@ -953,6 +991,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               concurrentRead ? { signal: request.signal, assertAuthorized: request.assertAuthorized,
                 consumeReadBytes: request.consumeReadBytes,
                 restricted: request.actor.kind !== 'owner' } : gitObservation ? {signal:request.signal} : undefined);
+            if(id==='git.worktree.create'&&request.operationId) {
+              try {
+                const isolatedChildProof=await workspaceService.captureIsolatedChildWorkspace({workspaceId:executed.workspace.id,
+                  sourceWorkspaceId:request.workspaceId,parentTaskId:request.taskId,baselineHead:executed.expectedHead,branch:executed.branch});
+                return {...executed,isolatedChildProof};
+              } catch(error) {error.effectStatus='unknown';throw error;}
+            }
+            return executed;
           };
           return id === 'workspace.create' ? idempotent(request, run) : run();
         }
@@ -1083,17 +1129,19 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         binding: evidenceBinding({ actor: r.actor, sessionId: r.origin.sessionId,
           scope: { taskId: r.taskId ?? null, workspaceId: r.workspaceId ?? null } }),
         id: r.input.id, offset: r.input.offset, limit: r.input.limit,
-        authorizeSource: source => {
+        authorizeSource: async source => {
           // A read never replays the original effect. Only audited sources with
-          // complete synchronous scope validation are eligible for compaction.
+          // complete scope validation are eligible for compaction.
           if (!EVIDENCE_SOURCE_CAPABILITIES.includes(source?.capability)) return false;
           try {
             const entry = broker.registry.require(source.capability);
             const original = { ...r, capability: source.capability, input: source.input,
               approvalId: undefined, approvalBinding: undefined, approved: undefined };
             policy.authorize(original, entry);
-            const validation = entry.validate?.(original);
-            return !validation || typeof validation.then !== 'function';
+            await entry.validate?.(original);
+            if (broker.registry.require(source.capability) !== entry) return false;
+            policy.authorize(original, entry);
+            return true;
           } catch { return false; }
         }
       })
@@ -1277,11 +1325,13 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
       const assertDelegation=assignment=>{if(r.input.delegationRequestId)taskRuntime.assertDelegationDispatch({id:r.taskId,
         requestId:r.input.delegationRequestId,direction:r.input.delegationDirection,provider,sessionId:assignment?.sessionId});};
       const readOnlyChild = Boolean(task.parentTaskId && task.childContract?.mode === 'read-only');
+      const isolatedChild = Boolean(task.parentTaskId && task.childContract?.mode === 'isolated-write');
+      const linkedChild = readOnlyChild || isolatedChild;
       const assertChildParentActive = () => {
-        if (!readOnlyChild) return;
+        if (!linkedChild) return;
         taskRuntime.assertChildParentCurrent({ id: task.id, workspaceId: r.workspaceId });
       };
-      if (readOnlyChild && provider !== 'cetamesh') {
+      if (linkedChild && provider !== 'cetamesh') {
         throw capabilityError('AGENT_READ_ONLY_BOUNDARY_UNVERIFIED', 'Native external Agent has no verified read-only Workspace boundary');
       }
       assertChildParentActive();
@@ -1399,7 +1449,7 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
         const actor = grants[task.id] ? principalForTask(task.id) : grantTask(task.id, r.input.grants);
         if (task.currentAgent) {
           try {
-            await agentBroker.status(task.currentAgent);
+            const currentAgentStatus=await agentBroker.status(task.currentAgent);
             if (r.signal?.aborted) throw capabilityError('INVOKE_CANCELLED', 'Agent assignment cancelled');
             if (taskHandoffGuard(task.id)) throw capabilityError('TASK_HANDOFF_IN_FLIGHT', 'Task Handoff owns this execution boundary');
             ensureTaskFollow(task.currentAgent.provider, task.currentAgent.sessionId, task.id, { expectTurn: typeof agentBroker.setTaskExecutionObserver !== 'function' });
@@ -1409,13 +1459,14 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
               throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
             }
             assertChildParentActive();
-            if (readOnlyChild) taskRuntime.recordAttempt({ id: task.id, expectedRev: beforeSend.rev,
+            if (linkedChild) taskRuntime.recordAttempt({ id: task.id, expectedRev: beforeSend.rev,
               provider, sessionId: task.currentAgent.sessionId, requestId: r.requestId, state: 'started' });
+            const configurationGuard=await r.beforeAgentSend?.({...task.currentAgent,taskId:task.id,workspaceId:task.workspaceId,modelControl:currentAgentStatus.modelControl});
             const sent = await agentBroker.send({ ...task.currentAgent, content: String(r.input.content || task.goal),
-              authorizationGuard: () => assertDispatchAuthorization(task.currentAgent),
-              ...(readOnlyChild ? { runId: r.requestId } : {}) });
+              authorizationGuard: () => {assertDispatchAuthorization(task.currentAgent);configurationGuard?.();},
+              ...(linkedChild ? { runId: r.requestId } : {}) });
             if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
-            if (readOnlyChild) taskRuntime.settleAttempt({ id: task.id, expectedRev: taskFor(task.id).rev,
+            if (linkedChild) taskRuntime.settleAttempt({ id: task.id, expectedRev: taskFor(task.id).rev,
               requestId: r.requestId, state: 'accepted', nativeRequestId: sent?.requestId ?? sent?.turnId });
             const afterSend = taskFor(task.id);
             if (!afterSend || ['queued', 'paused', 'waiting', 'blocked', 'cancelled'].includes(afterSend.status)
@@ -1471,8 +1522,8 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
           const inheritedModel = taskModelForAgent(task, provider);
           const modelConfig = {
             model: r.input.model ?? inheritedModel.model,
-            modelProvider: r.input.modelProvider ?? inheritedModel.modelProvider,
-            reasoningEffort: r.input.reasoningEffort ?? inheritedModel.reasoningEffort
+            modelProvider: Object.hasOwn(r.input,'modelProvider') ? r.input.modelProvider : inheritedModel.modelProvider,
+            reasoningEffort: Object.hasOwn(r.input,'reasoningEffort') ? r.input.reasoningEffort : inheritedModel.reasoningEffort
           };
           claimWorkspaceFence(r, provider);
           creationEntered = true;
@@ -1497,14 +1548,15 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
             throw capabilityError('TASK_NOT_RUNNING', 'Task changed before Agent instruction dispatch');
           }
           assertChildParentActive();
-          if (readOnlyChild) taskRuntime.recordAttempt({ id: task.id, expectedRev: beforeSend.rev,
+          if (linkedChild) taskRuntime.recordAttempt({ id: task.id, expectedRev: beforeSend.rev,
             provider, sessionId: created.sessionId, requestId: r.requestId, state: 'started' });
+          const configurationGuard=await r.beforeAgentSend?.({provider,sessionId:created.sessionId,taskId:task.id,workspaceId:ws.id,modelControl:created.modelControl});
           instructionEntered = true;
           const sent = await agentBroker.send({ provider, sessionId: created.sessionId, content: String(r.input.content || task.goal),
-            authorizationGuard: () => assertDispatchAuthorization({ provider, sessionId: created.sessionId }),
-            ...(readOnlyChild ? { runId: r.requestId } : {}) });
+            authorizationGuard: () => {assertDispatchAuthorization({ provider, sessionId: created.sessionId });configurationGuard?.();},
+            ...(linkedChild ? { runId: r.requestId } : {}) });
           if (sent?.accepted !== true) throw capabilityError('AGENT_SEND_REJECTED', 'Agent did not accept Task instruction');
-          if (readOnlyChild) taskRuntime.settleAttempt({ id: task.id, expectedRev: taskFor(task.id).rev,
+          if (linkedChild) taskRuntime.settleAttempt({ id: task.id, expectedRev: taskFor(task.id).rev,
             requestId: r.requestId, state: 'accepted', nativeRequestId: sent?.requestId ?? sent?.turnId });
           const afterSend = taskFor(task.id);
           if (!afterSend || ['queued', 'paused', 'waiting', 'blocked', 'cancelled'].includes(afterSend.status)
@@ -1902,6 +1954,42 @@ export function createCapabilityService({ stateDir, workspaceService, memoryServ
   }
   const environment = registerEnvironmentCapabilities({broker,taskRuntime,principalForTask,stateDir,ownedArtifactRoot,client:environmentClient,onChanged:onEnvironmentChanged});
   return { execute, executeWorkspace, executeMemory, broker, grantTask, principalForTask, refreshTaskWorkspaceGrant, memoryPrincipal,
+    async resolveIsolatedChildResult({task}) {
+      const review=reason=>({status:'NEEDS_REVIEW',kind:'changes',evidenceEventIds:[],reasons:[reason]});
+      try {
+        taskRuntime.assertChildParentCurrent({id:task.id,workspaceId:task.workspaceId});
+        if(broker.hasActiveDispatchForTask({taskId:task.id,workspaceId:task.workspaceId})
+          ||broker.uncertainDispatchesForTask({taskId:task.id,workspaceId:task.workspaceId}).length)return review('CHILD_EFFECT_UNCONFIRMED');
+        const status=await workspaceService.execute({method:'workspace.git.status',params:{id:task.workspaceId,completeFiles:true,actor:'core-child-verification'}});
+        if(!status.git?.isRepo||status.git.entries.length>100)return review('CHILD_CHANGE_SET_UNAVAILABLE');
+        taskRuntime.assertChildParentCurrent({id:task.id,workspaceId:task.workspaceId});
+        if(taskFor(task.id)?.rev!==task.rev)return review('CHILD_REVISION_CHANGED');
+        const operations=broker.operationsForTask({taskId:task.id,workspaceId:task.workspaceId}).map(row=>
+          broker.operationRecordForTask({taskId:task.id,workspaceId:task.workspaceId,operationId:row.operationId}));
+        return verifyIsolatedChildWrites(task,{operations,workspaceRoot:resolveWorkspace(task.workspaceId).root,
+          changedPaths:status.git.entries.map(row=>row.path)});
+      } catch(error){return review(error.code??'CHILD_RESULT_UNAVAILABLE');}
+    },
+    resolveIsolatedChildWorkspace({parentTask,workspaceId,provisionOperationId}) {
+      if(taskHandoffGuard(parentTask.id)||!['queued','paused'].includes(parentTask.status)
+        ||parentTask.recoveryIntent||parentTask.executionObservation?.state==='unknown'
+        ||broker.hasActiveDispatchForTask({taskId:parentTask.id,workspaceId:parentTask.workspaceId})
+        ||broker.uncertainDispatchesForTask({taskId:parentTask.id,workspaceId:parentTask.workspaceId}).length)
+        throw capabilityError('TASK_CHILD_ISOLATION_UNAVAILABLE','Parent execution must settle before isolated child admission');
+      const row=broker.operationRecordForTask({taskId:parentTask.id,workspaceId:parentTask.workspaceId,operationId:provisionOperationId});
+      const result=row?.retainedResult,proof=result?.isolatedChildProof;
+      if(row?.status!=='completed'||row.capability!=='git.worktree.create'||row.authorization?.kind!=='approval'
+        ||result?.created!==true||result.taskId!==parentTask.id||result.parentWorkspaceId!==parentTask.workspaceId
+        ||result.workspace?.id!==workspaceId||!proof)
+        throw capabilityError('TASK_CHILD_ISOLATION_UNAVAILABLE','Exact completed worktree creation receipt is required');
+      const current=workspaceService.inspectIsolatedChildWorkspace({workspaceId,sourceWorkspaceId:parentTask.workspaceId,
+        parentTaskId:parentTask.id,baselineHead:result.expectedHead,branch:result.branch});
+      for(const key of ['rootIdentity','sourceRootIdentity','gitCommonIdentity'])if(JSON.stringify(current[key])!==JSON.stringify(proof[key]))
+        throw capabilityError('TASK_CHILD_ISOLATION_CHANGED','Original worktree directory identity changed');
+      return {version:1,parentTaskId:parentTask.id,sourceWorkspaceId:parentTask.workspaceId,workspaceId,provisionOperationId,
+        receiptSha256:requestFingerprint({requestId:row.requestId,fingerprint:row.fingerprint,authorization:row.authorization,result}),
+        baselineHead:result.expectedHead,baselineSha256:proof.baselineSha256,branch:result.branch,...current};
+    },
     importedVerificationRetryAvailable, retryImportedVerification,
     importedWriteReceipts({taskId,workspaceId,requestId}) {
       const task = taskFor(taskId);

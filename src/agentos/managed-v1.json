@@ -1,0 +1,557 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cetamesh:agentos:managed:v1",
+  "title": "CetaMesh AgentOS Core-to-System-Host request",
+  "description": "Closed per-capability inputs. Limits in a request never grant authority; only signed grant limits apply.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "operationId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._:-]{2,127}$"
+    },
+    "capability": {
+      "type": "string",
+      "enum": [
+        "agentos.backend.list",
+        "agentos.env.list",
+        "agentos.env.status",
+        "agentos.env.create",
+        "agentos.env.start",
+        "agentos.env.stop",
+        "agentos.env.delete",
+        "agentos.exec",
+        "agentos.file.read",
+        "agentos.file.write",
+        "agentos.snapshot.create",
+        "agentos.snapshot.restore",
+        "agentos.snapshot.list",
+        "agentos.env.logs",
+        "agentos.env.attach"
+      ]
+    },
+    "input": {
+      "type": "object"
+    },
+    "contextRef": {
+      "type": "string",
+      "minLength": 3,
+      "maxLength": 256
+    },
+    "grant": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192
+    },
+    "limits": {
+      "$ref": "#/$defs/limits"
+    }
+  },
+  "required": [
+    "operationId",
+    "capability",
+    "input",
+    "contextRef",
+    "grant"
+  ],
+  "oneOf": [
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.backend.list"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {},
+          "required": []
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.env.list"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {},
+          "required": []
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.env.status"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.env.create"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "backend": {
+              "enum": [
+                "docker",
+                "qemu",
+                "wsl"
+              ]
+            },
+            "image": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 512,
+              "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._/:@-]*$"
+            },
+            "catalogId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128,
+              "pattern": "^[a-zA-Z0-9._-]+$"
+            },
+            "memMb": {
+              "type": "integer",
+              "minimum": 128,
+              "maximum": 32768
+            },
+            "diskGb": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 2048
+            },
+            "waitMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 870000
+            }
+          },
+          "required": [
+            "backend"
+          ],
+          "anyOf": [
+            {
+              "required": [
+                "image"
+              ]
+            },
+            {
+              "required": [
+                "catalogId"
+              ]
+            }
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.env.start"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            },
+            "waitMs": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 870000
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.env.stop"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.env.delete"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.exec"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 16384,
+              "pattern": "\\S"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1000,
+              "maximum": 870000
+            }
+          },
+          "required": [
+            "id",
+            "command"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.file.read"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^(?!.*(?:^|/)\\.\\.(?:/|$))/[^\\\\\\u0000-\\u001f:]*$"
+            }
+          },
+          "required": [
+            "id",
+            "path"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.file.write"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            },
+            "path": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096,
+              "pattern": "^(?!.*(?:^|/)\\.\\.(?:/|$))/[^\\\\\\u0000-\\u001f:]*$"
+            },
+            "content": {
+              "type": "string",
+              "maxLength": 200000
+            }
+          },
+          "required": [
+            "id",
+            "path",
+            "content"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.snapshot.create"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40,
+              "pattern": "^[A-Za-z0-9_-]{1,40}$"
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.snapshot.restore"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            },
+            "label": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 40,
+              "pattern": "^[A-Za-z0-9_-]{1,40}$"
+            }
+          },
+          "required": [
+            "id",
+            "label"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.snapshot.list"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.env.logs"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            }
+          },
+          "required": [
+            "id"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    },
+    {
+      "properties": {
+        "capability": {
+          "const": "agentos.env.attach"
+        },
+        "input": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64,
+              "pattern": "^[a-z0-9][a-z0-9._-]{1,63}$"
+            },
+            "sshPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            }
+          },
+          "required": [
+            "id",
+            "sshPort"
+          ]
+        }
+      },
+      "required": [
+        "capability",
+        "input"
+      ]
+    }
+  ],
+  "$defs": {
+    "limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "maxOutputBytes": {
+          "type": "integer",
+          "minimum": 256,
+          "maximum": 65536
+        },
+        "maxTimeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 870000
+        },
+        "maxMemoryMb": {
+          "type": "integer",
+          "minimum": 128,
+          "maximum": 32768
+        },
+        "maxDiskGb": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2048
+        }
+      },
+      "required": []
+    }
+  }
+}

@@ -33,7 +33,7 @@ try {
   fs.writeFileSync(path.join(project, 'a.txt'), 'baseline a\n'); fs.writeFileSync(path.join(project, 'user.txt'), 'baseline user\n'); git(project, 'add', '.'); git(project, 'commit', '-qm', 'initial fixture');
   const baseline = git(project, 'rev-parse', 'HEAD');
   let taskService;
-  const workspaceService = createWorkspaceService({ stateDir, getTask: id => taskService.runtime.get({ id }).task, listTasks: query => taskService.runtime.list(query).tasks });
+  const workspaceService = createWorkspaceService({ stateDir, nativeExecutable:process.env.CETAMESH_TEST_WORKSPACE_NATIVE, getTask: id => taskService.runtime.get({ id }).task, listTasks: query => taskService.runtime.list(query).tasks });
   taskService = createTaskService({ stateDir, resolveWorkspace: id => workspaceService.describeWorkspace(id) });
   const { workspace } = await workspaceService.execute({ method: 'workspace.create', params: { name: 'Real Git project', root: project } });
   await workspaceService.execute({ method: 'workspace.open', params: { id: workspace.id } });
@@ -111,6 +111,23 @@ try {
   }
   async function selectTask() { await choose('关联 Task', selectedTask.goal); }
   await until('!!document.querySelector("input[aria-label=\\"新分支名称\\"]")', 'production GitWorkspace mount');
+  assert.ok(await evaluate('!!window.findButton("保存 Git 检查点")'),'ordinary Git UI must expose explicit checkpoint capture');
+  const checkpointIndex=fs.readFileSync(path.join(project,'.git','index'));
+  await click('保存 Git 检查点');await until('document.querySelector(".git-checkpoints")?.textContent.includes("已保存检查点")','actual checkpoint captured through UI');
+  assert.ok(calls.some(row=>row.method==='ui.workspace.git.checkpoint.capture'));
+  assert.equal(capabilityService.broker.approvals.list().length,0,'saving internal checkpoint artifacts adds no project mutation approval');
+  releaseRead=undefined;holdRead=row=>row.method==='ui.workspace.git.checkpoint.list';await click('刷新检查点');for(let n=0;!releaseRead&&n<100;n++)await delay(20);assert.equal(typeof releaseRead,'function');
+  await input('input[aria-label="检查点备注"]','new capture after held list');await click('保存 Git 检查点');await until('document.querySelector("button[aria-label=\\"已保存检查点\\"]")?.textContent.includes("new capture after held list")','new capture selected');releaseRead();await delay(150);
+  assert.ok(await evaluate('document.querySelector("button[aria-label=\\"已保存检查点\\"]")?.textContent.includes("new capture after held list")'),'older list response cannot hide or deselect a newer capture');
+  await click('预览保存文件 a.txt');await until('document.querySelector(".git-checkpoint-preview")?.textContent.includes("approved UI change")','saved content preview');
+  await click('审查准备切换');await until('!!document.querySelector(".git-checkpoint-review")','exact head clean review');
+  await click('请求一次性恢复审批');const checkpointClean=await reviewRequest('git.checkpoint.restore',{taskId:undefined,workspaceId:workspace.id});
+  assert.equal(await evaluate('window.findButton("保存 Git 检查点").disabled'),true,'pending restore disables duplicate checkpoint effects');
+  assert.equal(git(project,'status','--porcelain'),initialStatus,'pending clean cannot alter dirty bytes');await approve(checkpointClean);
+  await until('document.querySelector(".git-checkpoints")?.textContent.includes("已完成准备切换")','clean observed completed in ordinary UI');assert.equal(git(project,'status','--porcelain'),'');
+  await click('审查恢复保存内容');await until('!!document.querySelector(".git-checkpoint-review")','saved restore review');await click('请求一次性恢复审批');const checkpointRestore=await reviewRequest('git.checkpoint.restore',{taskId:undefined,workspaceId:workspace.id});await approve(checkpointRestore);
+  await until('document.querySelector(".git-checkpoints")?.textContent.includes("已恢复保存内容")','saved restore observed completed in ordinary UI');assert.equal(git(project,'status','--porcelain'),initialStatus);assert.deepEqual(fs.readFileSync(path.join(project,'.git','index')),checkpointIndex);assert.equal(fs.readFileSync(path.join(project,'user.txt'),'utf8'),'unrelated user unstaged\n');
+  console.log('PASS ordinary Git UI capture/list/preview and exact independently approved clean/restore preserve partial index and working bytes');
   assert.ok(calls.some(row=>row.method==='ui.workspace.git.status.page'), 'production Changes must request an actual server page');
   assert.equal(calls.some(row=>row.method==='ui.workspace.git.overview'),false,'production consumers cannot retain eager overview hashing');
   assert.deepEqual(await evaluate('Array.from(document.querySelectorAll("[role=tablist][aria-label=\\"Git 视图\\"] [role=tab]")).map(row=>row.textContent.trim())'), ['Changes · 变更', 'History · 提交记录', 'Branches · 分支', 'Worktrees · 工作树'], 'Workspace Git has exactly four product views');
@@ -195,7 +212,7 @@ try {
   git(project, 'commit', '-qm', 'fixture staged baseline'); git(project, 'checkout', '-qb', 'fixture-conflict'); fs.writeFileSync(path.join(project, 'a.txt'), 'branch conflict\n'); git(project, 'commit', '-qam', 'branch conflict'); git(project, 'checkout', '-q', 'main'); fs.writeFileSync(path.join(project, 'a.txt'), 'main conflict\n'); git(project, 'commit', '-qam', 'main conflict'); assert.throws(() => git(project, 'merge', 'fixture-conflict'));
   const conflicted = fs.readFileSync(path.join(project, 'a.txt'), 'utf8'); await click('刷新'); await until('document.body.innerText.includes("需要在项目中处理后刷新")', 'real conflict summary visible'); await click('Changes · 变更');
   await until('document.body.innerText.includes("文件包含未解决的 Git 冲突")', 'actual conflict file visible'); assert.equal(await evaluate('document.querySelector("input[aria-label=\\"提交 a.txt\\"]").disabled'), true); assert.equal(fs.readFileSync(path.join(project, 'a.txt'), 'utf8'), conflicted);
-  assert.equal(calls.filter(row => row.method === 'ui.approvals.decide').length, 7); assert.ok(calls.filter(row => /^ui\.workspace\.git\.(?:commit|stage|unstage|commit\.staged|branch\.create|worktree\.create)$/.test(row.method)).every(row => !Object.hasOwn(row.params, 'actor') && !Object.hasOwn(row.params, 'approved')), 'renderer never supplies identity or approval authority');
+  assert.equal(calls.filter(row => row.method === 'ui.approvals.decide').length, 9,'two checkpoint decisions plus seven existing Git decisions'); assert.ok(calls.filter(row => /^ui\.workspace\.git\.(?:commit|stage|unstage|commit\.staged|branch\.create|worktree\.create|checkpoint\.restore)$/.test(row.method)).every(row => !Object.hasOwn(row.params, 'actor') && !Object.hasOwn(row.params, 'approved')), 'renderer never supplies identity or approval authority');
   console.log('PASS real merge conflict visibility disables commit and preserves conflict bytes; renderer identity and authority are not forged');
   const branchProject=path.join(sandbox.root,'branch-switch-project');fs.mkdirSync(branchProject);git(branchProject,'init','-q','-b','main');git(branchProject,'config','user.name','UI switch fixture');git(branchProject,'config','user.email','switch@example.invalid');
   fs.writeFileSync(path.join(branchProject,'same.txt'),'same tree\n');git(branchProject,'add','.');git(branchProject,'commit','-qm','same-tree baseline');git(branchProject,'branch','switch-target');

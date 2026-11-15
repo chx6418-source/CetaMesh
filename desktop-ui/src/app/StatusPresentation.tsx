@@ -5,12 +5,13 @@ import { Button } from '../components/primitives/inputs';
 
 const operationLabels = { accepted: '已接受', running: '执行中', waiting: '等待后续审批', completed: '已完成', failed: '失败', cancelled: '已确认取消', unknown: '结果未知，需核验', rejected: '已拒绝' };
 const historical = (operation: ApprovalDecisionResult) => ['completed', 'cancelled', 'rejected'].includes(operation.status);
+export const approvalOperationsNeedingAttention = (operations: ApprovalDecisionResult[]) => operations.filter(operation => !historical(operation));
 
 export function ApprovalOperationSummary({ operations, onCancel }: { operations: ApprovalDecisionResult[]; onCancel(id: string): void }) {
   const [attentionLimit, setAttentionLimit] = useState(40);
   const [historyLimit, setHistoryLimit] = useState(40);
   if (!operations.length) return null;
-  const attention = operations.filter(operation => !historical(operation));
+  const attention = approvalOperationsNeedingAttention(operations);
   const history = operations.filter(historical);
   const rows = (items: ApprovalDecisionResult[], limit: number, more: () => void) => <>{items.slice(-limit).map((operation, index) => <div className="approval-operation-row" key={operation.operationId ?? operation.approvalId ?? index}>
     <span className="approval-operation-copy"><strong>{operation.decision === 'rejected' ? '拒绝审批' : '批准操作'}</strong><small>{operation.operationId || operation.approvalId || '审批操作'}{operation.code || operation.resumeError ? ` · ${operation.code || operation.resumeError}` : ''}</small></span>

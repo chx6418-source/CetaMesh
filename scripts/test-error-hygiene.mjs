@@ -33,27 +33,39 @@ function listSourceFiles(dir, out = []) {
   return out;
 }
 
-// 去掉字符串字面量与注释后再数裸 catch，避免把 `catch {}` 出现在字符串里的情况算进去。
-// 粗粒度即可：宁可把字符串情形误判为“有注释的 catch”，也不会漏掉真正的裸 catch。
-function stripNoise(code) {
+// 字符串示例和注释正文不参与代码计数；裸 catch 检查保留非空说明注释的标记。
+function stripNoise(code, preserveComments = false) {
   return code
     .replace(/`(?:\\.|[^`\\])*`/g, '``')
     .replace(/'(?:\\.|[^'\\\n])*'/g, "''")
     .replace(/"(?:\\.|[^"\\\n])*"/g, '""')
-    .replace(/\/\*[\s\S]*?\*\//g, ' ')
-    .replace(/(^|[^:])\/\/[^\n]*/g, '$1 ');
+    .replace(/\/\*([\s\S]*?)\*\//g, (_match, body) => preserveComments && body.trim() ? '__documented_comment__' : ' ')
+    .replace(/(^|[^:])\/\/([^\n]*)/g, (_match, prefix, body) => prefix + (preserveComments && body.trim() ? '__documented_comment__' : ' '));
+}
+
+function analyzeSource(source) {
+  const code = stripNoise(source);
+  const catchCode = stripNoise(source, true);
+  // 裸 catch：catch 后的块内（忽略空白）直接就是 `}` —— 没有任何注释或语句。
+  const bareCatch = [...catchCode.matchAll(/catch\s*(?:\([^)]*\))?\s*\{\s*\}/g)].length;
+  const annotatedCatch = [...catchCode.matchAll(/catch\s*(?:\([^)]*\))?\s*\{(?!\s*\})/g)].length;
+  const processExit = [...code.matchAll(/\bprocess\.exit\s*\(/g)].length;
+  const setIntervalCount = [...code.matchAll(/\bsetInterval\s*\(/g)].length;
+  return { bareCatch, annotatedCatch, processExit, setIntervalCount };
 }
 
 function analyzeFile(file) {
-  const code = stripNoise(fs.readFileSync(file, 'utf8'));
-  const relative = path.relative(ROOT, file).split(path.sep).join('/');
-  // 裸 catch：catch 后的块内（忽略空白）直接就是 `}` —— 没有任何注释或语句。
-  const bareCatch = [...code.matchAll(/catch\s*(?:\([^)]*\))?\s*\{\s*\}/g)].length;
-  const annotatedCatch = [...code.matchAll(/catch\s*(?:\([^)]*\))?\s*\{(?!\s*\})/g)].length;
-  const processExit = [...code.matchAll(/\bprocess\.exit\s*\(/g)].length;
-  const setIntervalCount = [...code.matchAll(/\bsetInterval\s*\(/g)].length;
-  return { file: relative, bareCatch, annotatedCatch, processExit, setIntervalCount };
+  return { file: path.relative(ROOT, file).split(path.sep).join('/'), ...analyzeSource(fs.readFileSync(file, 'utf8')) };
 }
+
+assert.equal(analyzeSource('try { run(); } catch { /* Expected optional probe; no effect has started. */ }').bareCatch, 0, 'documented optional failures are not bare catches');
+assert.equal(analyzeSource('try { run(); } catch { // An already-gone resource needs no cleanup.\n}').bareCatch, 0, 'line-comment explanations also document cleanup');
+assert.equal(analyzeSource('try { run(); } catch {}').bareCatch, 1, 'an actual silent failure remains forbidden');
+assert.equal(analyzeSource('try { run(); } catch { /* */ }').bareCatch, 1, 'an empty comment cannot document a silent failure');
+assert.equal(analyzeSource('try { run(); } catch {} // Optional cleanup.').bareCatch, 1, 'a comment outside the catch cannot exempt its empty body');
+assert.equal(analyzeSource('const example = "try {} catch {}";').bareCatch, 0, 'source examples inside strings are not executable catches');
+assert.deepEqual(analyzeSource('/* catch {} process.exit(1); setInterval(tick, 10); */'), { bareCatch: 0, annotatedCatch: 0, processExit: 0, setIntervalCount: 0 }, 'comments cannot create lifecycle violations');
+assert.deepEqual(analyzeSource('try { run(); } catch {} process.exit(1); setInterval(tick, 10);'), { bareCatch: 1, annotatedCatch: 0, processExit: 1, setIntervalCount: 1 }, 'real silent failures and lifecycle operations remain counted');
 
 const analyses = listSourceFiles(SRC).map(analyzeFile);
 const current = {};

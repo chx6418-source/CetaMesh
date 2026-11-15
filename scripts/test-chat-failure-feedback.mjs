@@ -23,6 +23,17 @@ const record = () => ({ id: 'chat-stage', config: { agentProvider: 'cetamesh', w
 const broker = { health: async () => ({ available: true, installed: true, authenticated: true, sessionCapable: true, toolsAvailable: true }), capabilities: () => ({ workspaceBoundary: 'capability-broker' }) };
 const taskRuntime = { findByCreateRequestId: () => null, create: () => ({ id: 'task-stage', status: 'queued', workspaceId: 'workspace-stage' }), get: () => ({ task: { id: 'task-stage', status: 'queued', workspaceId: 'workspace-stage' } }) };
 try {
+  await check('an existing Handoff blocks a new Chat request before dispatch without claiming unknown effects', async () => {
+    let sends = 0;
+    const platform = createDesktopPlatformRuntime({ agentBroker: broker,
+      taskRuntime: { ...taskRuntime, get: () => ({ task: { id: 'task-stage', status: 'running', workspaceId: 'workspace-stage', currentAgent: { provider: 'cetamesh', sessionId: 'old' } } }) },
+      continuityRuntime: { isInFlight: () => true },
+      capabilityService: { broker: { execute: async () => { sends++; throw Object.assign(new Error('Task Handoff owns this execution boundary'), { code: 'TASK_HANDOFF_IN_FLIGHT' }); } } } });
+    await assert.rejects(platform.route({ decision: { agentIntent: true }, record: { ...record(), taskId: 'task-stage' }, text: 'hello', requestId: 'handoff-preflight' }), error => {
+      assert.equal(error.code, 'TASK_HANDOFF_IN_FLIGHT'); assert.equal(error.failureStage, 'pre-dispatch'); return true;
+    });
+    assert.equal(sends, 0);
+  });
   await check('platform rejection before dispatch is explicit and never calls the executor', async () => {
     let sends = 0;
     const platform = createDesktopPlatformRuntime({ agentBroker: { ...broker, health: async () => ({ available: false }) }, taskRuntime,
@@ -82,6 +93,15 @@ try {
   globalThis.window = { setTimeout, clearTimeout };
   const ui = await vite.ssrLoadModule('/src/app/HarborApp.tsx');
   const message = { id: 'system-failure', role: 'system', text: '', at: 1, requestId: 'request-failure', attachments: [], toolActivity: [], agentActivity: null, error: 'private raw failure must not appear', errorCode: 'TASK_WORKSPACE_BUSY', failureStage: 'pre-dispatch', routing: { taskId: 'task-new', blockingTaskId: 'task-owner' }, cancelled: false };
+  await check('handoff preflight is specific but an unknown dispatched result remains fenced', () => {
+    const render = failureStage => renderToStaticMarkup(React.createElement(ui.MessageBubble, {
+      message: { ...message, errorCode: 'TASK_HANDOFF_IN_FLIGHT', failureStage }, onOpenTask() {}, onRetry() {} }));
+    assert.match(render('pre-dispatch'), /执行者正在交接/);
+    assert.match(render('pre-dispatch'), /本条消息未派发/);
+    assert.doesNotMatch(render('pre-dispatch'), /结果尚未确认|>重试<|>重新提交</);
+    assert.match(render('unknown'), /结果尚未确认/);
+    assert.doesNotMatch(render('unknown'), /本条消息未派发/);
+  });
   await check('recovery details allow only the three bounded legacy codes across status and history DTOs', async () => {
     for (const recoveryCode of ['CODEX_HOST_RESTART_REQUIRED', 'CODEX_LEGACY_STOP_EVIDENCE_MISSING', 'CODEX_HOST_RESTART_UNVERIFIED', 'C:\\private\\secret', 'CODEX_HOST_RESTART_REQUIRED ']) {
       const stored = { ...message, errorDetails: { recoveryCode, rawError: 'private path', bootDetails: {} } };

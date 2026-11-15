@@ -47,7 +47,12 @@ export function createCodexAppServerProvider({launch,taskOptions = {},catalogOpt
   // must isolate the supplied empty profile and verify the actual runtime/account
   // generation. Neither callbacks nor launch fields are accepted from Agent IPC.
   const catalogLaunch = catalogOptions?.launch, catalogIdentity = catalogOptions?.resolveIdentity;
-  const catalogSupported = verified && nativeModelProfile && typeof catalogLaunch === 'function' && typeof catalogIdentity === 'function';
+  // Metadata-only composition must not assert the Task security profile merely
+  // to advertise a native catalog. Native-account execution remains refused.
+  const metadataOnly = catalogOptions?.metadataOnly === true && !verified;
+  const catalogVersion = metadataOnly ? catalogOptions?.runtimeVersion : runtime?.version;
+  const catalogSupported = (metadataOnly || verified) && catalogVersion === CODEX_MODEL_CONTROL_SCHEMA_VERSION
+    && typeof catalogLaunch === 'function' && typeof catalogIdentity === 'function';
   const catalogTimeout = Math.max(50, Math.min(15000, Number(catalogOptions?.timeoutMs) || 15000));
   const retainedCatalogs = new Set();
   let catalogPending = null, catalogClosing = false;
@@ -117,7 +122,7 @@ export function createCodexAppServerProvider({launch,taskOptions = {},catalogOpt
         probe.handle = handle;
         if (probe.expired) void stopCatalog(probe).catch(() => { /* Retained ownership permits explicit shutdown retry. */ });
       };
-      const launching = Promise.resolve().then(() => catalogLaunch({ cwd, profileRoot, purpose: 'model-catalog', transport: 'app-server', schemaVersion: runtime.version, onHandle }))
+      const launching = Promise.resolve().then(() => catalogLaunch({ cwd, profileRoot, purpose: 'model-catalog', transport: 'app-server', schemaVersion: catalogVersion, onHandle }))
         .then(handle => { onHandle(handle); return handle; });
       let handle;
       try { handle = await deadline(launching); } catch (error) { probe.expired = true; throw error; }
@@ -133,10 +138,10 @@ export function createCodexAppServerProvider({launch,taskOptions = {},catalogOpt
       rpc.notify('initialized');
       const catalog = await readCodexModelCatalog((method, params) => rpc.request(method, params));
       if (catalogClosing || await readCatalogIdentity() !== identity) throw fault('AGENT_RUNTIME_CHANGED', 'Catalog runtime/account identity changed during discovery');
-      const modelControl = projectCodexModelControl({ version: runtime.version, catalog, selection: null });
+      const modelControl = projectCodexModelControl({ version: catalogVersion, catalog, selection: null });
       // Advertised choices never manufacture an effective native selection.
       modelControl.status = 'unknown'; modelControl.application = 'requires-new-session';
-      observation = { supported: true, provider: 'codex', source: 'codex-app-server-model-list', runtimeVersion: runtime.version,
+      observation = { supported: true, provider: 'codex', source: 'codex-app-server-model-list', runtimeVersion: catalogVersion,
         connectionIdentity: identity, modelControl };
     } finally { await stopCatalog(probe); }
     if (catalogClosing || await readCatalogIdentity() !== identity) throw fault('AGENT_RUNTIME_CHANGED', 'Catalog identity changed before publication');
@@ -314,6 +319,8 @@ export function createCodexAppServerProvider({launch,taskOptions = {},catalogOpt
       return supervised;
     }});
   return Object.freeze({...base,
+    ...(metadataOnly ? {health:async()=>({provider:'codex',available:false,ready:false,taskEligible:false,
+      reason:'CODEX_APP_SERVER_ACCOUNT_ISOLATION_UNVERIFIED',transport:'app-server',metadataOnly:true})} : {}),
     beginCatalogShutdown,
     modelCatalog() {
       if (!catalogPending) {
@@ -331,6 +338,7 @@ export function createCodexAppServerProvider({launch,taskOptions = {},catalogOpt
       if (pendingFailure || cleanup.some(result => result.status === 'rejected')) throw fault('ACP_CLOSE_UNKNOWN', 'Catalog cleanup is unconfirmed; owned resources retained');
     },
     async createSession(params = {}) {
+      if(metadataOnly)throw fault('CODEX_APP_SERVER_ACCOUNT_ISOLATION_UNVERIFIED','Native-account App Server isolation is not verified; catalog access does not authorize a Task');
       if(verified && !nativeModelProfile && ['model','reasoningEffort','modelProvider'].some(key=>params[key]!=null)) {
         throw fault('AGENT_CONFIGURATION_UNSUPPORTED','This Codex version has no verified native model-control profile; use a verified fresh Session');
       }

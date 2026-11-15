@@ -11,6 +11,7 @@ import { createExtensionSettingsService } from './settings.js';
 export function createExtensionService({
   stateDir, fetchImpl = null, capabilityBroker = null, hostFactory,
   processHostFactory, vmHostFactory, memoryPackHostFactory, isTrustedVmExtension,
+  staticAnalysisHealth, stopCapabilities,
   now, monitorIntervalMs, heartbeatTimeoutMs, maxHeartbeatMisses,
   maxAutomaticRestarts, restartWindowMs, stableWindowMs
 } = {}) {
@@ -18,6 +19,7 @@ export function createExtensionService({
   const store = createExtensionStore({ stateDir, now });
   const settings = createExtensionSettingsService({ stateDir, getExtension: id => store.get(id) });
   const runtime = createExtensionRuntime({ store, settingsService: settings, fetchImpl, capabilityBroker, hostFactory,
+    staticAnalysisHealth, stopCapabilities,
     processHostFactory, vmHostFactory, memoryPackHostFactory, isTrustedVmExtension, now,
     monitorIntervalMs, heartbeatTimeoutMs, maxHeartbeatMisses, maxAutomaticRestarts, restartWindowMs, stableWindowMs });
 

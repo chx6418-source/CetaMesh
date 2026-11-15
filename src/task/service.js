@@ -7,9 +7,9 @@
 import { createTaskRuntime } from './runtime.js';
 import { taskError } from './types.js';
 
-export function createTaskService({ stateDir, now, resolveWorkspace, workspacesOverlap, resolveMemory, ownedArtifactRoot, resolvePostWriteVerification, resolveIsolatedChildWorkspace } = {}) {
+export function createTaskService({ stateDir, now, resolveWorkspace, workspacesOverlap, resolveMemory, ownedArtifactRoot, resolvePostWriteVerification, resolveIsolatedChildWorkspace, resolveIsolatedChildResult } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createTaskService 需要 stateDir');
-  const runtime = createTaskRuntime({ stateDir, now, resolveWorkspace, workspacesOverlap, ownedArtifactRoot, resolvePostWriteVerification, resolveIsolatedChildWorkspace });
+  const runtime = createTaskRuntime({ stateDir, now, resolveWorkspace, workspacesOverlap, ownedArtifactRoot, resolvePostWriteVerification, resolveIsolatedChildWorkspace, resolveIsolatedChildResult });
   runtime.recoverInterrupted();
 
   const handlers = {

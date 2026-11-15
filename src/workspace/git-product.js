@@ -6,6 +6,7 @@ import { gitRun, gitStatus } from './tools.js';
 import { createGitObservations } from './git-observation.js';
 import { createGitIndexActions } from './git-index-actions.js';
 import { createGitBranchActions } from './git-branch-actions.js';
+import { createGitCheckpoints } from './git-checkpoints.js';
 
 const fail = (code, message, extra = {}) => { throw Object.assign(new Error(message), { code, ...extra }); };
 const samePath = (a, b) => process.platform === 'win32' ? path.resolve(a).toLowerCase() === path.resolve(b).toLowerCase() : path.resolve(a) === path.resolve(b);
@@ -138,5 +139,5 @@ export function createGitProduct({ stateDir, registry, getTask = () => null, lis
     record(entry, actor, 'git.worktree.create', binding.branch);
     return { created: true, ...binding, parentWorkspaceId: entry.id, workspace: { id: workspace.id, name: workspace.name, root: workspace.root, gitWorktree: workspace.gitWorktree } };
   }
-  return { overview, context: (entry, options) => overview(entry, { ...options, contextOnly: true }), create, ...createGitObservations(), ...createGitIndexActions({ record }), ...createGitBranchActions({record, nativeExecutable}) };
+  return { overview, context: (entry, options) => overview(entry, { ...options, contextOnly: true }), create, ...createGitObservations(), ...createGitIndexActions({ record }), ...createGitBranchActions({record, nativeExecutable}), ...createGitCheckpoints({stateDir,nativeExecutable,record}) };
 }

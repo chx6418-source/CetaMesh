@@ -68,6 +68,8 @@ export function projectAgentModelControl(value){
   application:['runtime-confirmed','next-turn','requires-new-session'].includes(value.application)?value.application:null,
   ...(['runtime-confirmed','next-turn','requires-new-session'].includes(value.changeApplication)?{changeApplication:value.changeApplication}:{}),
   selection,model:selector(value.model,true),reasoning:selector(value.reasoning),
+  ...(/^[a-f0-9]{64}$/.test(value.catalog?.connectionIdentity??'')?{catalog:{connectionIdentity:value.catalog.connectionIdentity,
+    source:label(value.catalog.source,80),runtimeVersion:label(value.catalog.runtimeVersion,80)}}:{}),
   ...(value.requested?{requested:projectSelection(value.requested)}:{}),
   ...(value.lastRequest?.source==='cli-argv'?{lastRequest:{...projectSelection(value.lastRequest),source:'cli-argv',turnId:label(value.lastRequest.turnId,160)}}:{})};
  return invalidAdvertisement||Buffer.byteLength(JSON.stringify(projected))>128*1024?null:projected;

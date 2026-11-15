@@ -211,15 +211,18 @@ function useAttachmentController({ sessionId, files, onChange, disabled = false,
   return { call: (method: string, params: Record<string, unknown>) => callRef.current(method, params), sessionId, files, disabled, jobs: activeJobs, error, limits, capabilities, pending, preview, previewBusy, removing, addFiles, remove, cancel, retry, dismiss, showPreview, closePreview, download, saveLimits };
 }
 
-function AttachmentTrigger({ controller: c }: { controller: AttachmentController }) {
+type SkillAction = { disabled: boolean; onSelect(): void };
+
+function AttachmentTrigger({ controller: c, skillAction }: { controller: AttachmentController; skillAction?: SkillAction }) {
   const [open, setOpen] = useState(false), [helpOpen, setHelpOpen] = useState(false);
   const [position, setPosition] = useState({ top: 0, left: 0, width: 272 });
   const menuId = useId(), triggerRef = useRef<HTMLDivElement>(null), menuRef = useRef<HTMLDivElement>(null), picker = useRef<HTMLInputElement>(null);
   const unavailable = c.disabled || !c.sessionId;
+  const label = skillAction ? '添加附件或技能' : '添加附件';
   function closeMenu(restoreFocus = false) { setOpen(false); if (restoreFocus) triggerRef.current?.querySelector('button')?.focus(); }
   function openMenu() {
     const rect = triggerRef.current?.getBoundingClientRect(); if (!rect || unavailable) return;
-    const width = Math.min(272, window.innerWidth - 16), height = Math.min(226, window.innerHeight - 16);
+    const width = Math.min(272, window.innerWidth - 16), height = Math.min(skillAction ? 232 : 226, window.innerHeight - 16);
     setPosition({ width, left: Math.max(8, Math.min(rect.left, window.innerWidth - width - 8)), top: rect.top >= height + 8 ? rect.top - height - 6 : Math.min(rect.bottom + 6, window.innerHeight - height - 8) }); setOpen(true);
   }
   useEffect(() => { closeMenu(); setHelpOpen(false); }, [c.sessionId, unavailable]);
@@ -237,16 +240,17 @@ function AttachmentTrigger({ controller: c }: { controller: AttachmentController
     closeMenu(true);
   }
   return <div ref={triggerRef} className="attachment-trigger">
-    <Button type="button" compact variant="ghost" icon="add" className="attachment-trigger-button" aria-label="添加附件" aria-haspopup="menu" aria-expanded={open} aria-controls={menuId} disabled={unavailable} onClick={() => open ? closeMenu() : openMenu()} onKeyDown={event => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); openMenu(); } }}>附件</Button>
+    <Button type="button" compact variant="ghost" icon="add" className={skillAction ? 'attachment-trigger-button composer-add' : 'attachment-trigger-button'} aria-label={label} title={label} aria-haspopup="menu" aria-expanded={open} aria-controls={menuId} disabled={unavailable} onClick={() => open ? closeMenu() : openMenu()} onKeyDown={event => { if (event.key === 'ArrowDown' || event.key === 'ArrowUp') { event.preventDefault(); openMenu(); } }}>{skillAction ? null : '附件'}</Button>
     <input ref={picker} type="file" multiple accept={accept} hidden aria-label="选择图片或文件附件" disabled={unavailable} onChange={event => { if (event.currentTarget.files) c.addFiles(event.currentTarget.files); event.currentTarget.value = ''; }} />
-    {typeof document !== 'undefined' && createPortal(<MotionPopup open={open} id={menuId} ref={menuRef} className="cm-dropdown-menu attachment-menu" role="menu" aria-label="添加附件" style={{ position: 'fixed', ...position }} onKeyDown={event => {
-      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) { event.preventDefault(); const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button')], index = buttons.indexOf(document.activeElement as HTMLButtonElement); buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length]?.focus(); }
+    {typeof document !== 'undefined' && createPortal(<MotionPopup open={open} id={menuId} ref={menuRef} className="cm-dropdown-menu attachment-menu" role="menu" aria-label={label} style={{ position: 'fixed', ...position }} onKeyDown={event => {
+      if (['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) { event.preventDefault(); const buttons = [...event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not([disabled])')], index = buttons.indexOf(document.activeElement as HTMLButtonElement); buttons[event.key === 'Home' ? 0 : event.key === 'End' ? buttons.length - 1 : (index + (event.key === 'ArrowUp' ? -1 : 1) + buttons.length) % buttons.length]?.focus(); }
       else if (event.key === 'Tab') closeMenu();
     }}>
       <Button type="button" role="menuitem" variant="ghost" icon="image" onClick={() => choose('image')}>选择图片</Button>
       <Button type="button" role="menuitem" variant="ghost" icon="file" onClick={() => choose('file')}>选择文件</Button>
       <Button type="button" role="menuitem" variant="ghost" icon="folder" onClick={() => choose('archive')}>选择项目 ZIP</Button>
       <div className="attachment-menu-divider" />
+      {skillAction && <Button type="button" role="menuitem" variant="ghost" icon="tools" disabled={skillAction.disabled} onClick={() => { closeMenu(true); skillAction.onSelect(); }}>添加技能</Button>}
       <Button type="button" role="menuitem" variant="ghost" icon="help" onClick={() => { closeMenu(); setHelpOpen(true); }}>附件帮助</Button>
     </MotionPopup>, document.body)}
     <Dialog open={helpOpen} title="附件帮助" onClose={() => { setHelpOpen(false); triggerRef.current?.querySelector('button')?.focus(); }}>
@@ -298,12 +302,12 @@ function AttachmentPanelView({ controller: c }: { controller: AttachmentControll
 export function AttachmentPanel(props: PanelProps) { const controller = useAttachmentController(props); return <><AttachmentTrigger controller={controller} /><AttachmentPanelView controller={controller} /></>; }
 
 const emptyFiles: AttachmentRef[] = [];
-export function useChatAttachments({ sessionId, call, disabled = false,capabilityKey='' }: { sessionId: string; call: AttachmentCall; disabled?: boolean;capabilityKey?:string }) {
+export function useChatAttachments({ sessionId, call, disabled = false,capabilityKey='',skillAction }: { sessionId: string; call: AttachmentCall; disabled?: boolean;capabilityKey?:string;skillAction?:SkillAction }) {
   const [drafts, setDrafts] = useState<Record<string, AttachmentRef[]>>({}); const files = drafts[sessionId] ?? emptyFiles;
   const setFiles: Dispatch<SetStateAction<AttachmentRef[]>> = useCallback(value => setDrafts(current => ({ ...current, [sessionId]: typeof value === 'function' ? value(current[sessionId] ?? []) : value })), [sessionId]);
   const controller = useAttachmentController({ sessionId, call, disabled, files, onChange: setFiles,capabilityKey });
   const onPaste = (event: ClipboardEvent<HTMLElement>) => { if (event.clipboardData.files.length) { event.preventDefault(); controller.addFiles(event.clipboardData.files); } };
   const onDrop = (event: DragEvent<HTMLElement>) => { if (event.dataTransfer.files.length) { event.preventDefault(); controller.addFiles(event.dataTransfer.files); } };
   const onDragOver = (event: DragEvent<HTMLElement>) => { if (event.dataTransfer.types.includes('Files')) event.preventDefault(); };
-  return { files, setFiles, addFiles: controller.addFiles, onPaste, onDrop, onDragOver, pending: controller.pending, trigger: <AttachmentTrigger controller={controller} />, ui: <AttachmentPanelView controller={controller} /> };
+  return { files, setFiles, addFiles: controller.addFiles, onPaste, onDrop, onDragOver, pending: controller.pending, trigger: <AttachmentTrigger controller={controller} skillAction={skillAction} />, ui: <AttachmentPanelView controller={controller} /> };
 }

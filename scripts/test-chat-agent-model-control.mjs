@@ -11,6 +11,10 @@ import {createAgentProviderRegistry} from '../src/agent/registry.js';
 import {createAgentBroker} from '../src/agent/broker.js';
 import {createTaskRuntime} from '../src/task/runtime.js';
 import {createContinuityService} from '../src/continuity/service.js';
+import {createCetaMeshServices} from '../src/app/service-container.js';
+import {createCodexAppServerProvider} from '../src/agent/codex-app-server-provider.js';
+import {CliAgentProcess} from '../src/agent/cli-agent-process.js';
+import {PassThrough} from 'node:stream';
 
 // The external leaf is deterministic. Core persistence, transactions and the
 // Owner UI projection are real; this is not native Agent or account acceptance.
@@ -85,6 +89,84 @@ function fixture({provider='opencode',state='ready',selection,modelRuntime,linke
 }
 async function check(name,fn){try{await fn();console.log('PASS '+name);}catch(error){failures++;console.error('FAIL '+name+': '+error.message);}}
 try{
+ for(const mutation of ['none','generation','ack-mismatch'])await check('cold desired crosses real Core Task and native ACK before send: '+mutation,async()=>{
+  const scope=fs.mkdtempSync(path.join(root,'cold-core-')),frames=[];let core,identity='c'.repeat(64);
+  const beforeHome=process.env.CODEX_HOME,beforeExecutable=CliAgentProcess.prototype.executable;
+  process.env.CODEX_HOME=path.join(scope,'no-account');fs.mkdirSync(process.env.CODEX_HOME);
+  CliAgentProcess.prototype.executable=function(){return this.name==='codex'?null:beforeExecutable.call(this);};
+  const security={verified:true,mode:'native',nativeSandboxSupported:true,nativeApprovalSupported:true,inheritedExtensionsDisabled:true,sandbox:'read-only',approvalPolicy:'on-request'};
+  const launch=binding=>{const readable=new PassThrough(),writable=new PassThrough();let finish;const done=new Promise(resolve=>{finish=resolve;});
+   writable.on('data',chunk=>{for(const line of String(chunk).trim().split('\n')){const frame=JSON.parse(line);frames.push(frame);let result;
+    if(frame.method==='initialize')result={userAgent:'controlled-native-fixture'};
+    if(frame.method==='model/list')result={data:codexModels.map(option=>({id:option.value,model:option.value,displayName:option.label,hidden:false,isDefault:false,defaultReasoningEffort:option.defaultReasoningEffort,supportedReasoningEfforts:option.reasoningOptions.map(e=>({reasoningEffort:e.value,description:e.label}))})),nextCursor:null};
+    if(frame.method==='thread/start'){if(mutation==='generation')identity='d'.repeat(64);result={thread:{id:'cold-thread'},model:frame.params.model,reasoningEffort:mutation==='ack-mismatch'?'low':frame.params.config.model_reasoning_effort,modelProvider:'fixture-native',cwd:binding.cwd,sandbox:{type:'readOnly'},approvalPolicy:'on-request',approvalsReviewer:'user'};}
+    if(frame.method==='turn/start')result={turn:{id:'cold-turn',status:'inProgress'}};
+    if(frame.method==='turn/interrupt')result={};
+    if(result)readable.write(JSON.stringify({id:frame.id,result})+'\n');
+   }});const handle={readable,writable,done,close(){finish({processTreeExitConfirmed:true});}};binding.onHandle?.(handle);return handle;};
+  const provider=createCodexAppServerProvider({launch,taskOptions:{verifiedRuntime:{verified:true,version:'0.167.0-alpha.3.2',security},
+   resolveTaskWorkspace:({taskId,workspaceId})=>({task:core.taskService.runtime.get({id:taskId}).task,workspace:core.workspaceService.describeWorkspace(workspaceId)})},
+   catalogOptions:{launch,resolveIdentity:()=>identity}});
+  try{
+   // Auth readiness is a controlled fixture observation. The real native
+   // account mode remains blocked in production; protocol/Task owners are real.
+   const controlledProvider={...provider,health:async()=>({...await provider.health(),authenticated:true,sessionCapable:true})};
+   core=createCetaMeshServices({stateDir:path.join(scope,'state'),dataRoot:path.join(scope,'data'),agentCodexRouterOptions:{rolloutEnabled:true,appServerProvider:controlledProvider}});
+   const source=path.join(scope,'workspace');fs.mkdirSync(source);fs.writeFileSync(path.join(source,'kept.txt'),'Owner bytes');
+   const workspace=(await core.workspaceService.execute({method:'workspace.create',params:{root:source,name:'controlled cold native'}})).workspace;
+   const chat=await core.chatService.execute({method:'chat.sessions.create',params:{title:'Cold native'}});
+   await core.chatService.execute({method:'chat.config.set',params:{id:chat.id,config:{agentProvider:'codex',workspaceId:workspace.id}}});
+   const catalog=await core.desktopUiService.execute({method:'ui.chat.catalog',params:{id:chat.id}});
+   const current=(await core.chatService.execute({method:'chat.sessions.list'})).sessions.find(row=>row.id===chat.id);
+   const saved=await core.desktopUiService.execute({method:'ui.chat.config.set',params:{id:chat.id,expectedRevision:current.configuration.revision,catalogIdentity:identity,config:{model:'model-b',reasoning:'high'}}});
+   assert.equal(saved.taskId,null);assert.equal(frames.some(row=>['thread/start','turn/start'].includes(row.method)),false);
+   assert.equal(core.taskService.runtime.list({}).tasks.length,0);
+   const scopeConsent=core.agentBroker.describeExecutionSecurity('codex',workspace.id);core.agentBroker.authorizeExecution('codex',workspace.id,scopeConsent.fingerprint);
+   await core.chatService.execute({method:'chat.send',params:{id:chat.id,text:'Only this explicitly sent controlled request',clientMessageId:'owned-next-send'}});
+   let status;for(let i=0;i<200;i++){status=await core.chatService.execute({method:'chat.status',params:{id:chat.id}});if(frames.some(row=>row.method==='turn/start')||status.lastState==='error')break;await new Promise(resolve=>setTimeout(resolve,10));}
+   const turns=frames.filter(row=>row.method==='turn/start');
+   if(mutation==='none'){assert.equal(turns.length,1,JSON.stringify({status,methods:frames.map(row=>row.method)}));assert.equal(turns[0].params.model,'model-b');assert.equal(turns[0].params.effort,'high');
+    const active=(await core.chatService.execute({method:'chat.sessions.list'})).sessions.find(row=>row.id===chat.id);assert.ok(active.taskId);assert.equal(active.id,chat.id);
+    const observed=await core.desktopUiService.execute({method:'ui.chat.catalog',params:{id:chat.id}});assert.equal(observed.modelControl.selection.model,'model-b');
+   }else{assert.ok(frames.some(row=>row.method==='thread/start'),'negative must reach the actual native ACK boundary');assert.equal(turns.length,0,'no request may cross a changed generation or mismatched ACK');
+    assert.equal(status.lastErrorCode,mutation==='generation'?'AGENT_RUNTIME_CHANGED':'AGENT_CONFIGURATION_UNCONFIRMED');}
+   assert.equal(fs.readFileSync(path.join(source,'kept.txt'),'utf8'),'Owner bytes');
+  }finally{if(core){await core.chatService.close();await core.capabilityService.close();await core.agentService.close();}else await provider.shutdown();
+   CliAgentProcess.prototype.executable=beforeExecutable;if(beforeHome===undefined)delete process.env.CODEX_HOME;else process.env.CODEX_HOME=beforeHome;}
+ });
+ await check('cold native catalog saves durable desired intent without Task, Session or pending effects',async()=>{
+  const stateDir=path.join(root,'cold-desired');fs.mkdirSync(path.join(stateDir,'desktop-chat'),{recursive:true});
+  fs.writeFileSync(path.join(stateDir,'desktop-chat','sessions.json'),JSON.stringify({schemaVersion:1,sessions:[{id:'cold',title:'Cold',createdAt:1,updatedAt:1,config:{agentProvider:'codex',model:'',reasoning:'',mode:'chat'}}]}));
+  const calls=[];let identity='a'.repeat(64);
+  const options={stateDir,agentProviders:[{id:'codex',eventProtocol:'agent-turn-events-v1',requiresTask:true}],agentExecute:async request=>{
+   calls.push(request.method);if(request.method==='agent.list')return{providers:[]};
+   if(request.method==='agent.modelCatalog')return{supported:true,provider:'codex',connectionIdentity:identity,source:'codex-app-server-model-list',runtimeVersion:'0.167.0-alpha.3.2',modelControl:{...codexControl(),status:'unknown',selection:null,application:'requires-new-session'}};
+   throw Error('Unexpected effect '+request.method);
+  }};
+  let service=createChatService(options);let ui=createDesktopUiService({services:{chatService:service}});
+  try{
+   const catalog=await ui.execute({method:'ui.chat.catalog',params:{id:'cold'}});
+   assert.equal(catalog.modelControl.selection,null);assert.equal(catalog.modelControl.catalog.connectionIdentity,identity);
+   const saved=await ui.execute({method:'ui.chat.config.set',params:{id:'cold',expectedRevision:0,catalogIdentity:identity,config:{model:'model-b',reasoning:'high'}}});
+   assert.equal(saved.configuration.desired.selection.model,'model-b');assert.equal(saved.configuration.runtime,'not-applied');assert.equal(saved.configuration.state,'saved');assert.equal(saved.taskId,null);
+   const row=JSON.parse(fs.readFileSync(service._store.sessionsFile)).sessions[0];assert.equal(row.pendingConfiguration,null);assert.equal(row.dshSessionId,null);
+   assert.ok(calls.every(method=>['agent.list','agent.modelCatalog'].includes(method)));
+   await service.close();service=createChatService(options);ui=createDesktopUiService({services:{chatService:service}});
+   const loaded=await service.execute({method:'chat.sessions.list',params:{}});assert.equal(loaded.sessions[0].configuration.desired.selection.reasoningEffort,'high');
+   identity='b'.repeat(64);
+   await assert.rejects(ui.execute({method:'ui.chat.config.set',params:{id:'cold',expectedRevision:1,catalogIdentity:'a'.repeat(64),config:{model:'model-b',reasoning:'maximum'}}}),{code:'AGENT_RUNTIME_CHANGED'});
+   assert.equal(JSON.parse(fs.readFileSync(service._store.sessionsFile)).sessions[0].config.reasoning,'high');
+   await assert.rejects(ui.execute({method:'ui.chat.config.set',params:{id:'cold',expectedRevision:1,catalogIdentity:'a'.repeat(64),config:{model:'model-b',reasoning:'high'}}}),{code:'AGENT_RUNTIME_CHANGED'},'saving the same native selection must revalidate the connection identity');
+   const refreshed=await ui.execute({method:'ui.chat.config.set',params:{id:'cold',expectedRevision:1,catalogIdentity:identity,config:{model:'model-b',reasoning:'high'}}});
+   assert.equal(refreshed.configuration.desired.connectionIdentity,identity,'an explicit save adopts the refreshed connection identity');
+   assert.equal(refreshed.configuration.runtime,'not-applied');
+   assert.equal(refreshed.configuration.revision,2);
+   await service.close();service=createChatService(options);ui=createDesktopUiService({services:{chatService:service}});
+   const rebound=await service.execute({method:'chat.sessions.list',params:{}});
+   assert.equal(rebound.sessions[0].configuration.desired.connectionIdentity,identity,'the refreshed identity survives reconstruction');
+   assert.ok(calls.every(method=>['agent.list','agent.modelCatalog'].includes(method)),'saving a desired configuration creates no Task or execution Session');
+  }finally{await service.close();}
+ });
  await check('an exact-limit valid native catalog survives the complete display projection without synthetic null metadata',async()=>{
   const rows=Array.from({length:256},(_,index)=>({model:'model-'+String(index).padStart(3,'0'),displayName:'L'.repeat(256),
    supportedReasoningEfforts:[{reasoningEffort:'low',description:'R'.repeat(142)+(index===1?'R'.repeat(45):'')}],defaultReasoningEffort:'low'}));

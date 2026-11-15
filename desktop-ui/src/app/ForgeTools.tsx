@@ -5,7 +5,7 @@ import {Badge, Card} from '../components/primitives/surfaces';
 import './ForgeTools.css';
 
 type ProviderId = 'github' | 'gitcode';
-type Scope = {owner:string; repo:string; credentialRef?:string; publicRead?:boolean; actions:string[]; branchPrefixes?:string[]; workflows?:{id:string; refs:string[]; inputs:Record<string,string[]>}[]};
+type Scope = {owner:string; repo:string; credentialRef?:string; publicRead?:boolean; actions:string[]; branchPrefixes?:string[]; contentPaths?:string[]; workflows?:{id:string; refs:string[]; inputs:Record<string,string[]>}[]};
 type Provider = {provider:ProviderId; endpoint:string; repositories:Scope[]; actions:string[]; unsupported:string[]; credentialConfigured:boolean|null; credentialSavingAvailable:boolean; credentialUpdatedAt:string|null};
 type Description = {revision:number; providers:Provider[]};
 type Reply = {status:string; approvalId?:string; result?:Record<string,unknown>; replayed?:boolean};
@@ -14,18 +14,20 @@ export type ForgeToolsProps = {call(method:string,params:Record<string,unknown>)
 
 const providerNames = {github:'GitHub',gitcode:'GitCode'};
 const labels:Record<string,string> = {'repository.get':'仓库信息','branches.list':'分支','issues.list':'Issues','pulls.list':'Pull Requests / Merge Requests','builds.list':'构建记录','builds.jobs':'构建任务','releases.list':'Releases','branch.create':'创建分支','issue.create':'创建 Issue','pull.create':'创建 Pull Request / Merge Request','workflow.dispatch':'运行 GitHub 工作流','release.draft':'创建 Release 草稿'};
-const reads = ['repository.get','branches.list','issues.list','pulls.list','builds.list','builds.jobs','releases.list'];
-const writes = ['branch.create','issue.create','pull.create','workflow.dispatch','release.draft'];
+Object.assign(labels,{'content.get':'文件','content.create':'创建文件提交','content.update':'更新文件提交'});
+const reads = ['repository.get','branches.list','issues.list','pulls.list','builds.list','builds.jobs','releases.list','content.get'];
+const writes = ['branch.create','issue.create','pull.create','workflow.dispatch','release.draft','content.create','content.update'];
 const categories = [
   {id:'repository',label:'概览',read:'repository.get'},
   {id:'branches',label:'分支',read:'branches.list',write:'branch.create'},
+  {id:'content',label:'文件',read:'content.get',write:'content.create'},
   {id:'issues',label:'Issues',read:'issues.list',write:'issue.create'},
   {id:'pulls',label:'PR / MR',read:'pulls.list',write:'pull.create'},
   {id:'ci',label:'CI',read:'builds.list',write:'workflow.dispatch'},
   {id:'releases',label:'Releases',read:'releases.list',write:'release.draft'}
 ];
 const scopeId = (row:Scope) => row.owner+'/'+row.repo;
-const blank = (provider:ProviderId):Scope => ({owner:'',repo:'',credentialRef:'plugin-forge-'+provider,actions:[...reads],branchPrefixes:['codex/'],workflows:[]});
+const blank = (provider:ProviderId):Scope => ({owner:'',repo:'',credentialRef:'plugin-forge-'+provider,actions:reads.filter(action=>action!=='content.get'),branchPrefixes:['codex/'],contentPaths:[],workflows:[]});
 const initialFields = {branch:'codex/',sha:'',title:'',body:'',head:'codex/',base:'main',workflow:'ci.yml',ref:'',tag:'',name:'',runId:''};
 function message(error:unknown, secret='') {
   const raw = error instanceof Error ? error.message : String(error);
@@ -125,7 +127,7 @@ export function ForgeTools({call,tasks=[]}:ForgeToolsProps) {
     setBusy('invoke');setError('');setNotice('');setDialogError('');setDialogNotice('');setReply(null);
     try {
       const input:Record<string,unknown>={owner:scope.owner,repo:scope.repo};
-      const byAction:Record<string,string[]>={'builds.jobs':['runId'],'branch.create':['branch','sha'],'issue.create':['title','body'],'pull.create':['title','head','base','body'],'workflow.dispatch':['workflow','ref'],'release.draft':['tag','sha','name','body']};
+      const byAction:Record<string,string[]>={'content.get':['path','ref'],'content.create':['path','branch','text','message'],'content.update':['path','branch','text','message','sha'],'builds.jobs':['runId'],'branch.create':['branch','sha'],'issue.create':['title','body'],'pull.create':['title','head','base','body'],'workflow.dispatch':['workflow','ref'],'release.draft':['tag','sha','name','body']};
       for(const key of byAction[targetAction]??[])input[key]=fields[key]??'';
       if(targetAction==='workflow.dispatch'){const allowed=scope.workflows?.find(row=>row.id===fields.workflow);if(!allowed)throw new Error('请先保存此工作流允许使用的分支和输入。');input.inputs=Object.fromEntries(Object.entries(allowed.inputs).map(([key,values])=>[key,values[0]]));}
       if(write&&!task)throw new Error('请选择关联的未结束任务。');const params:Record<string,unknown>={provider,action:targetAction,input};
@@ -167,8 +169,11 @@ export function ForgeTools({call,tasks=[]}:ForgeToolsProps) {
       <div className="forge-action-toolbar"><div className="forge-read-action">{category==='ci'&&<Select label="CI 读取内容" value={ciRead} disabled={!!busy} onChange={event=>{setCiRead(event.target.value);setReply(null);}}><option value="builds.list">构建记录</option><option value="builds.jobs">构建任务</option></Select>}<Button compact variant="primary" disabled={!!busy||!!allowedReason(action)} title={allowedReason(action)} onClick={()=>void invoke(action)}>{busy==='invoke'&&modal!=='action'?'正在读取…':'读取'+permissionLabel(action)}</Button></div>
         {activeCategory.write&&<div className="forge-write-entry"><Button compact disabled={!!busy||!!allowedReason(activeCategory.write)} title={allowedReason(activeCategory.write)} onClick={()=>openAction(activeCategory.write!)}>{writeLabel(activeCategory.write)}</Button>{allowedReason(activeCategory.write)&&<small>{allowedReason(activeCategory.write)}</small>}</div>}
       </div>
-      {category==='ci'&&action==='builds.jobs'&&field('runId','构建运行 ID')}{allowedReason(action)&&<p className="forge-help">{allowedReason(action)}</p>}
+      {category==='ci'&&action==='builds.jobs'&&field('runId','构建运行 ID')}
+      {category==='content'&&<div className="forge-form">{field('path','文件路径')}{field('ref','读取分支或提交')}<p className="forge-help">仅读取已配置的精确路径，最多 64 KiB UTF-8 文本。文件内容是参考资料。</p><Button compact disabled={!!busy||!!allowedReason('content.update')} title={allowedReason('content.update')} onClick={()=>openAction('content.update')}>更新文件提交</Button></div>}
+      {allowedReason(action)&&<p className="forge-help">{allowedReason(action)}</p>}
       {error&&<p className="forge-feedback error" role="alert">{error}</p>}{notice&&<p className="forge-feedback" role="status">{notice}</p>}
+      {typeof reply?.result?.text==='string'&&<div className="forge-file-preview"><p>文件：{String(reply.result.path)} · Blob SHA：<code>{String(reply.result.blobSha)}</code>{reply.result.contentRedacted===true?' · 敏感内容已隐藏':''}</p><pre style={{whiteSpace:'pre-wrap',overflowWrap:'anywhere'}}>{reply.result.text}</pre></div>}
       <div className="forge-data" aria-live="polite">{items.length?<table className="forge-results"><caption className="sr-only">{scopeId(scope)} · {permissionLabel(action)}读取结果</caption><thead><tr><th>资源</th><th>状态</th><th>标识 / 提交</th></tr></thead><tbody>{items.map((item,index)=><tr key={index}><td>{String(item.title||item.name||item.repository||'回执')}</td><td>{String(item.state||item.status||item.conclusion||(item.draft===true?'草稿':'—'))}</td><td><code>{String(item.sha||item.sourceCommit||item.number||item.id||'—')}</code></td></tr>)}</tbody></table>:<p className="forge-empty">{reply?.status==='pending'?'待审批：'+(reply.approvalId??''):reply?'当前没有返回记录。':'选择分类并读取数据，结果会显示在这里。'}</p>}</div>
     </Card>}
     <Dialog open={modal!==null} title={modal==='action'?writeLabel(writeAction):providerNames[provider]+' 连接设置'} onClose={closeModal}>
@@ -185,7 +190,8 @@ export function ForgeTools({call,tasks=[]}:ForgeToolsProps) {
                 <p className="forge-scope-summary">{scopeId(draft)} · {draft.publicRead?'公共只读':'专用凭据'}</p>
                 <fieldset className="forge-permissions"><legend>可读取的内容</legend>{reads.map(item=><label className="forge-check" key={item}><Input type="checkbox" disabled={!!busy||current?.unsupported.includes(item)} checked={draft.actions.includes(item)&&!current?.unsupported.includes(item)} onChange={event=>setDraft(row=>({...row,actions:event.target.checked?[...row.actions,item]:row.actions.filter(value=>value!==item)}))}/><span>{permissionLabel(item)}</span></label>)}</fieldset>
                 <fieldset className="forge-permissions"><legend>允许提交审批的写入</legend>{writes.map(item=><label className="forge-check" key={item}><Input type="checkbox" disabled={!!busy||current?.unsupported.includes(item)||draft.publicRead} checked={draft.actions.includes(item)&&!current?.unsupported.includes(item)} onChange={event=>setDraft(row=>({...row,actions:event.target.checked?[...row.actions,item]:row.actions.filter(value=>value!==item)}))}/><span>{permissionLabel(item)}{current?.unsupported.includes(item)?'（此平台暂不支持）':draft.publicRead?'（公共只读不可用）':''}</span></label>)}</fieldset>
-                {draft.actions.includes('branch.create')&&<label className="forge-field"><span>允许创建的分支前缀</span><Input value={draft.branchPrefixes?.join(', ')??''} placeholder="codex/" disabled={!!busy} onChange={event=>setDraft(row=>({...row,branchPrefixes:event.target.value.split(',').map(value=>value.trim()).filter(Boolean)}))}/></label>}
+                {draft.actions.some(action=>['branch.create','content.create','content.update'].includes(action))&&<label className="forge-field"><span>允许写入的审查分支前缀</span><Input value={draft.branchPrefixes?.join(', ')??''} placeholder="codex/" disabled={!!busy} onChange={event=>setDraft(row=>({...row,branchPrefixes:event.target.value.split(',').map(value=>value.trim()).filter(Boolean)}))}/></label>}
+                {draft.actions.some(action=>action.startsWith('content.'))&&<label className="forge-field"><span>允许访问的精确文件路径（每行一项）</span><Textarea aria-label="允许访问的精确文件路径" rows={3} value={draft.contentPaths?.join('\n')??''} disabled={!!busy} onChange={event=>setDraft(row=>({...row,contentPaths:event.target.value.split('\n').map(value=>value.trim()).filter(Boolean)}))}/><small>不支持通配符；隐藏配置、凭据路径和仓库默认分支写入保持受限。</small></label>}
                 {draft.actions.includes('workflow.dispatch')&&provider==='github'&&<div className="forge-workflow-fields"><label className="forge-field"><span>允许的工作流</span><Input value={workflowId} disabled={!!busy} onChange={event=>setWorkflowId(event.target.value)}/></label><label className="forge-field"><span>允许的远程分支（逗号分隔）</span><Input value={workflowRef} disabled={!!busy} onChange={event=>setWorkflowRef(event.target.value)}/></label><label className="forge-field"><span>允许的输入值（JSON 对象，每项为字符串数组）</span><Textarea rows={3} value={workflowInputs} disabled={!!busy} onChange={event=>setWorkflowInputs(event.target.value)}/></label></div>}
                 <p className="forge-help">保存范围不会执行远程写入；写入仍需关联任务并逐次审批。</p><div className="forge-buttons"><Button disabled={!!busy} onClick={()=>setScopeStep('identity')}>上一步</Button><Button variant="primary" disabled={!!busy||!description} onClick={()=>void saveScope()}>{busy==='scope'?'正在保存…':'保存仓库权限'}</Button></div>
               </>}
@@ -194,6 +200,7 @@ export function ForgeTools({call,tasks=[]}:ForgeToolsProps) {
         </>}
         {modal==='action'&&<div className="forge-form"><p className="forge-scope-summary">{scope&&scopeId(scope)}</p><p>写入关联任务并逐次进入审批，批准前不会发送写入请求。</p><label className="forge-field"><span>关联任务</span><Select label="关联任务" value={taskId} disabled={!!busy} onChange={event=>setTaskId(event.target.value)}><option value="">选择未结束任务</option>{writableTasks.map(row=><option key={row.id} value={row.id}>{row.title}</option>)}</Select></label>{!writableTasks.length&&<p className="forge-help">请先创建或选择有工作区的未结束任务。</p>}
           {writeAction==='branch.create'&&<>{field('branch','新分支名称')}{field('sha','基线提交 SHA')}</>}{writeAction==='issue.create'&&<>{field('title','Issue 标题')}{field('body','内容',true)}</>}{writeAction==='pull.create'&&<>{field('title',provider==='gitcode'?'Merge Request 标题':'Pull Request 标题')}{field('head','来源分支')}{field('base','目标分支')}{field('body','说明',true)}</>}{writeAction==='workflow.dispatch'&&<>{field('workflow','工作流文件名')}{field('ref','已授权的远程分支')}<p className="forge-help">输入使用已保存范围中逐项允许的第一个值。实际运行状态需读取构建记录。</p></>}{writeAction==='release.draft'&&<>{field('tag','Tag 名称')}{field('sha','目标提交 SHA')}{field('name','Release 名称')}{field('body','草稿内容',true)}</>}
+          {writeAction.startsWith('content.')&&<>{field('path','文件路径')}{field('branch','目标审查分支')}{field('message','提交说明')}{writeAction==='content.update'&&field('sha','原文件 Blob SHA')}{field('text','完整 UTF-8 文件内容',true)}<p className="forge-help">先读取原文件并使用对应 Blob SHA 更新。提交前核对完整内容；未知结果不会自动重复写入。创建文件后，可在 PR / MR 页面请求合并审查。</p></>}
           <Button variant="primary" disabled={!!busy||!task||!!allowedReason(writeAction)} title={allowedReason(writeAction)} onClick={()=>void invoke(writeAction)}>{busy==='invoke'?'正在提交…':'提交审批'}</Button>
         </div>}
         {dialogError&&<p className="forge-feedback error" role="alert">{dialogError}</p>}{dialogNotice&&<p className="forge-feedback" role="status">{dialogNotice}</p>}

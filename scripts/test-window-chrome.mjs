@@ -17,6 +17,8 @@ assert.match(css, /data-window-chrome=['"]native['"][^}]*--window-chrome-height:
 assert.match(css, /\.harbor-main\s*\{[^}]*grid-template-rows: minmax\(0, 1fr\);/s);
 const host = read('desktop-shell/src/webview_ui.rs');
 assert.match(host, /with_decorations\(true\)/, 'retain native resize, system caption and Windows Snap');
+assert.match(host, /let caption_enabled = std::env::var\("CETAMESH_NATIVE_CHAT_CAPTION"\)\.as_deref\(\) != Ok\("0"\)/, 'accepted caption defaults on in debug and release; explicit 0 retains the native fallback');
+assert.match(host, /if caption_enabled \{[\s\S]*?ChatCaption::install[\s\S]*?\.ok\(\) \} else \{ None \}/, 'adapter installation failure or explicit opt-out retains the decorated window');
 assert.match(host, /__CETAMESH_NATIVE_CHROME__/, 'native capability is known before the first UI frame');
 assert.match(host, /WindowAction::Close =>[\s\S]*?WM_CLOSE/);
 assert.match(host, /WindowEvent::CloseRequested/);
@@ -37,7 +39,16 @@ try {
   assert.equal(gesture.move(40, 20, 1, 1), false);
   gesture.begin(20, 20, 1);
   assert.equal(gesture.move(40, 20, 1, 0), false, 'released button cannot start dragging');
-  const { hostClient } = await vite.ssrLoadModule('/src/bridge/typed-client.ts');
+  const { hostClient, bridgeRequestBudget } = await vite.ssrLoadModule('/src/bridge/typed-client.ts');
+  assert.equal(bridgeRequestBudget('ui.plugins.engines.package.review'),130000);
+  assert.equal(bridgeRequestBudget('ui.plugins.engines.package.install'),130000);
+  for(const method of ['ui.plugins.engines.enable','ui.chat.send','app.status','app.diagnostics.run'])assert.equal(bridgeRequestBudget(method),32000,'ordinary requests retain their existing budget');
+  assert.equal(bridgeRequestBudget('app.pickExtensionPackage'),300000,'native file selection keeps its existing budget');
+  const { captionPalette } = await vite.ssrLoadModule('/src/theme/appearance.ts');
+  const colors = { '--background-soft':'#ffffff', '--surface-hover':'#eeeeee', '--accent-soft':'#d0e0f0', '--text-primary':'#222222', '--text-secondary':'#666666', '--accent-hover':'#558877' };
+  const palette = captionPalette(colors, false);
+  assert.deepEqual(palette, ['#ffffff','#eeeeee','#d0e0f0','#222222','#666666','#558877','#eeeeee']);
+  assert.equal(captionPalette(colors, true)[0], '#9c9f9d', 'native caption uses the same modal shade as the client backdrop');
   const markup = renderToStaticMarkup(React.createElement(WindowChrome));
   assert.match(markup, /CetaMesh/);
   assert.match(markup, /window-brand-icon/,'fallback chrome has a compact brand icon');
@@ -48,18 +59,27 @@ try {
   const nativeMarkup=renderToStaticMarkup(React.createElement(WindowChrome));
   assert.doesNotMatch(nativeMarkup,/window-controls|window-chrome|window-resize/,'native caption never duplicates client controls');
   delete window.__CETAMESH_NATIVE_CHROME__;
+  const {ChatModeControl}=await vite.ssrLoadModule('/src/app/HarborApp.tsx');
+  window.__CETAMESH_NATIVE_CHAT_MODES__=true;
+  assert.equal(renderToStaticMarkup(React.createElement(ChatModeControl,{mode:'simulation',onChange(){}})),'','native modes suppress duplicate client selector');
+  assert.match(renderToStaticMarkup(React.createElement(ChatModeControl,{mode:'simulation',native:false,onChange(){}})),/仿真聊天/,'a failed native mode sync restores the inline selector even on a capable host');
+  delete window.__CETAMESH_NATIVE_CHAT_MODES__;
+  assert.match(renderToStaticMarkup(React.createElement(ChatModeControl,{mode:'simulation',onChange(){}})),/仿真聊天/,'older hosts retain a functional selector');
+
   const requests = [];
   window.ipc = { postMessage(raw) {
     const request = JSON.parse(raw);
     requests.push(request);
     queueMicrotask(() => window.__cetameshReceive({ id: request.id, ok: true, result: { maximized: request.params.action === 'maximize' } }));
   } };
-  for (const action of ['state', 'drag', 'minimize', 'maximize', 'close', 'resizeNorth', 'resizeSouthEast']) {
+  for (const action of ['state', 'drag', 'minimize', 'maximize', 'close', 'resizeNorth', 'resizeSouthEast', 'chatModeChat', 'chatModeSimulation', 'chatModeProject', 'chatModeHidden']) {
     const result = await hostClient.windowAction(action);
     assert.deepEqual(requests.at(-1).params, { action });
     assert.equal(requests.at(-1).method, 'app.windowAction');
     assert.equal(result.maximized, action === 'maximize');
   }
+  await hostClient.windowAction('appearanceLight', { palette, modal: true });
+  assert.deepEqual(requests.at(-1).params, { action: 'appearanceLight', palette, modal: true }, 'native palette uses the existing strictly scoped Host command');
   window.ipc.postMessage = raw => {
     const { id } = JSON.parse(raw);
     queueMicrotask(() => window.__cetameshReceive({ id, ok: false, error: { code: 'HOST_ERROR', message: 'fixture: cannot drag' } }));

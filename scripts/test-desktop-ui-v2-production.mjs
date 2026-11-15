@@ -296,7 +296,7 @@ check('Harbor accessibility and real-world controls avoid clipping and preserve 
   assert.match(app, /<details className="chat-context-card">/);
   assert.match(app, /className="composer-dock"><ChatContextPanel/);
   assert.match(app, /settingPages = \[/);
-  assert.match(plugins, /导入本地扩展/);
+  // The actual import button and both ZIP review routes are exercised in test-global-ui-productization.
   assert.match(plugins, /stageLocalPackage/);
   assert.match(inputs, /role="combobox"|aria-haspopup="listbox"/);
   assert.match(inputs, /role="listbox"/);

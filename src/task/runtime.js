@@ -45,7 +45,7 @@ function subId(prefix) {
 
 export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
   resolveWorkspace = () => null, workspacesOverlap = (left, right) => left === right, ownedArtifactRoot = null,
-  resolvePostWriteVerification = null, resolveIsolatedChildWorkspace = null } = {}) {
+  resolvePostWriteVerification = null, resolveIsolatedChildWorkspace = null, resolveIsolatedChildResult = null } = {}) {
   if (!stateDir || typeof stateDir !== 'string') throw new Error('createTaskRuntime 需要 stateDir');
   const store = createTaskStore({ stateDir, now, idFactory });
 
@@ -517,12 +517,15 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
     if (!Number.isSafeInteger(expectedRev)) throw taskError('REVISION_REQUIRED', 'expectedRev is required');
     if (child.rev !== expectedRev) throw taskError('TASK_CONFLICT', 'Child Task revision changed');
     const kind = child.childContract.outputKind;
-    const checks = kind === 'tool'
+    const checks = kind === 'changes' && child.childContract.mode==='isolated-write'
+      ? [typeof resolveIsolatedChildResult==='function' ? await resolveIsolatedChildResult({task:child})
+        : {status:'NEEDS_REVIEW',kind,reasons:['CHILD_RESULT_VERIFIER_UNAVAILABLE'],evidenceEventIds:[]}]
+      : kind === 'tool'
       ? await Promise.all(child.childContract.expectedEvidence.map(expectedCapability =>
         verifyOutcome({ id, kind, expectedCapability, evidenceCandidate: true })))
       : [await verifyOutcome({ id, kind })];
     const latestAttempt = child.attempts?.at(-1);
-    const latestEvidence = kind !== 'tool' || (latestAttempt?.state === 'completed'
+    const latestEvidence = !['tool','changes'].includes(kind) || (latestAttempt?.state === 'completed'
       && !(child.attempts ?? []).some(row => ['started', 'accepted', 'unknown'].includes(row.state))
       && checks.every(check => check.evidenceEventIds.length > 0 && check.evidenceEventIds.every(eventId =>
         (child.executionEvidence ?? []).some(row => row.eventId === eventId
@@ -539,7 +542,11 @@ export function createTaskRuntime({ stateDir, now = () => Date.now(), idFactory,
       draft.result.verificationReasons = result.reasons;
       draft.result.evidenceEventIds = result.evidenceEventIds;
       draft.result.verificationRev = draft.rev + 1;
-      if (kind === 'tool' && result.status === 'VERIFIED') {
+      if(kind==='changes') {
+        if(result.status==='VERIFIED'&&checks[0].changesProof)draft.result.changesProof=checks[0].changesProof;
+        else delete draft.result.changesProof;
+      }
+      if (['tool','changes'].includes(kind) && result.status === 'VERIFIED') {
         for (const item of draft.acceptance) { item.met = true; item.metAt = now(); }
       }
       return draft;

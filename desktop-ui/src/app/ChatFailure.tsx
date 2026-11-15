@@ -41,6 +41,7 @@ function recoveryCodeOf(failure: ChatFailure) {
 export function chatFailurePresentation(failure: ChatFailure) {
   const code = failure.errorCode ?? '';
   const recoveryCode = recoveryCodeOf(failure);
+  if (code === 'TASK_HANDOFF_IN_FLIGHT' && failure.failureStage === 'pre-dispatch') return { title: '执行者正在交接', detail: '本条消息未派发，原消息已保留。交接完成后可继续发送；查看任务可了解当前交接状态。', gated: true };
   if (recoveryCode && ['TASK_WORKSPACE_BUSY', 'SESSION_EXECUTION_UNCONFIRMED'].includes(code)) return { ...legacyRecovery[recoveryCode], gated: true };
   if (code === 'TASK_WORKSPACE_BUSY') return { title: '工作区正在被其他任务占用', detail: '查看占用任务时，程序会自动核验已停止的旧执行，满足条件后释放占用；若任务仍在执行，请等待结束。原消息已保留，不会自动执行。', gated: true };
   if (approvalCodes.has(code)) return { title: code === 'APPROVAL_PENDING' ? '等待你审批' : '操作需要审批处理', detail: '在待审批操作中核对本次请求；拒绝或过期的审批不会自动重发或重新执行。', gated: true };

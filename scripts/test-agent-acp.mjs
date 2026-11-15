@@ -95,6 +95,34 @@ try {
   const lag=createAgentEventBuffer({limit:2}), lagging=lag.follow(); lag.push({seq:1}); await lagging.next();
   lag.push({seq:2}); lag.push({seq:3}); lag.push({seq:4});
   await assert.rejects(lagging.next(),{code:'AGENT_EVENT_CURSOR_EXPIRED'}); buffer.close(); lag.close();
+  // A native CLI may flush many token deltas before the event consumer resumes.
+  // The bounded history must preserve the actual text and tool/terminal evidence.
+  const burstProvider=provider(), burstSession=await burstProvider.createSession({taskId:'burst',workspaceId:'w'});
+  const burstPeer=peers.at(-1), burstFollow=burstProvider.follow(burstSession);
+  const started=burstFollow.next();
+  await burstProvider.send({sessionId:burstSession.sessionId,content:'burst',runId:'burst-run',phase:'user'});
+  assert.equal((await started).value.event.type,'turn/start');
+  const firstChunk=burstFollow.next();
+  for(let index=0;index<1025;index++) {
+    burstPeer.send({method:'session/update',params:{sessionId:'same-native-id',update:{
+      sessionUpdate:'agent_message_chunk',content:{type:'text',text:'x'}}}});
+    if(index===511)burstPeer.send({method:'session/update',params:{sessionId:'same-native-id',update:{
+      sessionUpdate:'tool_call_update',toolCallId:'burst-read',kind:'read',status:'completed',rawOutput:{content:'real receipt'}}}});
+    // Drain transport notification handlers without yielding to an I/O turn.
+    if(index%64===63)for(let step=0;step<8;step++)await Promise.resolve();
+  }
+  for(let step=0;step<8;step++)await Promise.resolve();
+  burstPeer.reply(burstPeer.prompt,{stopReason:'end_turn'}); await tick();
+  const burstEvents=[(await firstChunk).value];
+  while(burstEvents.at(-1).event.type!=='turn/end')burstEvents.push((await burstFollow.next()).value);
+  assert.equal(burstEvents.filter(row=>row.event.type==='assistant/chunk').map(row=>row.event.data.chunk.text).join(''),'x'.repeat(1025));
+  assert.equal(burstEvents.find(row=>row.event.type==='assistant/message').event.data.message.content[0].text,'x'.repeat(1025));
+  const burstResult=burstEvents.find(row=>row.event.type==='tool/result');
+  assert.equal(burstResult.event.data.status,'completed');assert.match(burstResult.event.data.resultSha256,/^[a-f0-9]{64}$/);
+  assert.ok(burstEvents.findIndex(row=>row===burstResult)>0);
+  assert.equal(burstEvents.filter(row=>row.event.type==='turn/end').length,1);
+  assert.ok(burstEvents.every((row,index)=>index===0||row.seq>burstEvents[index-1].seq));
+  await burstFollow.return();await burstProvider.closeSession(burstSession);
   const denied = createAgentPermissionBridge({provider:'p',sessionId:'s',workspaceId:'w',taskId:'t'});
   assert.deepEqual(await denied.request({sessionId:'s',options:[{optionId:'yes',kind:'allow_once'}]}), {outcome:{outcome:'cancelled'}});
   const unavailable = provider({descriptor:{...descriptor,verifiedRuntime:false}});

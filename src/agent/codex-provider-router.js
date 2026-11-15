@@ -3,12 +3,17 @@ import { AGENT_PROVIDER_METHODS, agentProviderError as fault } from './agent-pro
 const MAX_CLOSED_BINDINGS = 256;
 
 /** Transport decisions come exclusively from trusted composition/session metadata. */
-export function createCodexProviderRouter({legacyProvider,appServerProvider,rolloutEnabled=false,resolveTransport} = {}) {
+export function createCodexProviderRouter({legacyProvider,appServerProvider,rolloutEnabled=false,resolveTransport,selectTransport} = {}) {
   if (!legacyProvider) throw new TypeError('Legacy Codex Provider required');
   const bindings = new Map();
   const closedBindings = new Map();
   const creating = new Set();
-  const defaultProvider = rolloutEnabled ? appServerProvider : legacyProvider;
+  function selectedTransport() {
+    const transport=selectTransport ? selectTransport() : rolloutEnabled ? 'app-server' : 'exec';
+    if(!['exec','app-server'].includes(transport))throw fault('CODEX_TRANSPORT_UNSUPPORTED','Select an explicitly supported Codex transport');
+    return transport;
+  }
+  const selectedProvider=()=>selectedTransport()==='exec'?legacyProvider:appServerProvider;
   let closing = false, shutdownPromise;
   function rememberClosed(id, binding) {
     if (!binding) return;
@@ -31,15 +36,17 @@ export function createCodexProviderRouter({legacyProvider,appServerProvider,roll
     if (transport === 'exec') return legacyProvider;
     throw fault('SESSION_TRANSPORT_UNKNOWN','Codex session transport unavailable; create a new session');
   }
-  const provider = {id:'codex',label:'Codex',eventProtocol:defaultProvider?.eventProtocol ?? null,
-    capabilities:()=>({...defaultProvider?.capabilities(),id:'codex',appServerRolloutEnabled:rolloutEnabled,
-      ...(!defaultProvider ? {available:false,readyForTask:false,security:{mode:'native',nativeSandboxSupported:false}} : {})}),
-    health:params=>defaultProvider ? defaultProvider.health(params) : Promise.resolve({provider:'codex',available:false,taskEligible:false,reason:'app_server_unavailable'}),
+  const provider = {id:'codex',label:'Codex',get eventProtocol(){return selectedProvider()?.eventProtocol??null;},
+    capabilities:()=>{const selected=selectedProvider();return({...selected?.capabilities(),id:'codex',selectedTransport:selectedTransport(),appServerRolloutEnabled:selectedTransport()==='app-server',
+      ...(!selected ? {available:false,readyForTask:false,security:{mode:'native',nativeSandboxSupported:false}} : {})});},
+    health:params=>{const selected=selectedProvider();return selected ? selected.health(params) : Promise.resolve({provider:'codex',available:false,taskEligible:false,reason:'app_server_unavailable'});},
     modelCatalog() {
       if (closing) throw fault('PROVIDER_UNAVAILABLE', 'Codex router shutting down');
+      const transport=selectedTransport(),defaultProvider=selectedProvider();
       if (typeof defaultProvider?.modelCatalog !== 'function') return Promise.resolve({provider:'codex',supported:false,reason:'AGENT_MODEL_CATALOG_UNSUPPORTED'});
       const pending = Promise.resolve().then(() => defaultProvider.modelCatalog()).then(result => {
         if (closing) throw fault('PROVIDER_UNAVAILABLE', 'Codex router closed before catalog publication');
+        if(selectedTransport()!==transport)throw fault('AGENT_RUNTIME_CHANGED','Codex transport changed before catalog publication');
         return result;
       });
       creating.add(pending);
@@ -77,7 +84,7 @@ export function createCodexProviderRouter({legacyProvider,appServerProvider,roll
     createSession(params = {}) {
       const pending = (async()=>{
       if (closing) throw fault('PROVIDER_UNAVAILABLE','Codex router shutting down');
-      const transport = rolloutEnabled ? 'app-server':'exec';
+      const transport = selectedTransport();
       const selected = transport === 'exec' ? legacyProvider : appServerProvider;
       if (!selected) throw fault('PROVIDER_UNAVAILABLE','Codex App Server unavailable');
       const result = await selected.createSession(params);

@@ -170,6 +170,66 @@ run('product context is deterministic and stays within the requested character l
   assert.equal(compactManifest.capabilities.statusSummary[0].reason, 'descriptor-incomplete');
 });
 
+run('optional capability status cannot evict authorized Memory that fits with Task and execution facts', () => {
+  const schema = { type: 'object', properties: { path: { type: 'string' } }, additionalProperties: false };
+  const grantedIds = ['filesystem.read', 'operation.continue'];
+  const snapshot = {
+    mode: 'managed-agent', executionPath: 'managed-agent',
+    task: { id: 'memory-budget-task', status: 'running', goal: 'Read the linked references.',
+      checkpoint: { summary: 'Keep the verified checkpoint.' } },
+    workspace: { id: 'memory-budget-workspace', name: 'Scoped project' },
+    memoryReferences: [
+      { memoryId: 'linked-task-memory', title: 'Task reference', excerpt: 'Inspect the existing implementation first.' },
+      { memoryId: 'global-knowledge', title: 'Knowledge reference', excerpt: 'Keep the current public contract.' }
+    ],
+    pendingApprovals: { items: [{ approvalId: 'pending-write', capability: 'filesystem.write' }] },
+    capabilities: buildCapabilityContext({
+      registered: [
+        ...grantedIds.map(id => ({ id, description: 'Current scoped execution control.', inputSchema: schema,
+          risk: id === 'operation.continue' ? 'high' : 'low' })),
+        { id: 'filesystem.write', description: 'Ungrantable by context compaction.', inputSchema: schema, risk: 'high' },
+        ...Array.from({ length: 40 }, (_, index) => ({ id: `optional.status.${index}`, availability: 'unavailable' }))
+      ],
+      grantedIds, requestableIds: grantedIds, actorKind: 'agent', mode: 'managed-agent',
+      executionPath: 'managed-agent', taskAvailable: true
+    })
+  };
+  const before = structuredClone(snapshot);
+  for (const maxChars of [2600, 3200]) {
+    const result = projectProductContext(snapshot, { maxChars });
+    const view = JSON.parse(result.serialized);
+    assert.equal(view.truncated, true);
+    assert.ok(result.serialized.length <= maxChars, 'retaining Memory cannot enlarge the requested budget');
+    assert.deepEqual(view.memoryReferences, [
+      { memoryId: 'linked-task-memory', title: 'Task reference', excerpt: 'Inspect the existing implementation first.' },
+      { memoryId: 'global-knowledge', title: 'Knowledge reference', excerpt: 'Keep the current public contract.' }
+    ], 'optional non-callable status descriptions must yield before these authorized references');
+    assert.ok(view.omissions.capabilityStatuses > 0);
+    assert.equal(view.omissions.memoryReferences, undefined);
+    assert.equal(view.task.id, 'memory-budget-task');
+    assert.equal(view.task.checkpoint.summary, 'Keep the verified checkpoint.');
+    assert.deepEqual(view.pendingApprovals, { count: 1,
+      items: [{ approvalId: 'pending-write', capability: 'filesystem.write', status: 'pending' }] });
+    assert.deepEqual(view.capabilities.requestable, ['filesystem.read', 'operation.continue']);
+    assert.deepEqual(result.manifest.map(row => row.id), ['filesystem.read', 'operation.continue']);
+    assert.deepEqual(result.manifest.find(row => row.id === 'operation.continue').inputSchema, schema);
+    assert.equal(result.manifest.find(row => row.id === 'operation.continue').requiresApproval, true);
+    assert.equal(result.manifest.some(row => row.id === 'filesystem.write'), false, 'a pending approval is not a grant');
+    assert.equal(projectProductContext(snapshot, { maxChars }).serialized, result.serialized);
+  }
+  const oversized = projectProductContext({ ...snapshot,
+    memoryReferences: Array.from({ length: 12 }, (_, index) => ({ memoryId: `large-memory-${index}`, excerpt: 'x'.repeat(500) }))
+  }, { maxChars: 2600 });
+  const bounded = JSON.parse(oversized.serialized);
+  assert.ok(oversized.serialized.length <= 2600);
+  assert.deepEqual(bounded.memoryReferences, [], 'references that still cannot fit must be explicitly omitted');
+  assert.equal(bounded.omissions.memoryReferences, 12);
+  assert.equal(bounded.task.checkpoint.summary, 'Keep the verified checkpoint.');
+  assert.deepEqual(bounded.capabilities.requestable, ['filesystem.read', 'operation.continue']);
+  assert.equal(bounded.pendingApprovals.items[0].approvalId, 'pending-write');
+  assert.deepEqual(snapshot, before, 'projection cannot mutate Memory, Task or capability source state');
+});
+
 run('long handoff context keeps granted operation controls before optional discovery tools', () => {
   const schema = { type: 'object', properties: { operationRef: { type: 'string', maxLength: 160 } }, additionalProperties: false };
   const registered = [
@@ -203,6 +263,22 @@ run('long handoff context keeps granted operation controls before optional disco
 
 await taskManifestScenario(false);
 await taskManifestScenario(true);
+
+run('unavailable catalog facts cannot displace explicitly granted plugin tools', () => {
+  const registered=Array.from({length:100},(_,i)=>({id:'unused.provider.'+i,available:false,modelCallable:false}));
+  registered.push({id:'reverselab.session.open',description:'Open the approved Task analysis session.',inputSchema:{type:'object',properties:{},additionalProperties:false},modelCallable:true});
+  const capabilities=buildCapabilityContext({registered,grantedIds:['reverselab.session.open'],requestableIds:['reverselab.session.open'],
+    executionPath:'managed-agent',actorKind:'agent',mode:'task-agent',taskAvailable:true});
+  const result=projectProductContext({capabilities,mode:'task-agent',executionPath:'managed-agent'}, {maxChars:2400,schemaChannel:'structured-tools'});
+  assert.ok(result.manifest.some(row=>row.id==='reverselab.session.open'),'Granted actual tool must take priority over non-callable catalog status');
+});
+
+run('structured prompt argument maps preserve their string value schema', () => {
+  const inputSchema={type:'object',additionalProperties:false,properties:{arguments:{type:'object',additionalProperties:{type:'string',maxLength:8000}}}};
+  const capabilities=buildCapabilityContext({registered:[{id:'reverselab.prompt',description:'Read approved upstream prompt.',inputSchema}],mode:'chat'});
+  const result=projectProductContext({capabilities},{schemaChannel:'structured-tools'});
+  assert.deepEqual(result.manifest[0].inputSchema.properties.arguments.additionalProperties,{type:'string',maxLength:8000});
+});
 
 run('compaction retains explicitly granted test schema with operation controls or fails the budget', () => {
   const schema={type:'object',properties:{operationRef:{type:'string',maxLength:160}},required:['operationRef'],additionalProperties:false};

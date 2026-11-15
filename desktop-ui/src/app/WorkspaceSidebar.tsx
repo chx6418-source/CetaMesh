@@ -1,6 +1,7 @@
 import type { ReactNode } from 'react';
 import type { ChatSession, WorkspaceSummary } from '../bridge/typed-client';
 import { Icon, type IconName } from '../components/icons';
+import { DiagnosticsStatusEntry } from './StartupDiagnostics';
 
 type Workspace = Pick<WorkspaceSummary, 'id' | 'name' | 'status' | 'managedIsolation' | 'recovery' | 'taskId'>;
 /** A navigation projection only; selection and Core authorization remain independent. */
@@ -56,10 +57,10 @@ export function WorkspaceSidebar({ page, workspaces, sessions, activeWorkspaceId
     <div className="navigation-rail">
       {onQuickJump&&<button type="button" className="rail-button nav-item" aria-label="快速跳转" title="快速跳转 · Ctrl+K" onClick={onQuickJump}><Icon name="search" size={20}/></button>}
       <nav aria-label="工作空间" className="primary-nav">{navigation.filter(item => item.id !== 'settings' && item.id !== 'about').map(railButton)}</nav>
-      {page !== 'settings' && <button type="button" className="rail-panel-toggle" aria-label={collapsed ? '展开工作区列表' : '收起工作区列表'}
-        title={collapsed ? '展开工作区列表' : '收起工作区列表'} aria-expanded={!collapsed} aria-controls="workspace-panel" onClick={onToggle}><Icon name="panelLeft" size={19} /></button>}
+      <button type="button" className="rail-panel-toggle" aria-label={collapsed ? '展开工作区列表' : '收起工作区列表'}
+        title={collapsed ? '展开工作区列表' : '收起工作区列表'} aria-expanded={!collapsed} aria-controls="workspace-panel" onClick={onToggle}><Icon name="panelLeft" size={19} /></button>
       <div className="sidebar-bottom">
-        <nav aria-label="设置与帮助" className="utility-nav">{navigation.filter(item => item.id === 'settings' || item.id === 'about').map(railButton)}</nav>
+        <nav aria-label="设置与帮助" className="utility-nav"><DiagnosticsStatusEntry />{navigation.filter(item => item.id === 'settings' || item.id === 'about').map(railButton)}</nav>
         <div className="profile-avatar" title="本地用户 · 个人空间" role="img" aria-label="本地用户，个人空间">CM</div>
       </div>
     </div>

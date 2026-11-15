@@ -1,5 +1,5 @@
 import {projectChatContext,projectAgentModelControl} from './chat-telemetry.js';
-import { projectChatConfiguration, projectChatConfigurationObservation, chatConfigurationObservations } from './chat-configuration.js';
+import { projectChatConfiguration, projectChatConfigurationObservation, chatConfigurationObservations,projectNativeDesiredConfiguration } from './chat-configuration.js';
 import { projectChatFailureDetails, projectChatFailureMessage } from './chat-failure-details.js';
 import { explicitCollaborationIntent, explicitDelegationTarget } from './explicit-delegation.js';
 import { canDispatchTaskAgent, taskAgentUnavailableReason } from '../agent/execution-security.js';
@@ -265,6 +265,7 @@ export function createChatService({
       configurationRevision: Number.isSafeInteger(record.configurationRevision) && record.configurationRevision >= 0 ? record.configurationRevision : 0,
       configuration: record.configuration && typeof record.configuration === 'object' ? projectChatConfiguration({ ...record, pendingConfiguration: null }) : null,
       pendingConfiguration: normalizePendingConfiguration(record.pendingConfiguration),
+      nativeDesiredConfiguration:projectNativeDesiredConfiguration(record.nativeDesiredConfiguration),
       lastModelResolution: record.lastModelResolution && typeof record.lastModelResolution === 'object'
         ? { providerId: String(record.lastModelResolution.providerId ?? ''),
             requestedModel: String(record.lastModelResolution.requestedModel ?? ''),
@@ -366,6 +367,10 @@ export function createChatService({
   function commitConfiguration(record, state, config, pending, changes = {}) {
     assertConfigurationOwner(record, state, pending);
     const candidate = { ...record, ...changes, config: { ...config }, updatedAt: now(), pendingConfiguration: null,
+      nativeDesiredConfiguration:record.nativeDesiredConfiguration?.provider===config.agentProvider
+        && record.nativeDesiredConfiguration.selection.model===config.model
+        && (record.nativeDesiredConfiguration.selection.reasoningEffort??'')===config.reasoning
+        && record.nativeDesiredConfiguration.selection.modelProvider===(config.modelProvider??null)?record.nativeDesiredConfiguration:null,
       configurationRevision: record.configurationRevision + 1,
       configuration: { changeId: pending.changeId, application: pending.application,
         runtime: pending.sessionCreated ? 'unknown' : pending.application === 'next-turn' ? 'not-required' : pending.phase === 'runtime-confirmed' ? 'confirmed' : 'not-applied', at: now() } };
@@ -487,6 +492,10 @@ export function createChatService({
   }
   async function checkpointModelHistory(payload = {}) {
     if (!['settled-transcript', 'request-projection', 'tool-calls'].includes(payload.phase) || !Array.isArray(payload.messages)) throw chatError('CONTEXT_HISTORY_DENIED', 'Trusted coordinator checkpoint required');
+    // The shared coordinator also serves direct Core tool runs with no Chat
+    // owner. They retain their own execution receipts, not a Chat transcript.
+    // Existing Chat sessions still require the exact active turn below.
+    if (!sessions.has(payload.binding?.sessionId)) return;
     const owner = await modelHistoryOwner(payload, true), { record, turn, binding } = owner;
     if (!turn.modelHistory) throw chatError('CONTEXT_HISTORY_UNAVAILABLE', 'Original model source was not initialized');
     const prior = turn.modelHistory;
@@ -862,10 +871,11 @@ export function createChatService({
     finally { state.configChangeInFlight = false; }
   }
 
-  async function applyConfig({ id, config } = {}) {
+  async function applyConfig({ id, config,expectedRevision,catalogIdentity } = {}) {
     const record = sessionOrThrow(id);
     if (!config || typeof config !== 'object' || Array.isArray(config)) throw chatError('INVALID_PARAMS', 'config 必须是配置对象');
     config = { ...config };
+    if(expectedRevision!==undefined && expectedRevision!==record.configurationRevision)throw chatError('CONFIG_CONFLICT','会话配置已变化，请刷新后重试');
     const requestedAgent = config?.agentProvider === undefined || config.agentProvider === record.config.agentProvider
       ? modelAgentProvider(record) : config.agentProvider;
     if (config?.provider !== undefined && !PROVIDERS.includes(config.provider)) {
@@ -948,7 +958,7 @@ export function createChatService({
       const capabilities=modelRuntime.modelCapabilities(nextConfig.modelProvider,nextConfig.model);
       if (!capabilities?.reasoning?.levels?.includes(nextConfig.reasoning)) throw chatError('MODEL_REASONING_UNSUPPORTED','当前模型未声明支持所选推理强度');
     }
-    const nativeSelectionRequested = Boolean(record.dshSessionId && externalAgent(requestedAgent)
+    const nativeSelectionRequested = Boolean(externalAgent(requestedAgent)
       && ['model', 'reasoning', 'modelProvider'].some(key => config[key] !== undefined));
     const modelConfigChanged = nativeSelectionRequested || nextConfig.model !== previousConfig.model
       || nextConfig.reasoning !== previousConfig.reasoning
@@ -1174,6 +1184,26 @@ export function createChatService({
       }
     }
     if (externalAgent(nextConfig.agentProvider) && modelConfigChanged && !agentProviderChanged) {
+      if(!record.taskId&&!record.dshSessionId) {
+        const revision=record.configurationRevision;
+        const observed=await readNativeCatalog(nextConfig.agentProvider);
+        assertConfigurationOwner(record,state);
+        if(record.configurationRevision!==revision||record.taskId||record.dshSessionId)throw chatError('CONFIG_CONFLICT','配置归属已变化，请刷新后重试');
+        if(!observed?.catalog)throw chatError('AGENT_MODEL_SESSION_REQUIRED','当前 Agent 未提供可用的无会话模型目录');
+        if(expectedRevision!==revision)throw chatError('CONFIG_CONFLICT','请基于当前会话配置版本保存下一次请求');
+        if(catalogIdentity!==observed.catalog.connectionIdentity)throw chatError('AGENT_RUNTIME_CHANGED','Agent 连接已变化，请刷新目录后重新选择');
+        const target=observed.model?.options.find(option=>option.value===nextConfig.model);
+        const choices=target?.reasoningOptions;
+        const effort=config.reasoning!==undefined?config.reasoning||null:target?.defaultReasoningEffort??null;
+        if(!target||!Array.isArray(choices)||choices.length&&!choices.some(option=>option.value===effort)||!choices.length&&effort!==null
+          ||nextConfig.modelProvider)throw chatError('AGENT_MODEL_UNSUPPORTED','请选择当前原生目录声明的完整模型与推理组合');
+        nextConfig.reasoning=effort??'';nextConfig.modelProvider=null;
+        const desired={provider:nextConfig.agentProvider,...observed.catalog,selection:{model:target.value,reasoningEffort:effort,modelProvider:null}};
+        writeConfiguration(record,state,{...record,config:nextConfig,nativeDesiredConfiguration:desired,pendingConfiguration:null,
+          configurationRevision:revision+1,updatedAt:now(),configuration:{changeId:crypto.randomUUID(),application:'requires-new-session',runtime:'not-applied',at:now()}});
+        onEvent?.({event:'chat.updated',data:{sessionId:record.id,status:'configuration-changed'}});
+        return publicSession(record);
+      }
       throw chatError('AGENT_MODEL_SESSION_REQUIRED', 'Agent 会话尚未连接，模型配置需先由运行时确认');
     }
     // Managed configuration is a persisted next-turn request, not a native ACK.
@@ -1295,6 +1325,14 @@ export function createChatService({
     return value;
   }
 
+  async function readNativeCatalog(provider) {
+    if(typeof agentExecute!=='function')return null;
+    const observed=await agentExecute({method:'agent.modelCatalog',params:{provider}});
+    const control=projectAgentModelControl(observed?.modelControl);
+    if(observed?.supported!==true||!control||!/^[a-f0-9]{64}$/.test(observed.connectionIdentity??''))return null;
+    return {...control,catalog:{connectionIdentity:observed.connectionIdentity,source:observed.source,runtimeVersion:observed.runtimeVersion}};
+  }
+
   async function catalog({ refresh = false, id } = {}) {
     const record = id ? sessionOrThrow(id) : null;
     const nativeProvider = externalAgent(modelAgentProvider(record)) ? modelAgentProvider(record) : null;
@@ -1303,7 +1341,7 @@ export function createChatService({
       try {
         const observed = record.dshSessionId && typeof agentExecute === 'function'
           ? await agentExecute({method:'agent.status',params:{provider:record.runtimeProvider || nativeProvider,sessionId:record.dshSessionId}}) : null;
-        modelControl = projectAgentModelControl(observed?.modelControl);
+        modelControl = observed?projectAgentModelControl(observed.modelControl):!record.taskId?await readNativeCatalog(nativeProvider):null;
       } catch { /* Discovery cannot invent or replace the last confirmed selection. */ }
       modelControl ??= {status:'unknown',source:null,runtimeVersion:null,application:null,selection:null,model:null,reasoning:null};
     }
@@ -1362,6 +1400,10 @@ export function createChatService({
       catch (error) {
         if (!['MODEL_NO_ENABLED_MODELS', 'MODEL_PROVIDER_KEY_MISSING'].includes(error?.code)) throw error;
         modelAvailabilityError = '暂无启用且已配置的模型，请在模型与服务设置中启用或恢复连接';
+      }
+      const selectedCatalog = modelProviders.find(provider => provider.id === defaultModelProvider);
+      if (selectedCatalog?.catalogState === 'error') {
+        modelAvailabilityError = '当前默认模型目录读取失败，请刷新目录或检查连接设置';
       }
     }
     const modelProviderBase = {
@@ -2353,6 +2395,27 @@ export function createChatService({
     const turn = state.turn;
     const controller = new AbortController();
     const operation = { controller, providerId: record.config.agentProvider ?? 'cetamesh', kind: 'platform-route', requestId: turn?.requestId };
+    const desired=projectNativeDesiredConfiguration(record.nativeDesiredConfiguration),desiredRevision=record.configurationRevision;
+    let desiredAck=null;
+    const assertDesiredOwner=()=>{
+      if(controller.signal.aborted||state.turn!==turn||record.archived||closePromise||sessions.get(record.id)!==record
+        || record.configurationRevision!==desiredRevision||record.config.agentProvider!==desired?.provider
+        || JSON.stringify(record.nativeDesiredConfiguration)!==JSON.stringify(desired))throw chatError('AGENT_RUNTIME_CHANGED','下一次请求的配置或会话归属已变化');
+    };
+    const checkDesiredCatalog=async()=>{
+      assertDesiredOwner();const control=await readNativeCatalog(desired.provider);assertDesiredOwner();
+      if(control?.catalog?.connectionIdentity!==desired.connectionIdentity)throw chatError('AGENT_RUNTIME_CHANGED','Agent 连接已变化，请刷新模型目录后重新保存选择');
+    };
+    const beforeAgentSend=desired?async binding=>{
+      await checkDesiredCatalog();
+      const control=projectAgentModelControl(binding.modelControl),selection=control?.selection;
+      if(binding.provider!==desired.provider||!binding.taskId||binding.taskId!==record.taskId||!binding.sessionId
+        ||control?.status!=='available'||control.application!=='runtime-confirmed'||selection?.model!==desired.selection.model
+        ||(selection?.reasoningEffort??null)!==desired.selection.reasoningEffort
+        ||desired.selection.modelProvider!==null&&selection?.modelProvider!==desired.selection.modelProvider)
+        throw chatError('MODEL_ACK_MISMATCH','原生会话尚未确认本次请求的完整模型配置');
+      assertDesiredOwner();desiredAck={...binding,modelControl:control};return assertDesiredOwner;
+    }:undefined;
     state.modelTurn = operation;
     if (turn) {
       turn.state = 'starting';
@@ -2370,12 +2433,13 @@ export function createChatService({
     };
     const done = (async () => {
       try {
+        if(desired)await checkDesiredCatalog();
         const refs=(readHistory(record.id).findLast(m=>m.role==='user')?.attachmentRefs??[]).filter(r=>r.kind!=='image').map(r=>({ref:r.ref,name:r.name,kind:r.kind,size:r.size,scope:{sessionId:record.id,workspaceId:record.config.workspaceId??null}}));
         const referenceManifest=refs.length?'\n[CetaMesh 本机附件引用清单；不包含文件正文，也不授予读取权限。只有当前 Task/Workspace 获授权的 attachment.read 可按需读取文本；ZIP 需要 Owner 批准导入。]\n'+JSON.stringify(refs):'';
         const routePromise = Promise.resolve().then(() => platformRoute({ decision: routing, record, text: promptText+referenceManifest, sourceText: sourceText ?? promptText,
           attachmentManifest:refs,
           requestId: operation.requestId,
-          signal: controller.signal }));
+          signal: controller.signal,beforeAgentSend }));
         // A provider may finish creating a Session after the Chat has been cancelled.
         routePromise.then(result => controller.signal.aborted ? cancelReturnedSession(result) : undefined).catch(() => {});
         let abortListener;
@@ -2395,6 +2459,9 @@ export function createChatService({
           record.dshSessionId = String(result.sessionId);
           record.runtimeProvider = String(result.provider);
           if (result.taskId) record.taskId = String(result.taskId);
+          if(desiredAck&&desiredAck.provider===result.provider&&desiredAck.sessionId===result.sessionId&&desiredAck.taskId===result.taskId) {
+            record.configuration={...record.configuration,application:'runtime-confirmed',runtime:'confirmed',at:now()};
+          }
           saveStore();
           if (state.turn === turn) {
             state.turn.agentAcked = true;

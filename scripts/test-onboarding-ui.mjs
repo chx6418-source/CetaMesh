@@ -16,6 +16,8 @@ import { createProviderSecrets } from '../src/providers/secrets.js';
 import { createSettingsService } from '../src/settings/index.js';
 import { createSuiteSandbox, finalizeSuiteSandbox } from '../src/testing/suite-sandbox.js';
 import { terminateSuiteProcessTree } from '../src/testing/suite-process.js';
+import { createCetaMeshServices } from '../src/app/service-container.js';
+import { createModelConfiguration } from '../src/model/configuration.js';
 
 const uiRoot = path.resolve(import.meta.dirname, '../desktop-ui');
 const require = createRequire(path.join(uiRoot, 'package.json'));
@@ -47,6 +49,16 @@ function fixture(name) {
   return value;
 }
 
+function currentCoreFixture(name) {
+  const dataRoot = path.join(sandbox.root, name), stateDir = path.join(dataRoot, 'state');
+  const core = createCetaMeshServices({ dataRoot, stateDir, sourceRoot: dataRoot, resourceRoot: dataRoot, deferOptionalStart: true });
+  const value = { dataRoot, stateDir, core, providerSecrets: core.providerSecrets, settings: core.settingsService,
+    modelRuntime: core.modelRuntime, modelConfiguration: core.modelConfiguration,
+    chatService: core.chatService, onboarding: core.onboardingService, ui: core.desktopUiService };
+  fixtures.push(value);
+  return value;
+}
+
 async function execute(target, method, params = {}) {
   const result = await target.ui.execute({ method, params });
   if (method === 'ui.chat.catalog') catalogFacts.push({ refresh: params.refresh === true,
@@ -69,7 +81,9 @@ try {
         for await (const chunk of request) { body += chunk; if (body.length > 16_384) throw Error('fixture request too large'); }
         const input = JSON.parse(body);
         assert.ok(['ui.onboarding.status', 'ui.onboarding.start', 'ui.onboarding.completeStep', 'ui.onboarding.skipStep',
-          'ui.onboarding.testProvider', 'ui.onboarding.setModel', 'ui.onboarding.finish', 'ui.chat.catalog'].includes(input.method));
+          'ui.onboarding.testProvider', 'ui.onboarding.setModel', 'ui.onboarding.finish', 'ui.chat.catalog',
+          'ui.models.configuration.get', 'ui.models.configuration.discover', 'ui.models.configuration.commit',
+          'ui.models.configuration.edit', 'ui.models.configuration.update'].includes(input.method));
         // Record only non-secret routing facts; never retain API-key inputs or headers.
         calls.push({ method: input.method, ...(input.params.provider ? { provider: input.params.provider } : {}),
           ...(input.method === 'ui.chat.catalog' ? { refresh: input.params.refresh === true } : {}) });
@@ -85,7 +99,7 @@ try {
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
   const url = 'http://127.0.0.1:' + server.address().port, baseUrl = url + '/models-api';
 
-  // Independent Core witness establishes the exact stale DTO before exercising the real page.
+  // Independent Core witness verifies that new credential identity invalidates a prior empty catalog.
   const witness = fixture('cache-witness');
   const before = await execute(witness, 'ui.chat.catalog');
   assert.equal(before.modelProviders.find(row => row.id === selectedProvider).configured, false);
@@ -95,15 +109,15 @@ try {
   assert.equal(tested.ok, true); assert.equal(tested.inferencing, null, 'catalog validation is not inference');
   assert.equal(witness.modelRuntime.hasKey(selectedProvider), true, 'successful candidate credentials are actually persisted');
   const cached = await execute(witness, 'ui.chat.catalog');
-  assert.deepEqual(cached.modelProviders.find(row => row.id === selectedProvider).models, []);
-  assert.equal(cached.modelProviders.find(row => row.id === selectedProvider).configured, false,
-    'ordinary catalog reads retain the pre-configuration cache during its TTL');
+  assert.deepEqual(cached.modelProviders.find(row => row.id === selectedProvider).models.map(row => row.id), [syntheticModel]);
+  assert.equal(cached.modelProviders.find(row => row.id === selectedProvider).configured, true,
+    'credential changes invalidate the prior unconfigured catalog immediately');
   const fresh = await execute(witness, 'ui.chat.catalog', { refresh: true });
   assert.deepEqual(fresh.modelProviders.find(row => row.id === selectedProvider).models.map(row => row.id), [syntheticModel]);
   assert.equal(fresh.modelProviders.find(row => row.id === selectedProvider).configured, true);
-  console.log('PASS real Core witness: saved credentials + stale configured:false/models:[] DTO; explicit catalog refresh returns the local model');
+  console.log('PASS real Core witness: saved credentials invalidate the prior empty catalog; explicit refresh preserves the current local model');
 
-  activeFixture = fixture('production-page');
+  activeFixture = currentCoreFixture('production-page');
   const { build } = require('esbuild');
   const bundle = await build({ stdin: { resolveDir: uiRoot, loader: 'tsx', contents: `
     import React from 'react';import{createRoot}from'react-dom/client';import{OnboardingPage}from'./src/app/HarborApp';
@@ -114,9 +128,7 @@ try {
     window.ipc={postMessage(raw){fetch('/rpc',{method:'POST',headers:{'content-type':'application/json'},body:raw})
       .then(response=>response.json()).then(reply=>window.__cetameshReceive(reply));}};
     createRoot(document.getElementById('root')).render(<OnboardingPage onComplete={async()=>{window.fixtureCompleted++;}}/>);
-  ` }, bundle: true, write: false, outfile: 'fixture.js', format: 'iife', platform: 'browser', jsx: 'automatic',
-    plugins: [{ name: 'production-onboarding-export', setup(build) { build.onLoad({ filter: /[\\/]HarborApp\.tsx$/ }, args => ({
-      contents: fs.readFileSync(args.path, 'utf8') + '\nexport {OnboardingPage};', loader: 'tsx', resolveDir: path.dirname(args.path) })); } }] });
+  ` }, bundle: true, write: false, outfile: 'fixture.js', format: 'iife', platform: 'browser', jsx: 'automatic' });
   js = bundle.outputFiles.find(file => file.path.endsWith('.js')).text;
   css = bundle.outputFiles.find(file => file.path.endsWith('.css')).text;
   const edge = path.join(process.env['ProgramFiles(x86)'] || 'C:/Program Files (x86)', 'Microsoft/Edge/Application/msedge.exe');
@@ -148,44 +160,50 @@ try {
     const until = async (expression, label) => { for (let i = 0; i < 100; i++) { if (await evaluate(expression)) return; await delay(40); }
       throw Error('Timed out: ' + label + ' ' + JSON.stringify(await evaluate('({text:document.body.innerText.slice(0,1600),errors:window.fixtureErrors})'))); };
     const click = label => evaluate('Array.from(document.querySelectorAll("button")).find(button=>button.textContent===' + JSON.stringify(label) + ')?.click()');
-    const choose = async (label, option) => { await evaluate('document.querySelector(' + JSON.stringify('button[aria-label="' + label + '"]') + ')?.click()');
-      await until('Array.from(document.querySelectorAll("[role=option]")).some(row=>row.textContent===' + JSON.stringify(option) + ')', 'available option ' + option);
-      await click(option); };
-    const input = async (label, value) => { await evaluate('document.querySelector(' + JSON.stringify('input[aria-label="' + label + '"]') + ').focus()');
-      await rpc('Input.insertText', { text: value }, sessionId); };
+    const input = async (label, value) => {
+      const selector = JSON.stringify('input[aria-label="' + label + '"]');
+      await until('(()=>{const input=document.querySelector('+selector+');return !!input?.checkVisibility()&&!input.disabled;})()', 'visible editable field ' + label);
+      await evaluate('(()=>{const input=document.querySelector('+selector+');input.focus();input.select();if(document.activeElement!==input)throw Error("Input focus failed: "+'+JSON.stringify(label)+');})()');
+      await rpc('Input.insertText', { text: value }, sessionId);
+    };
     const shot = async name => { if (!evidence) return; fs.mkdirSync(evidence, { recursive: true });
       const result = await rpc('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true }, sessionId);
       fs.writeFileSync(path.join(evidence, name + '.png'), Buffer.from(result.data, 'base64')); };
 
     await rpc('Page.navigate', { url }, sessionId);
     await until('document.body.innerText.includes("继续设置")', 'first-run welcome');
-    await click('继续设置'); await until('!!document.querySelector("input[aria-label=\\"API Key\\"]")', 'provider input');
-    await choose('模型服务商', selectedProvider);
-    await input('API Key', 'synthetic-invalid-key'); await input('服务商 Base URL（可选）', baseUrl);
-    await click('保存并测试连接'); await until('/无效|无权限/.test(document.querySelector(".connection-result")?.textContent||"")', 'failed candidate authentication');
+    await click('继续设置');
+    await until('Array.from(document.querySelectorAll("button")).some(row=>row.textContent==="添加模型连接"&&!row.disabled)', 'current model configuration panel');
+    await click('添加模型连接');
+    await input('连接名称', 'Local synthetic provider');
+    await evaluate('(()=>{const field=document.querySelector("select[aria-label=\\"模型服务类型\\"]");field.value="openai-compatible-v1";field.dispatchEvent(new Event("change",{bubbles:true}));})()');
+    await until('document.querySelector("select[aria-label=\\"模型服务类型\\"]")?.value==="openai-compatible-v1"', 'selected model protocol');
+    await evaluate('document.querySelector("[data-model-connection-advanced] summary").click()');
+    await until('document.querySelector("[data-model-connection-advanced]")?.open===true', 'advanced connection fields');
+    await input('连接标识', selectedProvider);
+    await input('模型 API Key', 'synthetic-invalid-key'); await input('模型服务地址', baseUrl);
+    await click('测试并保存连接'); await until('!!document.querySelector("form[aria-label=\\"模型连接表单\\"] [role=alert]")', 'failed candidate authentication');
+    assert.ok(providerRequests.some(row => row.authenticated === false), 'the failed candidate reaches the controlled endpoint and is rejected there');
     assert.equal(activeFixture.modelRuntime.hasKey(selectedProvider), false, 'failed candidate does not save a credential');
     assert.equal(activeFixture.onboarding.status().currentStepId, 'provider', 'failed authentication does not advance setup');
-    assert.equal(await evaluate('document.querySelector("input[aria-label=\\"API Key\\"]").value'), '', 'candidate key is cleared after submit');
-    await input('API Key', syntheticKey); await click('保存并测试连接');
-    await until('!!document.querySelector("button[aria-label=\\"默认模型服务商\\"]")', 'default-model step');
+    assert.equal(await evaluate('document.querySelector("input[aria-label=\\"模型 API Key\\"]").value'), '', 'candidate key is cleared after submit');
+    await input('模型 API Key', syntheticKey); await click('测试并保存连接');
+    await until('Array.from(document.querySelectorAll("button")).some(row=>row.textContent==="使用已选默认模型继续"&&!row.disabled)', 'default-model step');
     await shot('model-step');
     assert.equal(activeFixture.onboarding.status().currentStepId, 'model');
     assert.equal(activeFixture.modelRuntime.hasKey(selectedProvider), true);
-    assert.equal(await evaluate('document.querySelector("button[aria-label=\\"默认模型服务商\\"]").textContent'), 'Local synthetic provider',
-      'successful configuration must immediately expose the explicitly chosen provider instead of the stale placeholder');
-    assert.equal(await evaluate('!!document.querySelector("button[aria-label=\\"默认模型\\"]")'), true,
-      'real refreshed Core catalog must populate the model selector');
-    assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).find(row=>row.textContent==="保存默认模型").disabled'), true,
-      'a model choice is still required; authentication does not silently select a model');
-    await choose('默认模型服务商', '选择服务商');
-    assert.equal(await evaluate('Array.from(document.querySelectorAll("button")).find(row=>row.textContent==="保存默认模型").disabled'), true);
-    await choose('默认模型服务商', 'Local synthetic provider');
-    await choose('默认模型', syntheticModel);
-    await until('Array.from(document.querySelectorAll("button")).some(row=>row.textContent==="保存默认模型"&&!row.disabled)', 'explicit selected model can save');
-    assert.notEqual(activeFixture.settings.store.get().settings.models.defaultModel, syntheticModel, 'selection is not persistence');
-    await click('保存默认模型'); await until('document.body.innerText.includes("稍后设置")', 'saved model advances setup');
-    assert.equal(activeFixture.settings.store.get().settings.models.provider, selectedProvider);
-    assert.equal(activeFixture.settings.store.get().settings.models.defaultModel, syntheticModel);
+    assert.equal(await evaluate('document.body.innerText.includes("Local synthetic provider")'), true, 'successful configuration exposes the chosen connection');
+    const defaultButton = 'button[aria-label="设为默认模型 ' + syntheticModel + '"]';
+    const enableButton = 'button[aria-label="启用模型 ' + syntheticModel + '"]';
+    assert.equal(await evaluate('document.querySelector('+JSON.stringify(defaultButton)+').disabled'), true, 'discovery does not automatically enable or select the model');
+    await evaluate('document.querySelector('+JSON.stringify(enableButton)+').click()');
+    await until('document.querySelector('+JSON.stringify(defaultButton)+')?.disabled===false', 'explicitly enabled model can be selected');
+    assert.notEqual(activeFixture.modelConfiguration.get().defaults.model, syntheticModel, 'enabling a model does not silently make it the default');
+    await evaluate('document.querySelector('+JSON.stringify(defaultButton)+').click()');
+    await until('document.body.innerText.includes("全局默认")', 'explicit default selection is saved');
+    await click('使用已选默认模型继续'); await until('document.body.innerText.includes("稍后设置")', 'saved model advances setup');
+    assert.equal(activeFixture.modelConfiguration.get().defaults.provider, selectedProvider);
+    assert.equal(activeFixture.modelConfiguration.get().defaults.model, syntheticModel);
     await click('稍后设置'); await until('document.body.innerText.includes("Plugins 页面完成")', 'optional integration');
     await click('稍后设置'); await until('document.body.innerText.includes("完成并进入 Chat")', 'ready to finish');
     await click('完成并进入 Chat'); await until('window.fixtureCompleted===1', 'setup complete callback');
@@ -193,7 +211,9 @@ try {
     const reloadedSettings = createSettingsService({ stateDir: activeFixture.stateDir });
     const reloaded = createOnboardingService({ stateDir: activeFixture.stateDir, settingsService: reloadedSettings, modelRuntime: activeFixture.modelRuntime });
     assert.equal(reloaded.status().status, 'completed');
-    assert.equal(reloadedSettings.store.get().settings.models.defaultModel, syntheticModel, 'default survives service restart');
+    const reloadedConfiguration = createModelConfiguration({ settingsStore: reloadedSettings.store,
+      secrets: activeFixture.providerSecrets, registry: activeFixture.core.modelRegistry });
+    assert.equal(reloadedConfiguration.get().defaults.model, syntheticModel, 'default survives service restart');
     assert.equal(activeFixture.modelRuntime.hasKey('openai'), false, 'the other account remains unconfigured');
     assert.ok(providerRequests.every(row => row.method === 'GET'), 'onboarding never performs inference');
     assert.deepEqual(await evaluate('window.fixtureErrors'), []);
@@ -209,6 +229,10 @@ try {
   if (socket) socket.close();
   if (browser) await terminateSuiteProcessTree(browser, { timeoutMs: 5000 }).catch(() => {});
   if (server) await new Promise(resolve => server.close(resolve));
-  for (const value of fixtures) await value.chatService.close();
+  for (const value of fixtures) {
+    if (value.core) {
+      for (const name of ['autonomousHandoff', 'chatService', 'agentService', 'managedAgent', 'capabilityService', 'extensionService']) await value.core[name].close();
+    } else await value.chatService.close();
+  }
   finalizeSuiteSandbox({ sandbox, failed, keepFailed: failed });
 }

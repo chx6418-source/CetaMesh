@@ -2,6 +2,7 @@ import {PERMISSIONS,FORBIDDEN_PERMISSIONS,RISK_RANK,capabilityError} from './typ
 import {requestFingerprint} from './approval.js';
 import path from 'node:path';
 import {resolveInside} from '../workspace/boundary.js';
+import {assertIsolatedChildCapability} from './isolated-child-policy.js';
 export function createCapabilityPolicy({resolveWorkspace,resolveTask,resolveGrants,isTaskHandoff=()=>false,checkOperation=()=>{}}={}){
  return {authorize:function authorize(request,entry){
   if(request.constrainedActor){
@@ -31,6 +32,7 @@ export function createCapabilityPolicy({resolveWorkspace,resolveTask,resolveGran
    if(actor.kind==='agent'&&isTaskHandoff(request.taskId))throw capabilityError('TASK_HANDOFF_IN_FLIGHT','Task Handoff has not committed the target Agent authority');
    const task=resolveTask?.(request.taskId);
    if(!task)throw capabilityError('TASK_NOT_AUTHORIZED','Assigned Task required');
+   assertIsolatedChildCapability(task,request,entry,resolveWorkspace);
    if(task.parentTaskId && task.childContract?.mode==='read-only'){
     const childRead=entry.id==='filesystem.read'||entry.id==='filesystem.search';
     const ownerReviewRead=actor.kind==='owner' && (entry.id==='git.status'||entry.id==='git.diff');

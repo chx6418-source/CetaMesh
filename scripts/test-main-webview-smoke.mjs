@@ -8,14 +8,21 @@ import { createSuiteSandbox, finalizeSuiteSandbox } from '../src/testing/suite-s
 const sandbox = createSuiteSandbox({ suiteId: 'main-webview-live' });
 let failed = true;
 try {
-  const report = path.join(sandbox.root, 'result.txt');
-  const binary = path.resolve('desktop-shell/target/debug/whalebridge-desktop.exe');
-  const run = spawnSync(binary, [`--main-webview-smoke=${report}`], { encoding: 'utf8', timeout: 30000, windowsHide: true });
+  const binary = path.resolve(process.env.CARGO_TARGET_DIR || 'desktop-shell/target', 'debug/whalebridge-desktop.exe');
+  for (const flag of ['main-webview-smoke', 'chat-caption-smoke', 'caption-wallpaper-smoke']) {
+  const report = path.join(sandbox.root, `${flag}.txt`);
+  const run = spawnSync(binary, [`--${flag}=${report}`], { encoding: 'utf8', timeout: 30000, windowsHide: true,
+    env: { ...process.env, CETAMESH_TEST_CAPTION_BACKDROP: flag === 'caption-wallpaper-smoke' ? '1' : '0' } });
   assert.equal(run.error, undefined, run.error?.message);
   assert.equal(run.status, 0, run.stderr);
   const result = fs.readFileSync(report, 'utf8');
   console.log(result);
+  if (process.env.WHALEBRIDGE_NATIVE_CAPTURE_DIR) {
+    fs.mkdirSync(process.env.WHALEBRIDGE_NATIVE_CAPTURE_DIR, { recursive: true });
+    fs.copyFileSync(report, path.join(process.env.WHALEBRIDGE_NATIVE_CAPTURE_DIR, `${flag}.txt`));
+  }
   assert.match(result, /^PASS /);
+  }
   failed = false;
 } finally {
   // Only clean this suite's owned profiles, after asynchronous WebView2 shutdown.

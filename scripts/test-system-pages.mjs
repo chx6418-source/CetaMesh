@@ -159,7 +159,10 @@ try {
   equal('版本比较：忽略 build metadata', compareVersions('1.0.0+build.5', '1.0.0'), 0);
   equal('版本比较：数字标识小于字母标识', compareVersions('1.0.0-1', '1.0.0-alpha'), -1);
 
-  const checker = createUpdateChecker({ currentVersion: pkg.version, fetchImpl: fetchOnce(makeManifest()) });
+  // Keep this signed 1.0.0 fixture newer than its fixed test installation;
+  // product version changes are independently checked by the About assertions.
+  const fixtureCurrentVersion = '1.0.0-rc.2';
+  const checker = createUpdateChecker({ currentVersion: fixtureCurrentVersion, fetchImpl: fetchOnce(makeManifest()) });
   equal('更新能力边界：不下载、不执行', [checker.capabilities().canDownload, checker.capabilities().canExecuteInstaller], [false, false]);
   check('更新器没有 download/execute/install 入口',
     !('download' in checker) && !('execute' in checker) && !('install' in checker) && !('run' in checker));
@@ -181,18 +184,18 @@ try {
 
   const tampered = makeManifest();
   tampered.version = '9.9.9';
-  const badSig = await createUpdateChecker({ currentVersion: pkg.version, fetchImpl: fetchOnce(tampered) })
+  const badSig = await createUpdateChecker({ currentVersion: fixtureCurrentVersion, fetchImpl: fetchOnce(tampered) })
     .check({ manifestUrl: 'https://example.com/m.json', pinnedPublicKey, channel: 'stable', allowedHosts: ALLOWED_HOSTS });
   check('被篡改的清单 -> 签名失败', badSig.ok === false && badSig.code === 'SIGNATURE_INVALID', String(badSig.code));
 
   const otherKey = crypto.generateKeyPairSync('ed25519');
   const foreign = makeManifest();
   foreign.signature = signManifest(foreign, otherKey.privateKey.export({ type: 'pkcs8', format: 'pem' }).toString());
-  const foreignSig = await createUpdateChecker({ currentVersion: pkg.version, fetchImpl: fetchOnce(foreign) })
+  const foreignSig = await createUpdateChecker({ currentVersion: fixtureCurrentVersion, fetchImpl: fetchOnce(foreign) })
     .check({ manifestUrl: 'https://example.com/m.json', pinnedPublicKey, channel: 'stable', allowedHosts: ALLOWED_HOSTS });
   check('他人私钥签名的清单 -> 签名失败', foreignSig.ok === false && foreignSig.code === 'SIGNATURE_INVALID', String(foreignSig.code));
 
-  const untrustedHost = await createUpdateChecker({ currentVersion: pkg.version, fetchImpl: fetchOnce(makeManifest()) })
+  const untrustedHost = await createUpdateChecker({ currentVersion: fixtureCurrentVersion, fetchImpl: fetchOnce(makeManifest()) })
     .check({ manifestUrl: 'https://example.com/m.json', pinnedPublicKey, channel: 'stable', allowedHosts: ['other.example'] });
   check('下载主机不在允许列表 -> 拒绝', untrustedHost.ok === false && untrustedHost.code === 'DOWNLOAD_HOST_NOT_ALLOWED', String(untrustedHost.code));
 
@@ -200,33 +203,33 @@ try {
     .check({ manifestUrl: 'https://example.com/m.json', pinnedPublicKey, channel: 'stable', allowedHosts: ALLOWED_HOSTS });
   equal('版本更高时无更新', [upToDate.ok, upToDate.updateAvailable, upToDate.reason], [true, false, 'UP_TO_DATE']);
 
-  const channelMiss = await createUpdateChecker({ currentVersion: pkg.version, fetchImpl: fetchOnce(makeManifest({ channel: 'beta' })) })
+  const channelMiss = await createUpdateChecker({ currentVersion: fixtureCurrentVersion, fetchImpl: fetchOnce(makeManifest({ channel: 'beta' })) })
     .check({ manifestUrl: 'https://example.com/m.json', pinnedPublicKey, channel: 'stable', allowedHosts: ALLOWED_HOSTS });
   equal('通道不匹配', [channelMiss.updateAvailable, channelMiss.reason], [false, 'CHANNEL_MISMATCH']);
 
   const insecureUrl = makeManifest({ downloadUrl: 'http://github.com/x.exe' });
-  const insecureDownload = await createUpdateChecker({ currentVersion: pkg.version, fetchImpl: fetchOnce(insecureUrl) })
+  const insecureDownload = await createUpdateChecker({ currentVersion: fixtureCurrentVersion, fetchImpl: fetchOnce(insecureUrl) })
     .check({ manifestUrl: 'https://example.com/m.json', pinnedPublicKey, channel: 'stable', allowedHosts: ALLOWED_HOSTS });
   check('下载地址必须 https', insecureDownload.ok === false && insecureDownload.code === 'MANIFEST_INSECURE_URL', String(insecureDownload.code));
 
-  const badJson = await createUpdateChecker({ currentVersion: pkg.version, fetchImpl: async () => jsonResponse('<html>nope</html>') })
+  const badJson = await createUpdateChecker({ currentVersion: fixtureCurrentVersion, fetchImpl: async () => jsonResponse('<html>nope</html>') })
     .check({ manifestUrl: 'https://example.com/m.json', pinnedPublicKey, channel: 'stable', allowedHosts: ALLOWED_HOSTS });
   check('非法 JSON -> BODY_INVALID', badJson.ok === false && badJson.code === 'BODY_INVALID', String(badJson.code));
 
-  const http500 = await createUpdateChecker({ currentVersion: pkg.version, fetchImpl: async () => jsonResponse('{}', 500) })
+  const http500 = await createUpdateChecker({ currentVersion: fixtureCurrentVersion, fetchImpl: async () => jsonResponse('{}', 500) })
     .check({ manifestUrl: 'https://example.com/m.json', pinnedPublicKey, channel: 'stable', allowedHosts: ALLOWED_HOSTS });
   check('非 2xx -> HTTP_ERROR', http500.ok === false && http500.code === 'HTTP_ERROR', String(http500.code));
 
   // ── 5. Update：网络异常不影响主应用 ──────────────────────────────────
   const failingFetch = async () => { throw new Error('getaddrinfo ENOTFOUND example.com'); };
-  const netCheck = await createUpdateChecker({ currentVersion: pkg.version, fetchImpl: failingFetch })
+  const netCheck = await createUpdateChecker({ currentVersion: fixtureCurrentVersion, fetchImpl: failingFetch })
     .check({ manifestUrl: 'https://example.com/m.json', pinnedPublicKey, channel: 'stable', allowedHosts: ALLOWED_HOSTS });
   check('网络异常 -> 结构化失败而非抛出', netCheck.ok === false && netCheck.code === 'NETWORK_ERROR', String(netCheck.code));
 
   const timeoutFetch = (url, init) => new Promise((_resolve, reject) => {
     init.signal.addEventListener('abort', () => reject(Object.assign(new Error('aborted'), { name: 'AbortError' })));
   });
-  const timedOut = await createUpdateChecker({ currentVersion: pkg.version, fetchImpl: timeoutFetch, timeoutMs: 60 })
+  const timedOut = await createUpdateChecker({ currentVersion: fixtureCurrentVersion, fetchImpl: timeoutFetch, timeoutMs: 60 })
     .check({ manifestUrl: 'https://example.com/m.json', pinnedPublicKey, channel: 'stable', allowedHosts: ALLOWED_HOSTS, timeout: 60 });
   check('超时 -> TIMEOUT', timedOut.ok === false && timedOut.code === 'TIMEOUT', String(timedOut.code));
 

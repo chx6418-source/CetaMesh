@@ -16,7 +16,7 @@ import { unreviewedTaskEffects } from '../task/recovery-evidence.js';
 import { fitsIpcResponse, requireIpcItem } from '../control/response-budget.js';
 import { LEGACY_RETIRED_TOOLS, isDesktopLocalService } from '../integrations/catalog.js';
 import { projectChatActivityTimeline, projectChatToolActivity } from './chat-activity.js';
-import { chatConfigurationObservations } from './chat-configuration.js';
+import { chatConfigurationObservations,projectNativeDesiredConfiguration } from './chat-configuration.js';
 import { safeModelIdentifier } from '../model/model-discovery.js';
 import { normalizeSkillReferences } from '../context/skill-references.js';
 import { normalizeExperience } from '../memory/experience.js';
@@ -131,7 +131,8 @@ function projectChatConfigurationState(value) {
     durable: value.durable === true,
     runtime: ['not-required', 'not-applied', 'confirmed', 'unknown'].includes(value.runtime) ? value.runtime : 'unknown',
     at: Number.isFinite(value.at) ? value.at : null,
-    errorCode: /^[A-Z][A-Z0-9_]{0,99}$/.test(value.errorCode ?? '') ? value.errorCode : null };
+    errorCode: /^[A-Z][A-Z0-9_]{0,99}$/.test(value.errorCode ?? '') ? value.errorCode : null,
+    ...(projectNativeDesiredConfiguration(value.desired)?{desired:projectNativeDesiredConfiguration(value.desired)}:{}) };
 }
 
 function projectUsage(value) {
@@ -1404,7 +1405,9 @@ export function createDesktopUiService({ services = {}, system = services.system
       for (const key of ['mode', 'modelProvider', 'model', 'agentProvider', 'reasoning', 'workspaceId']) {
         if (Object.hasOwn(input, key)) config[key] = input[key];
       }
-      const result = await chat('chat.config.set', { id: idParam(p), config });
+      const result = await chat('chat.config.set', { id: idParam(p), config,
+        ...(Object.hasOwn(p,'expectedRevision')?{expectedRevision:p.expectedRevision}:{}),
+        ...(Object.hasOwn(p,'catalogIdentity')?{catalogIdentity:p.catalogIdentity}:{}) });
       return projectSession(result);
     },
     'ui.chat.config.reconcile': async p => {
@@ -1430,7 +1433,9 @@ export function createDesktopUiService({ services = {}, system = services.system
         expectedParentRev: p.expectedParentRev, requestId: string(p.requestId, 160),
         goal: string(p.goal, 2000), requirements: p.requirements,
         workspaceId: p.workspaceId ?? parent.workspaceId, contract: p.contract,
-        supersedesChildId: p.supersedesChildId });
+        supersedesChildId: p.supersedesChildId, provisionOperationId: p.provisionOperationId });
+      if(created.childContract?.mode==='isolated-write'&&p.capabilities!==undefined)
+        services.capabilityService.grantTask(created.id,{capabilities:p.capabilities});
       emit('task.updated', { taskId: parent.id, status: parent.status });
       return { task: projectTaskWithUsage(created) };
     },
@@ -1470,7 +1475,7 @@ export function createDesktopUiService({ services = {}, system = services.system
         || services.capabilityService?.recoveryForTask?.(current.id)?.state === 'needs-reconciliation') {
         throw uiError('TASK_EFFECT_UNCONFIRMED', 'Only a settled completed child can be verified');
       }
-      if (current.result?.verification === 'VERIFIED' && current.result.verificationRev === current.rev) {
+      if (current.childContract?.mode!=='isolated-write'&&current.result?.verification === 'VERIFIED' && current.result.verificationRev === current.rev) {
         return { task: projectTaskWithUsage(current) };
       }
       await task('task.child.verify', { id: current.id, expectedRev: current.rev });
@@ -1558,13 +1563,17 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (requested && p.agentProvider && p.agentProvider !== requested) throw uiError('AGENT_SELECTION_CONFLICT', '任务目标与执行者选择不一致，请确认执行者');
       const agentProvider = string(p.agentProvider, 80) || requested || null;
       const requestId = string(p.requestId, 160) || null;
+      if(p.deferStart!==undefined&&typeof p.deferStart!=='boolean')throw uiError('INVALID_TASK_START_MODE','请选择立即启动或先创建任务');
+      const deferStart=p.deferStart===true;
       const collaboration=normalizeTaskCollaboration(p.collaboration);
-      const launchFingerprint=taskLaunchFingerprint(collaboration,{modelProvider:string(p.modelProvider,80),model:string(p.model,160)});
+      if(deferStart&&collaboration?.enabled)throw uiError('TASK_DEFERRED_COLLABORATION','待启动任务暂不授权自动协作；请在启动时确认执行范围');
+      const launchFingerprint=taskLaunchFingerprint(collaboration,{modelProvider:string(p.modelProvider,80),model:string(p.model,160),deferStart});
       const assertLaunch=row=>{if((row.createRequest?.launchFingerprint??null)!==launchFingerprint)throw uiError('TASK_LAUNCH_CONFLICT','相同目标的任务已有不同协作或验收设置；请先查看现有任务');};
       const prior = services.taskService.runtime.findByCreateRequestId({ requestId, goal, requirements,
         workspaceId, requestedAgentProvider: agentProvider, launchFingerprint });
       if (prior) {
         if (prior.status === 'queued' && !prior.currentAgent) {
+          if(deferStart)return {task:projectTaskWithUsage(prior)};
           const inFlight = requestId ? taskCreateDispatches.get(requestId) : null;
           if (inFlight) return { task: projectTaskWithUsage(await inFlight) };
           throw uiError('TASK_DISPATCH_INCOMPLETE', 'Task 已保存但 Agent 派发未确认；请在任务详情核对后启动');
@@ -1575,6 +1584,10 @@ export function createDesktopUiService({ services = {}, system = services.system
       if (existing) {
         assertLaunch(existing);
         if (existing.status === 'queued' && !existing.currentAgent) {
+          if(deferStart){
+            if(requirements.length&&JSON.stringify(requirements)!==JSON.stringify(existing.requirements))throw uiError('TASK_REQUIREMENTS_CONFLICT','Matching active Task has different requirements');
+            return {task:projectTaskWithUsage(existing)};
+          }
           throw uiError('TASK_DISPATCH_INCOMPLETE', '同目标 Task 尚未确认派发；请核对后显式启动');
         }
         if (requirements.length && JSON.stringify(requirements) !== JSON.stringify(existing.requirements)) {
@@ -1587,6 +1600,12 @@ export function createDesktopUiService({ services = {}, system = services.system
           throw uiError('AGENT_PROVIDER_SWITCH_REQUIRES_CONTINUITY', 'Existing Task must switch Agent through Handoff');
         }
         return { task: projectTaskWithUsage(existing) };
+      }
+      if(deferStart){
+        if(workspaceId&&!services.workspaceService.describeWorkspace(workspaceId))throw uiError('WORKSPACE_NOT_FOUND','请选择当前可用的工作区');
+        const queued=services.taskService.runtime.create({goal,requirements,workspaceId,note:string(p.note,1000),requestId,requestedAgentProvider:agentProvider,launchFingerprint});
+        emit('task.updated',{taskId:queued.id,status:queued.status});
+        return {task:projectTaskWithUsage(queued)};
       }
       if (workspaceId) await taskRecovery.releaseWorkspace({ workspaceId });
       const owner = workspaceId && services.taskService.runtime.activeWorkspaceOwner({ workspaceId });
@@ -1650,7 +1669,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       }
       if (p.expectedRev !== undefined && current.rev !== p.expectedRev) throw uiError('TASK_CONFLICT', '任务已被其他操作修改');
       if (current.status !== 'queued') throw uiError('TASK_NOT_QUEUED', '只有待启动任务可以启动；请查看当前任务状态');
-      return { task: projectTaskWithUsage(await runTask(current, { provider: string(p.agentProvider, 80) || undefined,
+      return { task: projectTaskWithUsage(await runTask(current, { provider: string(p.agentProvider, 80) || current.createRequest?.requestedAgentProvider || undefined,
         requestId: string(p.requestId, 160) || undefined,
         modelProvider:string(p.modelProvider,80)||undefined,model:string(p.model,160)||undefined,
         reasoningEffort:p.reasoningEffort===undefined?undefined:boundedText(p.reasoningEffort,'reasoningEffort',40).trim() })) };
@@ -1740,6 +1759,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.workspace.git.overview':p=>workspace('workspace.git.overview',{id:idParam(p)}),
     'ui.workspace.git.index.review': p => workspace('workspace.git.index.review', {id: idParam(p), paths: p.paths}),
+    ...Object.fromEntries(['capture','list','preview','review'].map(action=>['ui.workspace.git.checkpoint.'+action,p=>services.capabilityService.executeWorkspace({method:'workspace.git.checkpoint.'+action,params:{...p,id:idParam(p)}})])),
     'ui.workspace.git.branch.review': p => services.capabilityService.executeWorkspace({method:'workspace.git.branch.review',params:{id:idParam(p),targetBranch:p.targetBranch,mode:p.mode??'clean'}}),
     ...Object.fromEntries(['context', 'status.page', 'history', 'branches', 'commit.detail', 'preview', 'review'].map(action => [
       'ui.workspace.git.' + action, async (p, { signal } = {}) => {
@@ -1751,7 +1771,7 @@ export function createDesktopUiService({ services = {}, system = services.system
       }
     ])),
     'ui.workspace.git.diff':p=>workspace('workspace.git.diff',{id:idParam(p),cached:p.cached===true,...(p.path!==undefined?{path:p.path}:{})}),
-    ...Object.fromEntries(['commit','branch.create','branch.switch','worktree.create','stage','unstage','commit.staged'].map(action=>['ui.workspace.git.'+action,async(p,{signal}={})=>{
+    ...Object.fromEntries(['commit','branch.create','branch.switch','worktree.create','stage','unstage','commit.staged','checkpoint.restore'].map(action=>['ui.workspace.git.'+action,async(p,{signal}={})=>{
       const {id,taskId,operationId,...input}=p;const capability='git.'+action;
       const result=await services.capabilityService.broker.execute({capability,actor:OWNER_ACTOR,approved:false,workspaceId:id,taskId,
         ...(operationId?{operationId}:{}),input,reason:'Owner requested scoped Git action; await explicit approval'},{signal});
@@ -1938,6 +1958,16 @@ export function createDesktopUiService({ services = {}, system = services.system
       const result = await extensions('ext.settings.get', { id });
       return projectExtensionSettingsValues(result, fields);
     },
+    'ui.plugins.engines.list': p => call(services.localEngineService,'engines.list',p,true),
+    'ui.plugins.engines.workbench.open': p => call(services.localEngineService,'engines.workbench.open',{id:'agentos'},true),
+    'ui.plugins.engines.package.review': p => call(services.localEngineService,'engines.package.review',p,true),
+    'ui.plugins.engines.package.cancel': p => call(services.localEngineService,'engines.package.cancel',p,true),
+    'ui.plugins.engines.package.install': async p => {const result=await call(services.localEngineService,'engines.package.install',p,true);emit('plugin.updated',{pluginId:result.id});return result;},
+    'ui.plugins.engines.uninstall': async p => {const result=await call(services.localEngineService,'engines.uninstall',p,true);emit('plugin.updated',{pluginId:result.id});return result;},
+    'ui.plugins.engines.review': p => call(services.localEngineService,'engines.review',p,true),
+    'ui.plugins.engines.enable': p => call(services.localEngineService,'engines.enable',p,true),
+    'ui.plugins.engines.disable': p => call(services.localEngineService,'engines.disable',p,true),
+    'ui.plugins.engines.authorize-task': p => call(services.localEngineService,'engines.authorize-task',p,true),
     'ui.plugins.catalog': async p => {
       const result = await plugins('plugin-center.catalog.list', { query: string(p.query, 200), category: string(p.category, 80), view: ['all', 'installed', 'recommended', 'update-available'].includes(p.view) ? p.view : 'all' });
       return { available: result.available === true, configured: result.configured === true, offline: result.offline === true, reason: string(result.reason ?? result.error, 300) || null, plugins: (result.plugins ?? []).map(projectPlugin) };
@@ -1961,6 +1991,7 @@ export function createDesktopUiService({ services = {}, system = services.system
     },
     'ui.plugins.stage': async p => {
       const result = await plugins('plugin-center.package.stage', { id: idParam(p) });
+      if(result.externalPackageReview)return {externalPackageReview:result.externalPackageReview};
       // The catalog is a discovery hint. Only the validated package's Runtime
       // review identifies content that can use the reference-only shortcut.
       const manifest = record(result.review?.manifest), reviewed = record(result.review?.review);

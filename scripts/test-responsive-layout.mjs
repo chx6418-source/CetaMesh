@@ -22,7 +22,7 @@ try {
   const { SettingsLayout } = await vite.ssrLoadModule('/src/app/SettingsLayout.tsx');
   const fields = '<section class="settings-section"><div class="settings-section-main"><h2>常规行为</h2><div class="settings-fields"><div class="setting-row"><div class="setting-copy"><strong>启动时最小化</strong><small>启动时最小化到托盘</small></div><button class="setting-switch" aria-label="启动时最小化"><span></span></button></div></div><div class="settings-save"><small>更改后点击保存生效</small><button class="cm-button">保存设置</button></div></div></section>';
   const settings = renderToStaticMarkup(React.createElement(SettingsLayout, {items:[{id:'general',label:'常规'},{id:'models',label:'模型'},{id:'extensions',label:'插件与 MCP'}],selected:'general',onChange(){}}, React.createElement('div',{dangerouslySetInnerHTML:{__html:fields}})));
-  const css = ['theme/tokens.css','theme/global.css','app/harbor.css','app/status-presentation.css','app/workspace-sidebar.css','app/settings-layout.css','app/reference-viewer.css'].map(file=>{
+  const css = ['theme/tokens.css','theme/global.css','app/harbor.css','app/status-presentation.css','app/workspace-sidebar.css','app/settings-layout.css','app/reference-viewer.css','app/startup-diagnostics.css'].map(file=>{
     if(process.env.WHALEBRIDGE_LAYOUT_BASELINE==='1') {
       const original=spawnSync('git',['show','HEAD:desktop-ui/src/'+file],{encoding:'utf8'});
       assert.equal(original.status,0,original.stderr);return original.stdout;
@@ -41,12 +41,13 @@ try {
     import React,{useState} from 'react'; import {createRoot} from 'react-dom/client';
     import {WorkspaceSidebar} from './src/app/WorkspaceSidebar';
     import {useResponsiveSidebar} from './src/app/useResponsiveSidebar';
-    function Fixture(){const [page,setPage]=useState('chat');const {collapsed,toggle}=useResponsiveSidebar(page);
+    function Fixture(){const [page,setPage]=useState('chat'),[mode,setMode]=useState('chat'),[revision,refresh]=useState(0);const {collapsed,toggle}=useResponsiveSidebar(page,mode);
+      window.sidebarFixture={setPage,setMode,refresh:()=>refresh(value=>value+1)};
       return <div className={'harbor-shell '+(collapsed?'sidebar-collapsed':'')} data-page={page}>
         <WorkspaceSidebar page={page} workspaces={[{id:'fixture',name:'项目',status:'ready'}]} sessions={[]} activeWorkspaceId="fixture" activeSessionId="" taskCount={0} hostStatus="ready" collapsed={collapsed} onToggle={toggle} onNavigate={setPage} onOpenWorkspace={()=>{}} onOpenSession={()=>{}} onNewSession={()=>{}} onAllSessions={()=>{}} renderSessionActions={()=>null}/>
-        <main className="harbor-main" id="content">Page content</main></div>}
+        <div className="harbor-main" id="content"><main className={'page-frame page-'+page}>Page content</main></div></div>}
     createRoot(document.getElementById('root')).render(<Fixture/>);
-  `},bundle:true,write:false,minify:true,format:'iife',platform:'browser',jsx:'automatic'}).outputFiles[0].text;
+  `},bundle:true,write:false,minify:true,format:'iife',platform:'browser',jsx:'automatic',loader:{'.css':'empty'}}).outputFiles[0].text;
   async function measureLayouts(data) {
     const results=[];
     let closedReferenceRestores=false;
@@ -57,7 +58,7 @@ try {
       const content=entry.page==='settings'?data.settings:entry.page==='agents'?data.agent:entry.page==='about'?data.about:data.plugins;
       const markup='<!doctype html><meta charset="utf-8"><style>'+data.css+'</style>'
         +'<div class="harbor-shell '+(collapsed?'sidebar-collapsed':'')+'"><aside class="harbor-sidebar"></aside><div class="harbor-main">'
-        +'<div class="reference-layout '+(entry.dock?'has-viewer':entry.width-(collapsed?56:316)<640?'narrow show-viewer':'')+'" style="--viewer-width:650px"><div class="reference-chat">'
+        +'<div class="reference-layout '+(entry.dock?'has-viewer':entry.width-(collapsed?48:314)<640?'narrow show-viewer':'')+'" style="--viewer-width:650px"><div class="reference-chat">'
         +'<main class="page-frame page-'+entry.page+'"><div class="content-page '+entry.page+'-page">'+content+'</div></main></div>'
         +(entry.dock?'<div></div><aside></aside>':'')+'</div></div></div>';
       const doc=iframe.contentDocument;doc.open();doc.write(markup);doc.close();
@@ -84,18 +85,45 @@ try {
     const script=doc.createElement('script');script.textContent=data.sidebarBundle;doc.body.append(script);
     await wait();
     const panel=()=>doc.getElementById('workspace-panel');
+    const chat=()=>doc.querySelector('.page-chat');
+    const rail=()=>doc.querySelector('.navigation-rail');
+    const bounds=node=>node.getBoundingClientRect();
+    const rounded=node=>node&&['TopLeft','TopRight','BottomLeft','BottomRight'].every(corner=>parseFloat(iframe.contentWindow.getComputedStyle(node)['border'+corner+'Radius'])>=16);
     const contentLeft=()=>doc.getElementById('content')?.getBoundingClientRect().left;
-    const checks={initial:!panel()&&contentLeft()===56};
+    const checks={initial:!panel()&&contentLeft()===48};
     doc.querySelector('[aria-label="展开工作区列表"]')?.click();await wait();checks.open=!!panel();
-    doc.querySelector('[aria-label="Plugins"]')?.click();await wait();checks.navigate=doc.querySelector('[data-page="plugins"]')!==null&&!panel()&&contentLeft()===56;
-    iframe.style.width='1280px';await wait();doc.querySelector('[aria-label="展开工作区列表"]')?.click();await wait();checks.wide=!!panel()&&contentLeft()===316;
+    const compactRounded=rounded(panel())&&rounded(chat())&&contentLeft()===48&&bounds(panel()).right<=iframe.contentWindow.innerWidth;
+    doc.querySelector('[aria-label="Plugins"]')?.click();await wait();checks.navigate=doc.querySelector('[data-page="plugins"]')!==null&&!panel()&&contentLeft()===48;
+    iframe.style.width='1280px';await wait();doc.querySelector('[aria-label="展开工作区列表"]')?.click();await wait();checks.wide=!!panel()&&contentLeft()===314;
     iframe.style.width='900px';
     // Headless virtual time does not schedule compositor-driven media change events.
     // Deliver that event explicitly; matches still comes from the actual resized viewport.
     for(const media of queries)media.dispatchEvent(new iframe.contentWindow.Event('change'));
-    await wait();checks.resize=!panel()&&contentLeft()===56;
+    await wait();checks.resize=!panel()&&contentLeft()===48;
+    iframe.style.width='1550px';await wait();
+    const api=iframe.contentWindow.sidebarFixture;
+    api.setPage('chat');await wait();checks.chatReturn=!!panel();
+    const expandedChat=bounds(chat());
+    const expandedWorkspace=bounds(panel());
+    const expandedRounded=rounded(panel())&&rounded(chat())&&expandedWorkspace.left>bounds(rail()).right-1&&expandedWorkspace.right<expandedChat.left;
+    const alignedExpansion=expandedWorkspace.width>254&&expandedChat.width>iframe.contentWindow.innerWidth-328
+      &&expandedWorkspace.left-bounds(rail()).right===2&&expandedChat.left-expandedWorkspace.right===4
+      &&expandedWorkspace.top===bounds(doc.getElementById('content')).top+2
+      &&expandedChat.top===expandedWorkspace.top&&expandedChat.bottom===expandedWorkspace.bottom;
+    doc.querySelector('[aria-label="收起工作区列表"]')?.click();await wait();api.refresh();await wait();checks.manualRefresh=!panel();
+    const collapsedRounded=rounded(chat())&&bounds(chat()).left>=bounds(rail()).right&&bounds(chat()).width>expandedChat.width;
+    checks.otherPages=true;
+    for(const page of ['work','memory','agents','plugins','devices','settings','about']){
+      api.setPage('chat');await wait();api.setPage(page);await wait();
+      checks.otherPages&&=!panel()&&contentLeft()===48&&!!doc.querySelector('.navigation-rail');
+      doc.querySelector('[aria-label="展开工作区列表"]')?.click();await wait();api.refresh();await wait();
+      checks.otherPages&&=!!panel();
+    }
+    api.setPage('chat');await wait();checks.modeDefaults=!!panel();
+    for(const mode of ['simulation','project']){api.setMode(mode);await wait();checks.modeDefaults&&=!panel();}
+    api.setMode('chat');await wait();checks.modeDefaults&&=!!panel();
     iframe.remove();
-    document.getElementById('result').textContent=encodeURIComponent(JSON.stringify({rows:results,sidebar:checks,closedReferenceRestores}));
+    document.getElementById('result').textContent=encodeURIComponent(JSON.stringify({rows:results,sidebar:checks,closedReferenceRestores,chatPanels:{compactRounded,expandedRounded,collapsedRounded,alignedExpansion}}));
   }
   const code='('+measureLayouts.toString()+')('+JSON.stringify({css,settings,agent,about,plugins,cases,sidebarBundle}).replaceAll('<','\\u003c')+').catch(error=>document.getElementById("result").textContent="ERROR:"+error.message);';
   new Script(code);
@@ -168,7 +196,7 @@ try {
       assert.ok(!child.pid||child.exitCode!==null||child.signalCode!==null,'owned browser child exited');
     }
   }
-  const {rows,sidebar,closedReferenceRestores}=JSON.parse(decodeURIComponent(encoded));
+  const {rows,sidebar,closedReferenceRestores,chatPanels}=JSON.parse(decodeURIComponent(encoded));
   const failures=[];
   for(const row of rows){
     if(!row.visible||row.overflow>1||!row.controlsInside) failures.push({...row,issue:'page or controls overflow'});
@@ -177,8 +205,9 @@ try {
   }
   console.log(JSON.stringify(failures.length?failures:rows));
   assert.deepEqual(failures,[],'responsive pages and controls fit, settings align left, short Agent cards retain content height');
-  assert.deepEqual(sidebar,{initial:true,open:true,navigate:true,wide:true,resize:true},'mounted real sidebar: compact start, open, navigate, wide reopen and responsive collapse');
+  assert.deepEqual(sidebar,{initial:true,open:true,navigate:true,wide:true,resize:true,chatReturn:true,manualRefresh:true,otherPages:true,modeDefaults:true},'navigation/mode defaults, manual overrides across refresh, rail and compact layout');
   assert.equal(closedReferenceRestores,true,'removing the last narrow reference restores main content');
+  assert.deepEqual(chatPanels,{compactRounded:true,expandedRounded:true,collapsedRounded:true,alignedExpansion:true},'Chat and workspace expand with aligned rounded edges and keep the narrow overlay and collapsed layout');
   failed=false;console.log('PASS 23 real Chromium viewport/pane layouts, overflow and control reachability');
 } finally {
   await vite.close();
