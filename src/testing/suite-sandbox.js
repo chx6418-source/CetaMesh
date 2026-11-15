@@ -14,7 +14,7 @@ function safeSuiteId(value) {
 }
 
 function assertMarkedDirectory(directory, tempRoot, expectedStatus = null) {
-  const root = fs.realpathSync(tempRoot);
+  const root = fs.realpathSync.native(tempRoot);
   const resolved = path.resolve(directory);
   if (path.dirname(resolved) !== root || !path.basename(resolved).startsWith(PREFIX)) {
     throw new Error('test sandbox path is outside its marked Temp root');
@@ -32,7 +32,7 @@ function assertMarkedDirectory(directory, tempRoot, expectedStatus = null) {
 }
 
 function assertOwnedSandbox(sandbox) {
-  const root = fs.realpathSync(sandbox.tempRoot);
+  const root = fs.realpathSync.native(sandbox.tempRoot);
   const resolved = path.resolve(sandbox.root);
   const expectedName = `${PREFIX}${sandbox.runId}`;
   if (path.dirname(resolved) !== root || path.basename(resolved) !== expectedName) {
@@ -134,7 +134,10 @@ function removeMarkedDirectory(directory, tempRoot, expectedStatus) {
 export function createSuiteSandbox({ suiteId, tempRoot = os.tmpdir(), now = new Date().toISOString(), pid = process.pid } = {}) {
   const safeId = safeSuiteId(suiteId);
   const runId = crypto.randomUUID();
-  const root = fs.realpathSync(tempRoot);
+  // The legacy JS implementation preserves Windows 8.3 ancestors. Child suites
+  // also use native/promise realpath for security identities, so inherit their
+  // canonical spelling instead of manufacturing false identity changes.
+  const root = fs.realpathSync.native(tempRoot);
   const directory = path.join(root, `${PREFIX}${runId}`);
   fs.mkdirSync(directory, { recursive: false });
   const marker = { suiteId: safeId, runId, status: 'running', startedAt: now, pid };
