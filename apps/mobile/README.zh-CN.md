@@ -40,7 +40,20 @@ npm run build:android:release
 
 Android CI 会编译并验证 Standalone Release APK，使用一次性测试签名，并上传工作流产物。**CI APK 不等于已经正式签名的公开稳定版本**；不同测试签名之间可能无法覆盖升级。
 
-iOS 原生构建需要 macOS、Xcode 与 CocoaPods；现有 Android 验证不能替代 iOS 验证。
+iOS 原生构建需要 macOS、Xcode 与 Ruby 3.1 或更新版本（依赖 CI 使用 Ruby 3.3）。在 `apps/mobile/` 完成 `npm ci` 后，通过本项目的 Gemfile 安装 CocoaPods：
+
+```sh
+gem install bundler -v 2.6.9
+bundle install
+bundle exec pod --version
+bundle exec ruby scripts/check-ios-ruby-dependencies.rb
+cd ios
+bundle exec pod install
+cd ..
+npm run ios
+```
+
+[iOS Ruby 依赖工作流](../../.github/workflows/ios-dependencies.yml) 在 macOS 上解析 Gemfile、加载 CocoaPods 并检查部分依赖回归；它不编译 iOS 应用，现有 Android 验证也不能替代 iOS 的 Xcode 编译与设备验收。CocoaPods 当前要求 ActiveSupport 低于 8，因此 Gemfile 保留这一兼容边界；这仍未解决 [GHSA-8474-xrp6-wh69](https://github.com/advisories/GHSA-8474-xrp6-wh69)，其已发布修复需要 ActiveSupport 8，后续升级 CocoaPods 时须复查这一上游约束。
 
 ## 隐私与设备授权
 

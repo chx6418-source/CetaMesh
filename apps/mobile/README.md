@@ -41,7 +41,29 @@ npm run build:android:release   # Standalone Release APK + artifact hygiene
 
 The CI pipeline verifies the Release APK's embedded JavaScript bundle, native modules, permissions and signing, then uploads an artifact for that workflow run. CI uses disposable test signing; it is not a publicly signed stable app and may not upgrade over APKs signed with a different key.
 
-For iOS on macOS, install Xcode and CocoaPods dependencies, then run `npm run ios` after native setup. iOS requires its own build and device validation.
+For iOS on macOS, install Xcode and Ruby 3.1 or newer (Ruby 3.3 is used by CI),
+then install CocoaPods through this project's Gemfile:
+
+```sh
+# From apps/mobile, after npm ci
+gem install bundler -v 2.6.9
+bundle install
+bundle exec pod --version
+bundle exec ruby scripts/check-ios-ruby-dependencies.rb
+cd ios
+bundle exec pod install
+cd ..
+npm run ios
+```
+
+The [iOS Ruby dependency workflow](../../.github/workflows/ios-dependencies.yml)
+resolves the Gemfile on macOS, loads CocoaPods and checks selected dependency
+regressions. It does not build the iOS app; iOS still requires its own Xcode
+build and device validation. CocoaPods currently requires ActiveSupport below
+8, so the Gemfile keeps that compatibility boundary. In particular, this does
+not resolve [GHSA-8474-xrp6-wh69](https://github.com/advisories/GHSA-8474-xrp6-wh69),
+whose published fixed versions require ActiveSupport 8. Track that upstream
+dependency constraint when updating CocoaPods.
 
 ## Project conventions
 

@@ -80,5 +80,10 @@
         "CetaNotificationSend": "RCTCetaNotificationSend"
       }
     }
+  },
+  "overrides": {
+    "react-native-markdown-display": {
+      "markdown-it": "14.3.3"
+    }
   }
 }
